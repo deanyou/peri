@@ -581,6 +581,10 @@ impl BaseModel for ChatAnthropic {
     fn model_id(&self) -> &str {
         &self.model
     }
+
+    fn context_window(&self) -> u32 {
+        200_000
+    }
 }
 
 #[async_trait]

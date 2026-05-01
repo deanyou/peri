@@ -216,7 +216,8 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
                     if let Some(ref budget) = self.context_budget {
                         let tracker = state.token_tracker();
                         if let Some(pct_used) = tracker.estimated_context_tokens() {
-                            if budget.should_warn(tracker) {
+                            let should_warn = budget.should_warn(tracker);
+                            if should_warn {
                                 tracing::warn!(
                                     used_tokens = ?tracker.estimated_context_tokens(),
                                     total_tokens = budget.context_window,
@@ -226,7 +227,7 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
                                     "context 接近上限"
                                 );
                             }
-                            if budget.should_warn(tracker) || budget.should_auto_compact(tracker) {
+                            if should_warn || budget.should_auto_compact(tracker) {
                                 if let Some(percentage) =
                                     tracker.context_usage_percent(budget.context_window)
                                 {
@@ -244,7 +245,8 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
                         let total = self.llm.context_window();
                         if let Some(used) = tracker.estimated_context_tokens() {
                             let pct = used as f64 / total as f64 * 100.0;
-                            if pct as u32 >= 80 {
+                            let exceeded = pct as u32 >= 80;
+                            if exceeded {
                                 tracing::warn!(
                                     used_tokens = used,
                                     total_tokens = total,
@@ -253,8 +255,6 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
                                     step,
                                     "context 接近上限"
                                 );
-                            }
-                            if pct as u32 >= 80 {
                                 self.emit(AgentEvent::ContextWarning {
                                     used_tokens: used,
                                     total_tokens: total as u64,
