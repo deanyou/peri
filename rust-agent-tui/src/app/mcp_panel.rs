@@ -1,4 +1,6 @@
-use rust_agent_middlewares::mcp::{ClientStatus, Resource, ServerInfo, Tool};
+use rust_agent_middlewares::mcp::{Resource, ServerInfo, Tool};
+
+use super::AgentEvent;
 
 /// 详情视图中的操作菜单项
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,16 +302,35 @@ impl crate::app::App {
             }
             let name = panel.servers[panel.cursor].name.clone();
             if let Some(pool) = self.mcp_pool.clone() {
+                let tx = self.bg_event_tx.clone();
+                let pool2 = pool.clone();
+                let name2 = name.clone();
+                let tx2 = tx.clone();
+                let oauth_cb: Box<dyn Fn(rust_agent_middlewares::mcp::OAuthFlowEvent) + Send + Sync> =
+                    Box::new(move |ev| {
+                        use rust_agent_middlewares::mcp::OAuthFlowEvent;
+                        if let OAuthFlowEvent::AuthorizationNeeded {
+                            server_name,
+                            authorization_url,
+                            callback_tx,
+                        } = ev
+                        {
+                            let _ = tx2.try_send(AgentEvent::OAuthAuthorizationNeeded {
+                                server_name,
+                                authorization_url,
+                                callback_tx,
+                            });
+                        }
+                    });
                 tokio::spawn(async move {
-                    let _ = pool.reconnect(&name, None).await;
+                    let result = pool2.reconnect(&name2, Some(oauth_cb)).await;
+                    let _ = tx.send(AgentEvent::McpActionCompleted {
+                        server_name: name2,
+                        action: "reconnect".to_string(),
+                        success: result.is_ok(),
+                    });
                 });
             }
-            // 刷新列表以反映重连状态
-            panel.servers = self
-                .mcp_pool
-                .as_ref()
-                .map(|p| p.server_infos())
-                .unwrap_or_default();
         }
     }
 
