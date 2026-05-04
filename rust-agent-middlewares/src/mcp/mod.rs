@@ -15,8 +15,8 @@ pub use client::{
     ServerInfo,
 };
 pub use config::{
-    load_merged_config, remove_server_from_config, ConfigSource, McpConfigError, McpConfigFile,
-    McpServerConfig, OAuthConfig,
+    load_merged_config, remove_server_from_config, set_server_disabled, ConfigSource,
+    McpConfigError, McpConfigFile, McpServerConfig, OAuthConfig,
 };
 pub use middleware::McpMiddleware;
 pub use oauth_flow::{OAuthCallbackResult, OAuthFlowError, OAuthFlowEvent, OAuthFlowManager};

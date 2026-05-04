@@ -18,6 +18,7 @@ pub enum ClientStatus {
     Connected,
     Failed(String),
     Disconnected,
+    Disabled,
 }
 
 /// MCP 连接池初始化状态
@@ -120,8 +121,12 @@ impl McpClientPool {
         oauth_event_callback: Option<Box<dyn Fn(OAuthFlowEvent) + Send + Sync>>,
     ) {
         let config = super::load_merged_config(cwd);
-        let total = config.mcp_servers.len();
-        if total == 0 {
+        let connectable = config
+            .mcp_servers
+            .iter()
+            .filter(|(_, sc)| !sc.disabled.unwrap_or(false))
+            .count();
+        if config.mcp_servers.is_empty() {
             let _ = status_tx.send(McpInitStatus::Ready { total: 0 });
             return;
         }
@@ -137,11 +142,29 @@ impl McpClientPool {
         }
         let _ = status_tx.send(McpInitStatus::Initializing {
             connected: 0,
-            total,
+            total: connectable,
         });
 
         let mut connected = 0usize;
         for (name, server_config) in &config.mcp_servers {
+            // 跳过已禁用的服务器，注册为 Disabled 状态
+            if server_config.disabled.unwrap_or(false) {
+                tracing::info!(server = %name, "MCP 服务器已禁用，跳过连接");
+                pool.clients.write().insert(
+                    name.clone(),
+                    Arc::new(McpClientHandle {
+                        name: name.clone(),
+                        peer: None,
+                        tools: vec![],
+                        resources: vec![],
+                        status: ClientStatus::Disabled,
+                        oauth_status: OAuthStatus::default(),
+                        source: server_config.source.clone(),
+                        url: server_config.url.clone(),
+                    }),
+                );
+                continue;
+            }
             let transport_config = match TransportConfig::try_from(server_config) {
                 Ok(tc) => tc,
                 Err(e) => {
@@ -265,7 +288,10 @@ impl McpClientPool {
                     pool.clients.write().insert(name.clone(), handle);
                     pool.services.lock().await.insert(name.clone(), rs);
                     connected += 1;
-                    let _ = status_tx.send(McpInitStatus::Initializing { connected, total });
+                    let _ = status_tx.send(McpInitStatus::Initializing {
+                        connected,
+                        total: connectable,
+                    });
                 }
                 Ok(Err(e)) => {
                     let err_str = e.to_string();
@@ -282,7 +308,7 @@ impl McpClientPool {
             }
         }
 
-        if connected == 0 && total > 0 {
+        if connectable > 0 && connected == 0 {
             let all_need_auth = pool
                 .clients
                 .read()
@@ -306,7 +332,7 @@ impl McpClientPool {
                     .collect();
                 let _ = status_tx.send(McpInitStatus::Failed(format!(
                     "{} 个服务器连接失败: {}",
-                    total,
+                    connectable,
                     failed.join("; ")
                 )));
             }
@@ -420,10 +446,25 @@ impl McpClientPool {
                 headers,
                 oauth,
             } => {
-                if let (Some(oauth_cfg), Some(cb)) = (oauth, oauth_event_callback) {
+                // 与 run_initialize 一致：检查磁盘是否有已保存的 OAuth 凭证
+                let oauth_cfg = oauth.as_ref().cloned().or_else(|| {
+                    let token_store = Arc::new(FileCredentialStore::new());
+                    match tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(token_store.load_server(server_name))
+                    }) {
+                        Ok(Some(_)) => {
+                            tracing::info!(server = %server_name, "发现已保存的 OAuth 凭证，使用默认配置恢复");
+                            Some(super::config::OAuthConfig::default())
+                        }
+                        _ => None,
+                    }
+                });
+                let has_oauth = oauth_cfg.is_some();
+                if let (Some(cfg), Some(cb)) = (oauth_cfg, oauth_event_callback) {
                     let ts = Arc::new(FileCredentialStore::new());
                     let mut mgr = OAuthFlowManager::new(ts, cb);
-                    match mgr.run_oauth_flow(server_name, url, oauth_cfg).await {
+                    match mgr.run_oauth_flow(server_name, url, &cfg).await {
                         Ok(()) => {
                             used_oauth = true;
                             if let Some(am) = mgr.get_authorization_manager(server_name) {
@@ -447,15 +488,16 @@ impl McpClientPool {
                             }
                         }
                         Err(e) => {
-                            let msg = format!("OAuth 授权失败: {e}");
-                            Self::insert_failed(self, server_name, msg.clone());
-                            return Err(McpPoolError::ConnectionFailed {
-                                server: server_name.to_string(),
-                                reason: msg,
-                            });
+                            tracing::warn!(server = %server_name, error = %e, "OAuth 恢复失败，尝试裸连接");
+                            tokio::time::timeout(
+                                timeout,
+                                rmcp::service::serve_client((), build_http_transport(url, headers)),
+                            )
+                            .await
                         }
                     }
-                } else if oauth.is_some() {
+                } else if has_oauth {
+                    // 有 OAuth 配置但没有 callback（非 TUI 场景），直接裸连接
                     used_oauth = true;
                     tokio::time::timeout(
                         timeout,
@@ -683,6 +725,34 @@ impl McpClientPool {
         self.configs.write().remove(server_name);
     }
 
+    /// 将服务器标记为 Disabled：关闭连接但保留 config 和 handle（用于面板展示）
+    pub async fn set_disabled(self: &Arc<Self>, server_name: &str) {
+        // 关闭实际连接
+        if let Some(mut svc) = self.services.lock().await.remove(server_name) {
+            let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
+        }
+        // 更新 handle 为 Disabled 状态（保留 config 引用）
+        let (source, url) = self
+            .configs
+            .read()
+            .get(server_name)
+            .map(|c| (c.source.clone(), c.url.clone()))
+            .unwrap_or((None, None));
+        self.clients.write().insert(
+            server_name.to_string(),
+            Arc::new(McpClientHandle {
+                name: server_name.to_string(),
+                peer: None,
+                tools: vec![],
+                resources: vec![],
+                status: ClientStatus::Disabled,
+                oauth_status: OAuthStatus::default(),
+                source,
+                url,
+            }),
+        );
+    }
+
     pub fn server_infos(&self) -> Vec<ServerInfo> {
         self.clients
             .read()
@@ -784,6 +854,24 @@ impl McpClientPool {
         }
 
         for (name, server_config) in &config.mcp_servers {
+            // 跳过已禁用的服务器，注册为 Disabled 状态
+            if server_config.disabled.unwrap_or(false) {
+                tracing::info!(server = %name, "MCP 服务器已禁用，跳过连接");
+                pool.clients.write().insert(
+                    name.clone(),
+                    Arc::new(McpClientHandle {
+                        name: name.clone(),
+                        peer: None,
+                        tools: vec![],
+                        resources: vec![],
+                        status: ClientStatus::Disabled,
+                        oauth_status: OAuthStatus::default(),
+                        source: server_config.source.clone(),
+                        url: server_config.url.clone(),
+                    }),
+                );
+                continue;
+            }
             let tc = match TransportConfig::try_from(server_config) {
                 Ok(tc) => tc,
                 Err(e) => {

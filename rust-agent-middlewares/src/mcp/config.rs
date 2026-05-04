@@ -32,8 +32,7 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub oauth: Option<OAuthConfig>,
     /// 是否禁用（默认 false，不序列化默认值以保持配置简洁）
-    #[serde(default)]
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: Option<bool>,
     /// 配置来源（运行时标记，不序列化）
     #[serde(skip)]
@@ -404,22 +403,22 @@ fn set_server_disabled_with_paths(
                 source: e,
             })?;
 
-        let mut config: McpConfigFile =
+        let mut value: serde_json::Value =
             serde_json::from_str(&content).map_err(|e| McpConfigError::ParseError {
                 path: project_path.display().to_string(),
                 source: e,
             })?;
 
-        if let Some(server_cfg) = config.mcp_servers.get_mut(server_name) {
+        if let Some(server_obj) = value
+            .get_mut("mcpServers")
+            .and_then(|s| s.get_mut(server_name))
+            .and_then(|s| s.as_object_mut())
+        {
             if disabled {
-                server_cfg.disabled = Some(true);
+                server_obj.insert("disabled".to_string(), serde_json::Value::Bool(true));
             } else {
-                server_cfg.disabled = None;
+                server_obj.remove("disabled");
             }
-            let value = serde_json::to_value(&config).map_err(|e| McpConfigError::WriteError {
-                path: project_path.display().to_string(),
-                source: e.into(),
-            })?;
             atomic_write_json(&project_path, &value)?;
             return Ok(());
         }
