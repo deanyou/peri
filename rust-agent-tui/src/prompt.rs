@@ -74,7 +74,7 @@ fn format_available_agents(cwd: &str) -> String {
 
 /// 构建系统提示词。
 ///
-/// 从 `prompts/sections/` 目录加载静态段落（01-08），根据 `PromptFeatures`
+/// 从 `prompts/sections/` 目录加载静态段落（01-07），根据 `PromptFeatures`
 /// 条件注入 feature-gated 段落（10-13），将环境占位符替换为运行时值。
 ///
 /// `overrides` 存在时，将 agent.md 中定义的角色/风格/主动性拼成一个覆盖块，
@@ -94,8 +94,7 @@ pub fn build_system_prompt(
         include_str!("../prompts/sections/04_actions.md"),
         include_str!("../prompts/sections/05_using_tools.md"),
         include_str!("../prompts/sections/06_tone_style.md"),
-        include_str!("../prompts/sections/07_communicating.md"),
-        include_str!("../prompts/sections/08_env.md"),
+        include_str!("../prompts/sections/07_env.md"),
     ];
 
     // Feature-gated 段落（条件拼接）
@@ -211,7 +210,7 @@ mod tests {
             "应包含 02_system 段落"
         );
         assert!(result.contains("Doing tasks"), "应包含 03_doing_tasks 段落");
-        assert!(result.contains("<env>"), "应包含 08_env 段落");
+        assert!(result.contains("<env>"), "应包含 07_env 段落");
         assert!(
             result.contains("Working directory"),
             "应包含 08_env 替换后结果"
@@ -232,6 +231,11 @@ mod tests {
             result.matches("# Proactiveness").count(),
             1,
             "无 overrides 时 # Proactiveness 应仅出现 1 次（来自静态段落）"
+        );
+        // "Simplicity" 出现在 04_actions.md
+        assert!(
+            result.contains("Simplicity"),
+            "应包含 04_actions Simplicity 段落"
         );
     }
 
