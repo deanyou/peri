@@ -9,7 +9,7 @@ use anyhow::Context;
 use sqlx::SqlitePool;
 use tokio::sync::Semaphore;
 
-use crate::db::WorkflowRun;
+use crate::db::{NodeRun, WorkflowRun};
 use crate::runner::template::TemplateContext;
 use crate::schema::{NodeDef, Workflow};
 
@@ -131,6 +131,8 @@ async fn execute_dag(
                         Some(&format!("node '{}' failed", node_id(node))),
                     )
                     .await?;
+                    // Mark remaining pending nodes as skipped
+                    let _ = NodeRun::mark_run_pending_as_skipped(&pool, run_id).await;
                     return Err(anyhow::anyhow!("node '{}' failed", node_id(node)));
                 }
             }

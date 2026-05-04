@@ -31,6 +31,8 @@ body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; backg
 .sb-success .dot  { background:#1a7f37; }
 .sb-failed   { background:#ffebe9; color:#cf222e; }
 .sb-failed .dot   { background:#cf222e; }
+.sb-skipped  { background:#f6f8fa; color:#8b949e; }
+.sb-skipped .dot  { background:#8b949e; }
 @keyframes pulse { 50% { opacity:0.4; } }
 
 /* Template cards */

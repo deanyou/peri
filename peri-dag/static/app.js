@@ -33,10 +33,10 @@ function statusBadge(s) {
 }
 
 function nodeFill(s) {
-  return { pending:'#eaeef2', running:'#ddf4ff', success:'#dafbe1', failed:'#ffebe9' }[s] || '#eaeef2';
+  return { pending:'#eaeef2', running:'#ddf4ff', success:'#dafbe1', failed:'#ffebe9', skipped:'#f6f8fa' }[s] || '#eaeef2';
 }
 function nodeStroke(s) {
-  return { pending:'#8b949e', running:'#0969da', success:'#1a7f37', failed:'#cf222e' }[s] || '#8b949e';
+  return { pending:'#8b949e', running:'#0969da', success:'#1a7f37', failed:'#cf222e', skipped:'#8b949e' }[s] || '#8b949e';
 }
 
 // ── Mode switching ──────────────────────────────────────────────────
@@ -116,7 +116,7 @@ async function loadTemplates() {
           <span class="tag" title="${esc(t.file_path)}">${esc(basename(t.file_path))}</span>
         </div>
         <div class="template-actions" onclick="event.stopPropagation()">
-          <button class="btn btn-primary btn-sm" onclick="runTemplate('${esc(t.name)}')">&#9654; Run</button>
+          <button class="btn btn-primary btn-sm" onclick="runTemplateFromCard('${esc(t.name)}')">&#9654; Run</button>
         </div>
       </div>
     `).join('');
@@ -128,6 +128,18 @@ async function loadTemplates() {
   } catch(e) {
     el.innerHTML = '<div class="template-empty" style="color:#cf222e">Failed to load templates</div>';
   }
+}
+
+// Run from card: select template first (shows inputs form), then run
+function runTemplateFromCard(name) {
+  showTemplatePreview(name);
+  const tpl = allTemplates.find(t => t.name === name);
+  const inputKeys = Object.keys(tpl?.inputs || {});
+  if (inputKeys.length === 0) {
+    // No inputs required, run immediately
+    runTemplate(name);
+  }
+  // If template has inputs, user fills them in the preview form and clicks Run
 }
 
 async function runTemplate(name) {
@@ -193,19 +205,19 @@ async function selectRun(id) {
   selectedRunId = id;
   showRunView();
   loadRuns();
+  clearInterval(refreshTimer);
+
   try {
     const r = await fetch(`${API_WF}/${id}`);
     const run = await r.json();
     renderGraph(run.nodes || [], run);
     renderLogs(run);
-  } catch(e) {}
 
-  clearInterval(refreshTimer);
-  fetch(`${API_WF}/${id}`).then(r => r.json()).then(run => {
+    // Schedule polling for active runs — single fetch, no duplicate
     if (run.status === 'running' || run.status === 'pending') {
       refreshTimer = setInterval(() => selectRun(id), 2000);
     }
-  }).catch(()=>{});
+  } catch(e) {}
 }
 
 // ── DAG Graph ───────────────────────────────────────────────────────
@@ -378,7 +390,7 @@ function renderLogs(run) {
             ${statusBadge(n.status)}
             ${n.attempt>0 ? `<span>retry ${n.attempt}</span>` : ''}
             ${n.exit_code!=null ? `<span>exit=${n.exit_code}</span>` : ''}
-            ${n.started_at ? `<span>${fmtTime(n.started_at)}</span>` : ''}
+            ${n.started_at ? `<span>${fmtDuration(n.started_at, n.finished_at)}</span>` : ''}
           </span>
         </div>
         <div class="${bodyClass}" id="log-body-${n.id}">${bodyContent}</div>

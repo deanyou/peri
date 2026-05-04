@@ -52,14 +52,81 @@ pub struct AppState {
     pub templates: Arc<RwLock<Vec<WorkflowTemplate>>>,
 }
 
+/// Create run + node records in DB, then start async execution.
+/// Shared by submit_workflow, run_template, and watcher.
+pub async fn create_and_start_run(
+    pool: &SqlitePool,
+    wf: &crate::schema::Workflow,
+    expanded_wf: crate::schema::Workflow,
+    yaml_content: String,
+) -> anyhow::Result<String> {
+    let run_id = Uuid::now_v7().to_string();
+
+    let run = WorkflowRun {
+        id: run_id.clone(),
+        workflow_name: wf.name.clone(),
+        workflow_version: wf.version.clone(),
+        yaml_content,
+        status: "pending".to_string(),
+        node_count: expanded_wf.nodes.len() as i64,
+        started_at: None,
+        finished_at: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        error_message: None,
+    };
+
+    run.insert(pool).await?;
+
+    for node in &expanded_wf.nodes {
+        let deps = runner::node_depends(node);
+        let node_run = NodeRun {
+            id: Uuid::now_v7().to_string(),
+            run_id: run_id.clone(),
+            node_id: runner::node_id(node).to_string(),
+            node_type: runner::node_type_name(node).to_string(),
+            status: "pending".to_string(),
+            attempt: 0,
+            started_at: None,
+            finished_at: None,
+            exit_code: None,
+            stdout: None,
+            stderr: None,
+            error_message: None,
+            outputs: None,
+            depends: if deps.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(deps).unwrap())
+            },
+        };
+        if let Err(e) = node_run.insert(pool).await {
+            tracing::error!(error = %e, "failed to insert node_run");
+        }
+    }
+
+    let root_inputs = expanded_wf
+        .reference_inputs
+        .get("__root__")
+        .cloned()
+        .unwrap_or_default();
+
+    runner::run_workflow(
+        Arc::new(pool.clone()),
+        run_id.clone(),
+        expanded_wf,
+        root_inputs,
+    )
+    .await;
+
+    Ok(run_id)
+}
+
 // ─── POST /api/v1/workflows ──────────────────────────────────────
 
 pub async fn submit_workflow(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubmitWorkflowRequest>,
 ) -> impl IntoResponse {
-    let run_id = Uuid::now_v7().to_string();
-
     // Parse to get metadata
     let wf = match crate::schema::parse_workflow(&req.yaml) {
         Ok(w) => w,
@@ -93,72 +160,19 @@ pub async fn submit_workflow(
         }
     };
 
-    // Insert run record
-    let run = WorkflowRun {
-        id: run_id.clone(),
-        workflow_name: wf.name,
-        workflow_version: wf.version,
-        yaml_content: req.yaml.clone(),
-        status: "pending".to_string(),
-        node_count: expanded_wf.nodes.len() as i64,
-        started_at: None,
-        finished_at: None,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        error_message: None,
-    };
-
-    if let Err(e) = run.insert(&state.pool).await {
-        return (
+    match create_and_start_run(&state.pool, &wf, expanded_wf, req.yaml.clone()).await {
+        Ok(run_id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!(SubmitWorkflowResponse {
+                run_id,
+                status: "pending".to_string(),
+            })),
+        ),
+        Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("failed to create run: {e}")})),
-        );
+        ),
     }
-
-    // Insert node_run records from expanded workflow
-    for node in &expanded_wf.nodes {
-        let deps = runner::node_depends(node);
-        let node_run = NodeRun {
-            id: Uuid::now_v7().to_string(),
-            run_id: run_id.clone(),
-            node_id: runner::node_id(node).to_string(),
-            node_type: runner::node_type_name(node).to_string(),
-            status: "pending".to_string(),
-            attempt: 0,
-            started_at: None,
-            finished_at: None,
-            exit_code: None,
-            stdout: None,
-            stderr: None,
-            error_message: None,
-            outputs: None,
-            depends: if deps.is_empty() {
-                None
-            } else {
-                Some(serde_json::to_string(deps).unwrap())
-            },
-        };
-        if let Err(e) = node_run.insert(&state.pool).await {
-            tracing::error!(error = %e, "failed to insert node_run");
-        }
-    }
-
-    // Get root inputs from expanded workflow
-    let root_inputs = expanded_wf
-        .reference_inputs
-        .get("__root__")
-        .cloned()
-        .unwrap_or_default();
-
-    // Start async execution
-    runner::run_workflow(state.pool.clone(), run_id.clone(), expanded_wf, root_inputs).await;
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!(SubmitWorkflowResponse {
-            run_id,
-            status: "pending".to_string(),
-        })),
-    )
 }
 
 // ─── GET /api/v1/workflows ───────────────────────────────────────
@@ -311,71 +325,20 @@ pub async fn run_template(
         }
     };
 
-    let run_id = Uuid::now_v7().to_string();
-
-    let run = WorkflowRun {
-        id: run_id.clone(),
-        workflow_name: wf.name.clone(),
-        workflow_version: wf.version.clone(),
-        yaml_content: yaml_content.clone(),
-        status: "pending".to_string(),
-        node_count: expanded_wf.nodes.len() as i64,
-        started_at: None,
-        finished_at: None,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        error_message: None,
-    };
-
-    if let Err(e) = run.insert(&state.pool).await {
-        return (
+    match create_and_start_run(&state.pool, &wf, expanded_wf, yaml_content).await {
+        Ok(run_id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "run_id": run_id,
+                "status": "pending",
+                "template": name,
+            })),
+        ),
+        Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("{e}")})),
-        );
+        ),
     }
-
-    for node in &expanded_wf.nodes {
-        let deps = runner::node_depends(node);
-        let node_run = NodeRun {
-            id: Uuid::now_v7().to_string(),
-            run_id: run_id.clone(),
-            node_id: runner::node_id(node).to_string(),
-            node_type: runner::node_type_name(node).to_string(),
-            status: "pending".to_string(),
-            attempt: 0,
-            started_at: None,
-            finished_at: None,
-            exit_code: None,
-            stdout: None,
-            stderr: None,
-            error_message: None,
-            outputs: None,
-            depends: if deps.is_empty() {
-                None
-            } else {
-                Some(serde_json::to_string(deps).unwrap())
-            },
-        };
-        if let Err(e) = node_run.insert(&state.pool).await {
-            tracing::error!(error = %e, "failed to insert node_run");
-        }
-    }
-
-    let root_inputs = expanded_wf
-        .reference_inputs
-        .get("__root__")
-        .cloned()
-        .unwrap_or_default();
-
-    runner::run_workflow(state.pool.clone(), run_id.clone(), expanded_wf, root_inputs).await;
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "run_id": run_id,
-            "status": "pending",
-            "template": name,
-        })),
-    )
 }
 
 // ─── Input Validation ─────────────────────────────────────────────

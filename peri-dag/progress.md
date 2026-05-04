@@ -26,3 +26,25 @@ UI 只显示时间戳不显示耗时。添加了 `fmtDuration()` 函数，在 ru
 - 原有 16 个测试全部通过
 - 新增 8 个 `validate_inputs` 类型校验测试
 - 总计 24 个测试全部通过
+
+## 2026-05-04 Round 2
+
+### 发现并修复的用户体验问题
+
+**1. selectRun 双重请求 + timer 泄漏（高优先级）**
+`selectRun()` 先 fetch 渲染 UI，再 fetch 判断是否 poll，造成冗余请求和潜在 timer 泄漏。合并为单次 fetch：渲染后直接从响应判断是否需要轮询，同时先 clearInterval 再 fetch。
+
+**2. 失败节点下游永远 pending（高优先级）**
+节点失败后，未执行的下游节点停在 pending 状态，用户误以为还在等待。添加 `mark_run_pending_as_skipped` 方法，在 DAG 失败时将剩余 pending 节点标记为 skipped。前端同步添加 skipped 状态的颜色样式。
+
+**3. 节点日志不显示执行耗时（中等优先级）**
+日志面板每个节点 header 有 started_at 但不显示 duration。改为用 `fmtDuration()` 显示节点执行时间。
+
+**4. 内嵌 Run 按钮绕过 inputs 表单（高优先级）**
+Template 卡片上的 Run 按钮直接调用 `runTemplate()`，没经过 inputs 表单。添加 `runTemplateFromCard()`：先选中 template 展示 inputs 表单，无 inputs 则直接运行，有 inputs 让用户填写后手动点 Run。
+
+**5. Run 列表 API 返回 yaml_content（中等优先级）**
+列表查询返回完整 yaml_content 大字段但列表页用不到。修改 SQL 用空字符串替代，减少网络传输和内存占用。
+
+**6. 三处重复 workflow 提交代码（低优先级）**
+`submit_workflow`、`run_template`、`submit_workflow_from_file` 有完全相同的 run 创建+node 插入+执行启动逻辑。抽取 `create_and_start_run()` 共享函数，消除约 60 行重复代码。

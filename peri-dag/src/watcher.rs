@@ -4,10 +4,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use sqlx::SqlitePool;
-use uuid::Uuid;
 
 use crate::api::{TemplateNodeInfo, WorkflowTemplate};
-use crate::db::{NodeRun, WorkflowRun};
 use crate::runner;
 use crate::schema::parse_workflow;
 
@@ -208,63 +206,8 @@ async fn submit_workflow_from_file(
     // Expand references using the loader
     let expanded_wf = runner::load_workflow(file_path, std::collections::HashMap::new()).await?;
 
-    let run_id = Uuid::now_v7().to_string();
-
-    let run = WorkflowRun {
-        id: run_id.clone(),
-        workflow_name: wf.name.clone(),
-        workflow_version: wf.version.clone(),
-        yaml_content: yaml_content.to_string(),
-        status: "pending".to_string(),
-        node_count: expanded_wf.nodes.len() as i64,
-        started_at: None,
-        finished_at: None,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        error_message: None,
-    };
-
-    run.insert(pool).await?;
-
-    for node in &expanded_wf.nodes {
-        let deps = runner::node_depends(node);
-        let node_run = NodeRun {
-            id: Uuid::now_v7().to_string(),
-            run_id: run_id.clone(),
-            node_id: runner::node_id(node).to_string(),
-            node_type: runner::node_type_name(node).to_string(),
-            status: "pending".to_string(),
-            attempt: 0,
-            started_at: None,
-            finished_at: None,
-            exit_code: None,
-            stdout: None,
-            stderr: None,
-            error_message: None,
-            outputs: None,
-            depends: if deps.is_empty() {
-                None
-            } else {
-                Some(serde_json::to_string(deps).unwrap())
-            },
-        };
-        if let Err(e) = node_run.insert(pool).await {
-            tracing::error!(error = %e, "failed to insert node_run");
-        }
-    }
-
-    let root_inputs = expanded_wf
-        .reference_inputs
-        .get("__root__")
-        .cloned()
-        .unwrap_or_default();
-
-    runner::run_workflow(
-        Arc::new(pool.clone()),
-        run_id.clone(),
-        expanded_wf,
-        root_inputs,
-    )
-    .await;
+    let run_id =
+        crate::api::create_and_start_run(pool, wf, expanded_wf, yaml_content.to_string()).await?;
 
     tracing::info!(
         name = %wf.name,

@@ -85,7 +85,7 @@ impl WorkflowRun {
 
     pub async fn list(pool: &SqlitePool, limit: i64) -> anyhow::Result<Vec<WorkflowRun>> {
         let runs = sqlx::query_as::<_, WorkflowRun>(
-            "SELECT id, workflow_name, workflow_version, yaml_content, status, node_count, started_at, finished_at, created_at, error_message FROM workflow_runs ORDER BY created_at DESC LIMIT ?",
+            "SELECT id, workflow_name, workflow_version, '' as yaml_content, status, node_count, started_at, finished_at, created_at, error_message FROM workflow_runs ORDER BY created_at DESC LIMIT ?",
         )
         .bind(limit)
         .fetch_all(pool)
@@ -225,6 +225,22 @@ impl NodeRun {
         .fetch_optional(pool)
         .await?;
         Ok(node)
+    }
+
+    /// Mark all pending nodes in a run as skipped (used when a workflow fails).
+    pub async fn mark_run_pending_as_skipped(
+        pool: &SqlitePool,
+        run_id: &str,
+    ) -> anyhow::Result<u64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE node_runs SET status = 'skipped', finished_at = ? WHERE run_id = ? AND status = 'pending'",
+        )
+        .bind(&now)
+        .bind(run_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 }
 
