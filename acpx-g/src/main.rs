@@ -1,11 +1,16 @@
 use std::sync::{Arc, RwLock};
 
+use axum::body::Body;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::{routing::delete, routing::get, routing::post, Router};
+use include_dir::{include_dir, Dir};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{fmt, EnvFilter};
+
+static STATIC_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/static");
 
 use acpx_g::watcher;
 
@@ -98,11 +103,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/workflows/{run_id}/nodes/{node_id}/logs",
             get(acpx_g::api::get_node_logs),
         )
-        // Frontend: serve / as index.html, then all static assets
-        .fallback_service(
-            ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/static"))
-                .append_index_html_on_directories(true),
-        )
+        // Frontend: serve embedded static files
+        .fallback(static_handler)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -237,6 +239,29 @@ fn parse_cli_args() -> CliArgs {
         i += 1;
     }
     CliArgs { workflow_dir }
+}
+
+async fn static_handler(request: axum::extract::Request) -> impl IntoResponse {
+    let path = request.uri().path().trim_start_matches('/');
+
+    // Exact file match, or fall back to index.html for SPA routing
+    let file = STATIC_DIR
+        .get_file(path)
+        .or_else(|| STATIC_DIR.get_file("index.html"));
+
+    match file {
+        Some(f) => {
+            let mime = mime_guess::from_path(f.path()).first_or_octet_stream();
+            Response::builder()
+                .header(header::CONTENT_TYPE, mime.as_ref())
+                .body(Body::from(f.contents()))
+                .unwrap()
+        }
+        None => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("Not Found"))
+            .unwrap(),
+    }
 }
 
 #[cfg(test)]
