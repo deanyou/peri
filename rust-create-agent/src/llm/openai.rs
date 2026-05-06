@@ -639,4 +639,32 @@ mod tests {
         let llm = ChatOpenAI::new("sk-test", "custom-model");
         assert_eq!(llm.context_window_inner(), 200_000);
     }
+
+    // ── Builder method tests ──
+
+    #[test]
+    fn test_with_base_url() {
+        let llm = ChatOpenAI::new("key", "model").with_base_url("https://proxy.example.com/v1");
+        assert_eq!(llm.base_url, "https://proxy.example.com/v1");
+    }
+
+    #[test]
+    fn test_with_reasoning_effort() {
+        let llm = ChatOpenAI::new("key", "o1-preview").with_reasoning_effort("high");
+        assert_eq!(llm.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn test_new_default_no_reasoning_effort() {
+        let llm = ChatOpenAI::new("key", "gpt-4o");
+        assert!(llm.reasoning_effort.is_none());
+        assert_eq!(llm.base_url, "https://api.openai.com/v1");
+    }
+
+    /// context_window: o3 系列应返回 200K
+    #[test]
+    fn test_context_window_o3() {
+        let llm = ChatOpenAI::new("sk-test", "o3-mini");
+        assert_eq!(llm.context_window_inner(), 200_000);
+    }
 }

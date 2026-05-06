@@ -749,4 +749,51 @@ mod tests {
         ChatAnthropic::apply_cache_to_messages(&mut messages);
         assert_eq!(messages, before, "无 user 消息时应不变");
     }
+
+    // ── Builder method tests ──
+
+    #[test]
+    fn test_with_base_url() {
+        let llm = ChatAnthropic::new("key", "model").with_base_url("https://proxy.example.com");
+        assert_eq!(llm.base_url.as_deref(), Some("https://proxy.example.com"));
+    }
+
+    #[test]
+    fn test_with_base_url_empty_is_none() {
+        let llm = ChatAnthropic::new("key", "model").with_base_url("");
+        assert!(llm.base_url.is_none());
+    }
+
+    #[test]
+    fn test_with_extended_thinking_minimum_budget() {
+        let llm = ChatAnthropic::new("key", "model").with_extended_thinking(100, "high");
+        assert!(llm.extended_thinking);
+        assert_eq!(
+            llm.thinking_budget, 1024,
+            "budget below 1024 should be clamped"
+        );
+        assert_eq!(llm.thinking_effort, "high");
+    }
+
+    #[test]
+    fn test_with_extended_thinking_valid_budget() {
+        let llm = ChatAnthropic::new("key", "model").with_extended_thinking(5000, "low");
+        assert_eq!(llm.thinking_budget, 5000);
+    }
+
+    #[test]
+    fn test_without_cache() {
+        let llm = ChatAnthropic::new("key", "model").without_cache();
+        assert!(!llm.enable_cache);
+    }
+
+    #[test]
+    fn test_default_values() {
+        let llm = ChatAnthropic::new("key", "claude-sonnet-4-6");
+        assert!(!llm.extended_thinking);
+        assert_eq!(llm.thinking_budget, 10000);
+        assert_eq!(llm.thinking_effort, "medium");
+        assert!(llm.enable_cache);
+        assert!(llm.base_url.is_none());
+    }
 }
