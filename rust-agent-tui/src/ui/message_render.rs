@@ -260,14 +260,50 @@ pub fn render_view_model(
                     Style::default().fg(theme::MUTED),
                 )]));
 
-                // 嵌套消息（不渲染序号）
+                // 嵌套消息（不渲染序号），跳过无可见内容的条目
                 for inner_vm in recent_messages.iter() {
                     let inner_lines = render_view_model(inner_vm, None, _width);
+                    if inner_lines.is_empty() {
+                        continue;
+                    }
                     for line in inner_lines {
                         // 每行前缀 2 空格缩进
                         let mut new_spans = vec![Span::raw("  ")];
                         new_spans.extend(line.spans);
                         lines.push(Line::from(new_spans));
+                    }
+                }
+
+                // 子 agent 完成后，渲染 final_result（工具执行摘要 + 最终回复）
+                if let Some(ref result) = final_result {
+                    if !result.is_empty() {
+                        // 空行分隔
+                        lines.push(Line::from(vec![Span::raw("")]));
+                        // 前缀缩进 + 分隔符
+                        lines.push(Line::from(vec![Span::styled(
+                            "  ── 执行结果 ──".to_string(),
+                            Style::default().fg(theme::DIM),
+                        )]));
+                        // 逐行渲染 final_result（最多 20 行，过长截断）
+                        let max_lines = 20;
+                        for (i, line_text) in result.lines().take(max_lines).enumerate() {
+                            if i == max_lines - 1 && result.lines().count() > max_lines {
+                                let truncated: String =
+                                    line_text.chars().take(80).collect::<String>() + "…";
+                                lines.push(Line::from(vec![
+                                    Span::raw("  │ "),
+                                    Span::styled(truncated, Style::default().fg(theme::MUTED)),
+                                ]));
+                            } else {
+                                lines.push(Line::from(vec![
+                                    Span::raw("  │ "),
+                                    Span::styled(
+                                        line_text.to_string(),
+                                        Style::default().fg(theme::MUTED),
+                                    ),
+                                ]));
+                            }
+                        }
                     }
                 }
             }

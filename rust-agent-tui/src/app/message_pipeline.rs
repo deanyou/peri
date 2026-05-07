@@ -193,8 +193,9 @@ impl MessagePipeline {
             }
             AgentEvent::AiReasoning(text) => {
                 if self.in_subagent() {
-                    // SubAgent 内部推理也作为 chunk 推送
-                    self.subagent_push_chunk(&text);
+                    // SubAgent 内部的推理过程不推送到 UI（避免在 recent_messages
+                    // 中产生空白的 AssistantBubble 条目），
+                    // 只发出一次 UpdateLast 以保持 SubAgentGroup 渲染同步
                     vec![self
                         .build_subagent_update()
                         .map(PipelineAction::UpdateLast)
