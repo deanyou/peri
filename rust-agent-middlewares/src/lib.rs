@@ -27,6 +27,7 @@ pub use claude_agent_parser::{
 pub mod ask_user;
 pub mod cron;
 pub mod hitl;
+pub mod hooks;
 pub mod mcp;
 pub mod middleware;
 pub mod plugin;
@@ -78,6 +79,7 @@ pub mod prelude {
         HitlDecision, HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode,
         SharedPermissionMode,
     };
+    pub use crate::hooks::{HookMiddleware, RegisteredHook};
     #[allow(deprecated)]
     pub use crate::middleware::PrependSystemMiddleware;
     pub use crate::middleware::{

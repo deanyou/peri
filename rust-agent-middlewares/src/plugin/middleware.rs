@@ -50,6 +50,7 @@ mod tests {
             agents_dirs: vec![],
             mcp_servers: HashMap::new(),
             data_path: PathBuf::new(),
+            hooks_config: None,
         }
     }
 

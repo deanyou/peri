@@ -44,6 +44,7 @@ impl Middleware<AgentState> for ContextInjectorMiddleware {
             text: format!("{}{}", output.text, suffix),
             steps: output.steps,
             tool_calls: output.tool_calls.clone(),
+            stop_reason: output.stop_reason.clone(),
         })
     }
 }

@@ -70,6 +70,16 @@ pub enum AgentEvent {
     },
     /// 后台 agent 任务完成（TUI 使用，用于空闲时通知）
     BackgroundTaskCompleted(BackgroundTaskResult),
+    /// 子 agent 开始执行
+    SubagentStarted { agent_name: String },
+    /// 子 agent 执行完成
+    SubagentStopped { agent_name: String, result: String },
+    /// Session 结束
+    SessionEnded,
+    /// 上下文压缩开始
+    CompactStarted,
+    /// 上下文压缩完成
+    CompactCompleted,
 }
 
 /// 事件回调 trait（应用层实现）
@@ -154,5 +164,63 @@ mod tests {
         } else {
             panic!("Deserialized to wrong variant");
         }
+    }
+
+    #[test]
+    fn test_subagent_started_serde_roundtrip() {
+        let ev = AgentEvent::SubagentStarted {
+            agent_name: "test-agent".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains(r#""type":"subagent_started""#));
+        assert!(json.contains(r#""agent_name":"test-agent""#));
+        let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
+        if let AgentEvent::SubagentStarted { agent_name } = deserialized {
+            assert_eq!(agent_name, "test-agent");
+        } else {
+            panic!("Deserialized to wrong variant");
+        }
+    }
+
+    #[test]
+    fn test_subagent_stopped_serde_roundtrip() {
+        let ev = AgentEvent::SubagentStopped {
+            agent_name: "test-agent".to_string(),
+            result: "done".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains(r#""type":"subagent_stopped""#));
+        let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
+        if let AgentEvent::SubagentStopped { agent_name, result } = deserialized {
+            assert_eq!(agent_name, "test-agent");
+            assert_eq!(result, "done");
+        } else {
+            panic!("Deserialized to wrong variant");
+        }
+    }
+
+    #[test]
+    fn test_session_ended_serde() {
+        let ev = AgentEvent::SessionEnded;
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains(r#""type":"session_ended""#));
+        let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, AgentEvent::SessionEnded));
+    }
+
+    #[test]
+    fn test_compact_events_serde() {
+        let ev1 = AgentEvent::CompactStarted;
+        let json1 = serde_json::to_string(&ev1).unwrap();
+        assert!(json1.contains(r#""type":"compact_started""#));
+
+        let ev2 = AgentEvent::CompactCompleted;
+        let json2 = serde_json::to_string(&ev2).unwrap();
+        assert!(json2.contains(r#""type":"compact_completed""#));
+
+        let d1: AgentEvent = serde_json::from_str(&json1).unwrap();
+        assert!(matches!(d1, AgentEvent::CompactStarted));
+        let d2: AgentEvent = serde_json::from_str(&json2).unwrap();
+        assert!(matches!(d2, AgentEvent::CompactCompleted));
     }
 }

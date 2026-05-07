@@ -11,6 +11,7 @@ use crate::ui::render_thread::{RenderCache, RenderEvent};
 
 use super::agent_panel::AgentPanel;
 use super::hitl_prompt::PendingAttachment;
+use super::hooks_panel::HooksPanel;
 use super::login_panel::LoginPanel;
 use super::model_panel::ModelPanel;
 use crate::thread::ThreadBrowser;
@@ -45,6 +46,7 @@ pub struct AppCore {
     pub model_panel: Option<ModelPanel>,
     pub login_panel: Option<LoginPanel>,
     pub agent_panel: Option<AgentPanel>,
+    pub hooks_panel: Option<HooksPanel>,
     pub config_panel: Option<crate::app::config_panel::ConfigPanel>,
     pub thread_browser: Option<ThreadBrowser>,
     /// 输入历史（已发送消息的文本，最新的在前面）
@@ -118,6 +120,7 @@ impl AppCore {
             model_panel: None,
             login_panel: None,
             agent_panel: None,
+            hooks_panel: None,
             config_panel: None,
             thread_browser: None,
             input_history: Vec::new(),

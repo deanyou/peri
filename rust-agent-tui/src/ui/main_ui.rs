@@ -171,6 +171,9 @@ fn render_session_column(
         if app.sessions[session_idx].core.agent_panel.is_some() {
             panels::agent::render_agent_panel(f, app, panel_area);
         }
+        if app.sessions[session_idx].core.hooks_panel.is_some() {
+            panels::hooks::render_hooks_panel(f, app, panel_area);
+        }
         if app.sessions[session_idx].core.thread_browser.is_some() {
             panels::thread_browser::render_thread_browser(f, app, panel_area);
         }
@@ -307,6 +310,11 @@ fn active_panel_height(app: &App, screen_height: u16, screen_width: u16) -> u16 
         14
     } else if let Some(panel) = &app.sessions[app.active].core.agent_panel {
         (panel.agents.len() as u16 * 2 + 6).max(6)
+    } else if app.sessions[app.active].core.hooks_panel.is_some() {
+        let panel = app.sessions[app.active].core.hooks_panel.as_ref().unwrap();
+        // 所有 entry 头行 + 当前展开详情 + 固定头部
+        let h = panel.total_content_lines();
+        h.max(8)
     } else if app.cron.cron_panel.is_some() {
         let base = (app
             .cron

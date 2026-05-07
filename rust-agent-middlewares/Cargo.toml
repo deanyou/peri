@@ -41,6 +41,7 @@ tar = "0.4"
 base64 = "0.22"
 urlencoding = "2"
 shellexpand = "3"
+ipnet = "2.10"
 
 
 [dev-dependencies]

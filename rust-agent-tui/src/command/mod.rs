@@ -7,6 +7,7 @@ pub mod cost;
 pub mod cron;
 pub mod help;
 pub mod history;
+pub mod hooks;
 pub mod login;
 pub mod loop_cmd;
 pub mod mcp;
@@ -35,6 +36,7 @@ pub fn default_registry() -> CommandRegistry {
     r.register(Box::new(cost::CostCommand));
     r.register(Box::new(context_cmd::ContextCommand));
     r.register(Box::new(split::SplitCommand));
+    r.register(Box::new(hooks::HooksCommand));
     r
 }
 

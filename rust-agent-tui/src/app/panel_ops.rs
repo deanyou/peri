@@ -868,6 +868,50 @@ impl App {
     pub fn agent_panel_clear(&mut self) {
         self.sessions[self.active].core.agent_panel = None;
     }
+
+    // ─── Hooks 面板操作 ───────────────────────────────────────────────────────
+
+    /// 打开 /hooks 面板（只读）
+    pub fn open_hooks_panel(&mut self) {
+        let mut hooks = self
+            .plugin_data
+            .as_ref()
+            .map(|pd| pd.all_hooks.clone())
+            .unwrap_or_default();
+        // 合并 settings.local.json 中的 hooks
+        let local_hooks =
+            rust_agent_middlewares::hooks::loader::load_settings_local_hooks(&self.cwd);
+        hooks.extend(local_hooks);
+        self.sessions[self.active].core.hooks_panel = Some(HooksPanel::new(hooks));
+        // 互斥：关闭其他面板
+        self.sessions[self.active].core.login_panel = None;
+        self.sessions[self.active].core.config_panel = None;
+        self.status_panel = None;
+        self.memory_panel = None;
+    }
+
+    /// 关闭 /hooks 面板
+    pub fn close_hooks_panel(&mut self) {
+        self.sessions[self.active].core.hooks_panel = None;
+    }
+
+    /// 在 hooks 面板中上移光标
+    pub fn hooks_panel_move_up(&mut self) {
+        if let Some(panel) = self.sessions[self.active].core.hooks_panel.as_mut() {
+            panel.move_cursor(-1);
+            panel.scroll_offset =
+                ensure_cursor_visible(panel.cursor_line(), panel.scroll_offset, 10);
+        }
+    }
+
+    /// 在 hooks 面板中下移光标
+    pub fn hooks_panel_move_down(&mut self) {
+        if let Some(panel) = self.sessions[self.active].core.hooks_panel.as_mut() {
+            panel.move_cursor(1);
+            panel.scroll_offset =
+                ensure_cursor_visible(panel.cursor_line(), panel.scroll_offset, 10);
+        }
+    }
 }
 
 // ─── 测试辅助方法（仅在 cfg(any(test, feature = "headless")) 下编译）──────────

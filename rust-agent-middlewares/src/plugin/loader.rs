@@ -1,3 +1,5 @@
+use crate::hooks::types::HooksConfig;
+use crate::hooks::types::RegisteredHook;
 use crate::mcp::config::McpConfigFile;
 use crate::mcp::McpServerConfig;
 use crate::plugin::config::{load_claude_settings, load_installed_plugins, load_plugin_manifest};
@@ -74,6 +76,8 @@ pub struct LoadedPlugin {
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// 插件数据目录（install_path/.claude-plugin/data），供 ${CLAUDE_PLUGIN_DATA} 展开
     pub data_path: PathBuf,
+    /// 插件 hooks 配置（从 hooks/hooks.json 或 plugin.json hooks 字段提取）
+    pub hooks_config: Option<HooksConfig>,
 }
 
 pub fn load_manifest(plugin_dir: &Path) -> Result<PluginManifest, LoaderError> {
@@ -289,6 +293,7 @@ pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, L
         let agents_dirs = extract_agents_paths(&manifest, &plugin.install_path);
         let mcp_servers = extract_mcp_servers(&manifest, &plugin.install_path);
         let data_path = plugin.install_path.join(".claude-plugin").join("data");
+        let hooks_config = crate::hooks::loader::extract_hooks(&manifest, &plugin.install_path);
 
         result.push(LoadedPlugin {
             name: plugin.name.clone(),
@@ -300,6 +305,7 @@ pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, L
             agents_dirs,
             mcp_servers,
             data_path,
+            hooks_config,
         });
     }
 
@@ -371,6 +377,7 @@ pub struct PluginLoadResult {
     pub all_mcp_servers: HashMap<String, McpServerConfig>,
     pub all_agent_dirs: Vec<PathBuf>,
     pub all_commands: Vec<CommandEntry>,
+    pub all_hooks: Vec<RegisteredHook>,
 }
 
 /// 加载所有已启用插件，返回聚合结果（skills 路径、MCP 服务器、agent 路径、命令列表）
@@ -385,6 +392,7 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path) -> PluginLoadResult {
                 all_mcp_servers: HashMap::new(),
                 all_agent_dirs: vec![],
                 all_commands: vec![],
+                all_hooks: vec![],
             };
         }
     };
@@ -397,12 +405,51 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path) -> PluginLoadResult {
 
     let all_commands: Vec<CommandEntry> = plugins.iter().flat_map(|p| p.commands.clone()).collect();
 
+    let all_hooks: Vec<RegisteredHook> = plugins
+        .iter()
+        .filter_map(|plugin| {
+            let config = plugin.hooks_config.as_ref()?;
+            let mut hooks = Vec::new();
+            for (event, matchers) in config {
+                for rule in matchers {
+                    for hook_def in &rule.hooks {
+                        hooks.push(RegisteredHook {
+                            hook: hook_def.clone(),
+                            event: event.clone(),
+                            matcher: rule
+                                .matcher
+                                .clone()
+                                .or_else(|| hook_def.get_matcher().cloned()),
+                            plugin_name: plugin.name.clone(),
+                            plugin_id: plugin.name.clone(),
+                            plugin_root: plugin.install_path.clone(),
+                            plugin_data_dir: plugin.data_path.clone(),
+                            plugin_options: plugin
+                                .manifest
+                                .options
+                                .as_ref()
+                                .unwrap_or(&vec![])
+                                .iter()
+                                .filter_map(|opt| {
+                                    opt.default.as_ref().map(|v| (opt.name.clone(), v.clone()))
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+            }
+            Some(hooks)
+        })
+        .flatten()
+        .collect();
+
     PluginLoadResult {
         plugins,
         all_skill_dirs,
         all_mcp_servers,
         all_agent_dirs,
         all_commands,
+        all_hooks,
     }
 }
 
@@ -866,6 +913,7 @@ pub(crate) mod tests {
             agents_dirs: vec![],
             mcp_servers: HashMap::new(),
             data_path: PathBuf::new(),
+            hooks_config: None,
         };
         p1.mcp_servers.insert(
             "db".into(),
@@ -891,6 +939,7 @@ pub(crate) mod tests {
             agents_dirs: vec![],
             mcp_servers: HashMap::new(),
             data_path: PathBuf::new(),
+            hooks_config: None,
         };
         p2.mcp_servers.insert(
             "db".into(),
@@ -1066,6 +1115,7 @@ pub(crate) mod tests {
                 agents_dirs: vec![],
                 mcp_servers: HashMap::new(),
                 data_path: PathBuf::new(),
+                hooks_config: None,
             },
             LoadedPlugin {
                 name: "p2".into(),
@@ -1088,6 +1138,7 @@ pub(crate) mod tests {
                 agents_dirs: vec![],
                 mcp_servers: HashMap::new(),
                 data_path: PathBuf::new(),
+                hooks_config: None,
             },
         ];
 
@@ -1103,6 +1154,7 @@ pub(crate) mod tests {
         assert!(result.all_mcp_servers.is_empty());
         assert!(result.all_agent_dirs.is_empty());
         assert!(result.all_commands.is_empty());
+        assert!(result.all_hooks.is_empty());
     }
 
     #[test]

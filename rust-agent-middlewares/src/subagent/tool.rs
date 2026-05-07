@@ -13,12 +13,63 @@ use rust_create_agent::tools::BaseTool;
 use crate::agent_define::{AgentDefineMiddleware, AgentOverrides};
 use crate::agents_md::AgentsMdMiddleware;
 use crate::claude_agent_parser::{parse_agent_file, ToolsValue};
+use crate::hooks::types::{HookEvent, RegisteredHook};
 use crate::middleware::todo::TodoMiddleware;
 use crate::skills::SkillsMiddleware;
 use crate::subagent::background::{BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus};
 use crate::subagent::skill_preload::SkillPreloadMiddleware;
 use crate::tools::ArcToolWrapper;
 use tokio::sync::mpsc;
+
+/// 独立（非方法）版本的 SubagentStart/SubagentStop hook 触发逻辑。
+///
+/// 同时用于两条路径：
+/// - **Normal/Fork 路径**：通过 `&self.fire_subagent_lifecycle_hook()` 间接调用
+/// - **Background 路径**：`tokio::spawn` 内无法持有 `&self` 引用，直接调用此函数
+///
+/// 统一入口确保三处触发点的行为一致（HookInput 构建、事件过滤、executor 调用）。
+async fn fire_subagent_lifecycle_hooks_static(
+    registered_hooks: &[RegisteredHook],
+    event: HookEvent,
+    cwd: &str,
+    subagent_name: &str,
+    result: Option<&str>,
+) {
+    let matching: Vec<&RegisteredHook> = registered_hooks
+        .iter()
+        .filter(|h| h.event == event)
+        .collect();
+    if matching.is_empty() {
+        return;
+    }
+
+    let input = match &event {
+        HookEvent::SubagentStart => {
+            crate::hooks::types::HookInput::subagent_start("", "", cwd, subagent_name)
+        }
+        HookEvent::SubagentStop => crate::hooks::types::HookInput::subagent_stop(
+            "",
+            "",
+            cwd,
+            subagent_name,
+            result.unwrap_or(""),
+        ),
+        _ => return,
+    };
+
+    for registered in &matching {
+        let _action = match &registered.hook {
+            crate::hooks::types::HookType::Command { .. } => {
+                crate::hooks::executor::execute_command_hook(&registered.hook, &input, registered)
+                    .await
+            }
+            crate::hooks::types::HookType::Http { .. } => {
+                crate::hooks::executor::execute_http_hook(&registered.hook, &input).await
+            }
+            _ => crate::hooks::types::HookAction::Allow,
+        };
+    }
+}
 
 /// SubAgentTool - implements the `Agent` tool, allowing LLM to delegate sub-tasks to specialized sub-agents
 ///
@@ -81,6 +132,10 @@ pub struct SubAgentTool {
     parent_messages: Option<Arc<RwLock<Vec<BaseMessage>>>>,
     /// 后台任务注册中心（run_in_background 模式使用）
     background_registry: Option<Arc<BackgroundTaskRegistry>>,
+    /// 子 agent 生命周期 hook（SubagentStart/SubagentStop）。
+    /// 从父 agent 的 HookMiddleware 中提取，由 `with_registered_hooks` 注入。
+    /// Background 路径通过 Arc clone 传入 spawn 闭包。
+    registered_hooks: Arc<Vec<RegisteredHook>>,
 }
 
 impl SubAgentTool {
@@ -100,6 +155,7 @@ impl SubAgentTool {
             cancel: None,
             parent_messages: None,
             background_registry: None,
+            registered_hooks: Arc::new(Vec::new()),
         }
     }
 
@@ -131,6 +187,13 @@ impl SubAgentTool {
         self
     }
 
+    /// Set registered hooks for SubagentStart/SubagentStop lifecycle events.
+    /// Hooks are extracted from the parent HookMiddleware and injected here.
+    pub fn with_registered_hooks(mut self, hooks: Vec<RegisteredHook>) -> Self {
+        self.registered_hooks = Arc::new(hooks);
+        self
+    }
+
     /// Extract AgentOverrides from already-parsed agent_def to avoid redundant I/O
     fn overrides_from_agent_def(
         system_prompt: &str,
@@ -152,6 +215,24 @@ impl SubAgentTool {
         } else {
             Some(overrides)
         }
+    }
+
+    /// Fire SubagentStart/SubagentStop hooks if any matching hooks are registered.
+    async fn fire_subagent_lifecycle_hook(
+        &self,
+        event: HookEvent,
+        cwd: &str,
+        subagent_name: &str,
+        result: Option<&str>,
+    ) {
+        fire_subagent_lifecycle_hooks_static(
+            &self.registered_hooks,
+            event,
+            cwd,
+            subagent_name,
+            result,
+        )
+        .await;
     }
 
     /// Filter available tools from parent tool set based on agent definition's tools/disallowedTools fields
@@ -267,14 +348,46 @@ impl SubAgentTool {
         }
 
         // 8. Execute (input = fork directive, appended as Human message by execute())
-        match agent_builder
+        // Emit SubagentStarted event + fire SubagentStart hooks
+        if let Some(ref handler) = self.event_handler {
+            handler.on_event(AgentEvent::SubagentStarted {
+                agent_name: "fork".to_string(),
+            });
+        }
+        self.fire_subagent_lifecycle_hook(HookEvent::SubagentStart, cwd, "fork", None)
+            .await;
+
+        let fork_result = agent_builder
             .execute(
                 AgentInput::text(fork_directive),
                 &mut fork_state,
                 self.cancel.clone(),
             )
-            .await
-        {
+            .await;
+
+        // Emit SubagentStopped event + fire SubagentStop hooks
+        let output_summary = match &fork_result {
+            Ok(output) => output.text.chars().take(500).collect::<String>(),
+            Err(e) => format!("Error: {}", e)
+                .chars()
+                .take(500)
+                .collect::<String>(),
+        };
+        if let Some(ref handler) = self.event_handler {
+            handler.on_event(AgentEvent::SubagentStopped {
+                agent_name: "fork".to_string(),
+                result: output_summary.clone(),
+            });
+        }
+        self.fire_subagent_lifecycle_hook(
+            HookEvent::SubagentStop,
+            cwd,
+            "fork",
+            Some(&output_summary),
+        )
+        .await;
+
+        match fork_result {
             Ok(output) => Ok(format_subagent_result(&output)),
             Err(rust_create_agent::error::AgentError::Interrupted) => {
                 Ok("Fork sub-agent execution was interrupted".to_string())
@@ -406,6 +519,11 @@ impl SubAgentTool {
         // Spawn background task
         let event_handler = self.event_handler.clone();
         let spawn_registry = Arc::clone(registry);
+        let spawn_hooks = Arc::clone(&self.registered_hooks);
+
+        // Fire SubagentStart hook before spawning
+        self.fire_subagent_lifecycle_hook(HookEvent::SubagentStart, &cwd, &agent_name, None)
+            .await;
 
         let handle = tokio::spawn(async move {
             let mut state = AgentState::new(&cwd);
@@ -444,6 +562,16 @@ impl SubAgentTool {
 
             // Push notification to channel + update registry status
             spawn_registry.complete(&spawn_task_id, result.clone());
+
+            // Fire SubagentStop hook
+            fire_subagent_lifecycle_hooks_static(
+                &spawn_hooks,
+                HookEvent::SubagentStop,
+                &cwd,
+                &spawn_agent_name,
+                Some(&result.output),
+            )
+            .await;
 
             // Emit event for TUI
             if let Some(ref handler) = event_handler {
@@ -671,10 +799,43 @@ impl BaseTool for SubAgentTool {
 
         // 7. Execute child agent
         let mut state = AgentState::new(cwd.clone());
-        match agent_builder
+
+        // Emit SubagentStarted event + fire SubagentStart hooks
+        if let Some(ref handler) = self.event_handler {
+            handler.on_event(AgentEvent::SubagentStarted {
+                agent_name: agent_id.clone(),
+            });
+        }
+        self.fire_subagent_lifecycle_hook(HookEvent::SubagentStart, &cwd, &agent_id, None)
+            .await;
+
+        let exec_result = agent_builder
             .execute(AgentInput::text(prompt), &mut state, self.cancel.clone())
-            .await
-        {
+            .await;
+
+        // Emit SubagentStopped event + fire SubagentStop hooks
+        let output_summary = match &exec_result {
+            Ok(output) => output.text.chars().take(500).collect::<String>(),
+            Err(e) => format!("Error: {}", e)
+                .chars()
+                .take(500)
+                .collect::<String>(),
+        };
+        if let Some(ref handler) = self.event_handler {
+            handler.on_event(AgentEvent::SubagentStopped {
+                agent_name: agent_id.clone(),
+                result: output_summary.clone(),
+            });
+        }
+        self.fire_subagent_lifecycle_hook(
+            HookEvent::SubagentStop,
+            &cwd,
+            &agent_id,
+            Some(&output_summary),
+        )
+        .await;
+
+        match exec_result {
             Ok(output) => Ok(format_subagent_result(&output)),
             Err(rust_create_agent::error::AgentError::Interrupted) => {
                 Ok("Sub-agent execution was interrupted".to_string())

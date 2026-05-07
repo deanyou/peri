@@ -64,6 +64,8 @@ pub struct SubAgentMiddleware {
     parent_messages: Option<Arc<RwLock<Vec<BaseMessage>>>>,
     /// 后台任务注册中心（通过 build_tool 传递给 SubAgentTool）
     background_registry: Option<Arc<BackgroundTaskRegistry>>,
+    /// Registered hooks for SubagentStart/SubagentStop lifecycle events
+    registered_hooks: Arc<Vec<crate::hooks::types::RegisteredHook>>,
 }
 
 impl SubAgentMiddleware {
@@ -85,6 +87,7 @@ impl SubAgentMiddleware {
             cancel: None,
             parent_messages: None,
             background_registry: None,
+            registered_hooks: Arc::new(Vec::new()),
         }
     }
 
@@ -116,6 +119,15 @@ impl SubAgentMiddleware {
         self
     }
 
+    /// Set registered hooks for SubagentStart/SubagentStop lifecycle events
+    pub fn with_registered_hooks(
+        mut self,
+        hooks: Vec<crate::hooks::types::RegisteredHook>,
+    ) -> Self {
+        self.registered_hooks = Arc::new(hooks);
+        self
+    }
+
     /// Build SubAgentTool instance (clone Arc fields, do not transfer ownership)
     pub fn build_tool(&self, cwd: &str) -> SubAgentTool {
         let mut tool = SubAgentTool::new(
@@ -135,6 +147,9 @@ impl SubAgentMiddleware {
         }
         if let Some(ref registry) = self.background_registry {
             tool = tool.with_background_registry(Arc::clone(registry));
+        }
+        if !self.registered_hooks.is_empty() {
+            tool = tool.with_registered_hooks(self.registered_hooks.to_vec());
         }
         tool
     }

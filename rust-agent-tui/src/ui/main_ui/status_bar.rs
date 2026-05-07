@@ -253,6 +253,8 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
         None => {
             if app.sessions[app.active].core.agent_panel.is_some() {
                 key!["↑↓" => ":选择  ", "Enter" => ":确认  ", "Esc" => ":取消"]
+            } else if app.sessions[app.active].core.hooks_panel.is_some() {
+                key!["↑↓" => ":导航  ", "Esc" => ":关闭"]
             } else if let Some(cron_panel) = &app.cron.cron_panel {
                 if cron_panel.confirm_delete {
                     key!["Enter" => ":确认  ", "其他键" => ":取消"]

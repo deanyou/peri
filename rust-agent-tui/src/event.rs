@@ -253,6 +253,12 @@ pub async fn next_event(app: &mut App) -> Result<Option<Action>> {
                 return Ok(Some(Action::Redraw));
             }
 
+            // /hooks 面板优先处理
+            if app.sessions[app.active].core.hooks_panel.is_some() {
+                handle_hooks_panel(app, input);
+                return Ok(Some(Action::Redraw));
+            }
+
             // /login 面板优先处理
             if app.sessions[app.active].core.login_panel.is_some() {
                 handle_login_panel(app, input);
@@ -749,10 +755,11 @@ pub async fn next_event(app: &mut App) -> Result<Option<Action>> {
                 return Ok(Some(Action::Redraw));
             }
 
-            // thread_browser / agent_panel / cron_panel 打开时拦截粘贴，
+            // thread_browser / agent_panel / cron_panel / hooks_panel 打开时拦截粘贴，
             // 防止文本进入后台 textarea（这些面板无文本输入字段）
             if app.sessions[app.active].core.thread_browser.is_some()
                 || app.sessions[app.active].core.agent_panel.is_some()
+                || app.sessions[app.active].core.hooks_panel.is_some()
                 || app.cron.cron_panel.is_some()
                 || app.mcp_panel.is_some()
                 || app.status_panel.is_some()
@@ -1215,6 +1222,30 @@ fn handle_agent_panel(app: &mut App, input: Input) {
         } => {
             // Enter 确认选择当前 agent（或取消选择）
             app.agent_panel_confirm();
+        }
+        _ => {}
+    }
+}
+
+// ─── /hooks 面板键盘处理 ──────────────────────────────────────────────────────
+
+fn handle_hooks_panel(app: &mut App, input: Input) {
+    match input {
+        Input {
+            key: Key::Char('c'),
+            ctrl: true,
+            ..
+        } => {}
+        Input { key: Key::Esc, .. } => {
+            app.close_hooks_panel();
+            app.sessions[app.active].core.panel_selection.clear();
+            app.sessions[app.active].core.panel_area = None;
+        }
+        Input { key: Key::Up, .. } => {
+            app.hooks_panel_move_up();
+        }
+        Input { key: Key::Down, .. } => {
+            app.hooks_panel_move_down();
         }
         _ => {}
     }

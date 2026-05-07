@@ -46,6 +46,11 @@ pub struct AgentOutput {
     pub text: String,
     pub steps: usize,
     pub tool_calls: Vec<(ToolCall, ToolResult)>,
+    /// Agent 停止原因。传给 Stop hook 的 source 字段。
+    /// 例如 "agent_complete"（正常结束）、"max_iterations"（达到上限）等。
+    /// 目前仅正常完成时为 None，未来可扩展更多 reason。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
 }
 
 impl AgentOutput {
@@ -54,6 +59,7 @@ impl AgentOutput {
             text: text.into(),
             steps,
             tool_calls: Vec::new(),
+            stop_reason: None,
         }
     }
 }

@@ -182,7 +182,41 @@ impl App {
             .as_ref()
             .map(|pd| pd.all_agent_dirs.clone())
             .unwrap_or_default();
+        let mut plugin_hooks = self
+            .plugin_data
+            .as_ref()
+            .map(|pd| pd.all_hooks.clone())
+            .unwrap_or_default();
+        let local_hooks =
+            rust_agent_middlewares::hooks::loader::load_settings_local_hooks(&self.cwd);
+
+        // hook_groups：每组对应一个独立的 HookMiddleware 实例
+        // plugin hooks 和 settings.local hooks 分组，便于独立控制
+        let mut hook_groups: Vec<Vec<rust_agent_middlewares::hooks::RegisteredHook>> = Vec::new();
+        if !plugin_hooks.is_empty() {
+            tracing::info!(count = plugin_hooks.len(), "Registering plugin hooks");
+            hook_groups.push(std::mem::take(&mut plugin_hooks));
+        }
+        if !local_hooks.is_empty() {
+            tracing::info!(
+                count = local_hooks.len(),
+                "Registering settings.local hooks"
+            );
+            hook_groups.push(local_hooks);
+        }
+
+        // 扁平化所有 hooks 供 SubAgentTool 和 SessionEnd 使用
+        let all_hooks: Vec<rust_agent_middlewares::hooks::RegisteredHook> =
+            hook_groups.iter().flatten().cloned().collect();
+
+        tracing::info!(
+            groups = hook_groups.len(),
+            total = all_hooks.len(),
+            "Hook groups assembled for agent"
+        );
+
         let mcp_init_rx = self.mcp_init_rx.clone();
+        let hook_session_start = history.is_empty();
 
         tokio::spawn(
             async move {
@@ -224,6 +258,9 @@ impl App {
                     mcp_pool,
                     plugin_skill_dirs,
                     plugin_agent_dirs,
+                    plugin_hooks: all_hooks,
+                    hook_groups,
+                    hook_session_start,
                 })
                 .await;
             }

@@ -36,6 +36,12 @@ pub struct AgentRunConfig {
     pub plugin_skill_dirs: Vec<std::path::PathBuf>,
     /// 插件 agent 搜索路径（追加到 scan_agents）
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
+    /// 插件 hooks（从 PluginLoadResult.all_hooks 传入）
+    pub plugin_hooks: Vec<rust_agent_middlewares::hooks::RegisteredHook>,
+    /// Hook 分组：每组对应一个独立的 HookMiddleware 实例，灵活控制执行顺序和生命周期
+    pub hook_groups: Vec<Vec<rust_agent_middlewares::hooks::RegisteredHook>>,
+    /// Whether this is the first message of a new session (triggers SessionStart hook)
+    pub hook_session_start: bool,
 }
 
 pub async fn run_universal_agent(cfg: AgentRunConfig) {
@@ -57,6 +63,9 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
         mcp_pool,
         plugin_skill_dirs,
         plugin_agent_dirs,
+        plugin_hooks,
+        hook_groups,
+        hook_session_start,
     } = cfg;
     // 如果设置了 agent_id，提前解析 agent.md 获取可覆盖部分（persona / tone / proactiveness），
     // 替换 system prompt 中对应占位符；安全策略、代码规范等硬约束始终保留。
@@ -246,12 +255,13 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
             as Arc<
                 dyn rust_create_agent::agent::events::AgentEventHandler,
             >),
-        llm_factory,
+        llm_factory.clone(),
     )
     .with_system_builder(system_builder)
     .with_cancel(cancel.clone())
     .with_parent_messages(parent_messages)
-    .with_background_registry(Arc::clone(&background_registry));
+    .with_background_registry(Arc::clone(&background_registry))
+    .with_registered_hooks(plugin_hooks.clone());
 
     // 构建 ReActAgent
     // FilesystemMiddleware 和 TerminalMiddleware 通过 collect_tools 自动提供工具
@@ -277,9 +287,42 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
                     ),
                 ))
             }),
-        )))
-        .add_middleware(Box::new(hitl))
-        .add_middleware(Box::new(subagent));
+        )));
+
+    // Hook middleware groups（每组对应一个独立的 HookMiddleware 实例）
+    // Placed before HITL so PermissionRequest hooks fire before the approval popup.
+    // PreToolUse hooks also fire here; SubagentStart/Stop are handled by SubAgentTool directly.
+    let mut executor = executor;
+    if !hook_groups.is_empty() {
+        let hook_llm_factory: Arc<
+            dyn Fn() -> Box<dyn rust_create_agent::agent::react::ReactLLM + Send + Sync>
+                + Send
+                + Sync,
+        > = Arc::new({
+            let factory = llm_factory.clone();
+            move || factory(None)
+        });
+        for (i, group) in hook_groups.into_iter().enumerate() {
+            if group.is_empty() {
+                continue;
+            }
+            let mw = rust_agent_middlewares::hooks::HookMiddleware::with_session_start(
+                group,
+                hook_llm_factory.clone(),
+                &cwd,
+                "", // session_id — 不由 TUI 提供
+                "", // transcript_path — 不由 TUI 提供
+                "", // permission_mode — 由 HITL 中间件管理
+                provider_name.clone(),
+                hook_session_start && i == 0, // 仅第一个 group 触发 SessionStart
+            );
+            executor = executor.add_middleware(Box::new(mw));
+        }
+    }
+
+    let executor = executor.add_middleware(Box::new(hitl));
+
+    let executor = executor.add_middleware(Box::new(subagent));
 
     // MCP 中间件：仅在 pool 初始化成功时注册
     let executor = if let Some(pool) = mcp_pool {
@@ -462,6 +505,12 @@ fn map_executor_event(event: ExecutorEvent, cwd: &str) -> Option<AgentEvent> {
             tool_calls_count: result.tool_calls_count,
             duration_ms: result.duration_ms,
         },
+        // Hook lifecycle events — not yet handled in TUI, ignore
+        ExecutorEvent::SubagentStarted { .. }
+        | ExecutorEvent::SubagentStopped { .. }
+        | ExecutorEvent::SessionEnded
+        | ExecutorEvent::CompactStarted
+        | ExecutorEvent::CompactCompleted => return None,
     })
 }
 
@@ -476,13 +525,30 @@ pub async fn compact_task(
     cwd: String,
     tx: mpsc::Sender<super::AgentEvent>,
     cancel: AgentCancellationToken,
+    registered_hooks: Vec<rust_agent_middlewares::hooks::types::RegisteredHook>,
+    session_id: String,
+    transcript_path: String,
+    provider_name: String,
 ) {
+    use rust_agent_middlewares::hooks::middleware::fire_standalone_lifecycle_hooks;
+    use rust_agent_middlewares::hooks::types::HookEvent;
     use rust_create_agent::agent::compact::{full_compact, re_inject};
 
-    tracing::info!(
-        msg_count = messages.len(),
-        "compact_task: 开始 Full Compact"
-    );
+    let msg_count = messages.len();
+
+    tracing::info!(msg_count = msg_count, "compact_task: 开始 Full Compact");
+
+    // Fire PreCompact hooks
+    fire_standalone_lifecycle_hooks(
+        &registered_hooks,
+        HookEvent::PreCompact,
+        &cwd,
+        &session_id,
+        &transcript_path,
+        &provider_name,
+        Some(msg_count),
+    )
+    .await;
 
     // full_compact 调用 LLM，支持取消
     let compact_result = tokio::select! {
@@ -490,6 +556,17 @@ pub async fn compact_task(
         _ = cancel.cancelled() => {
             tracing::info!("compact_task: 被用户取消");
             let _ = tx.send(super::AgentEvent::CompactError("已取消".to_string())).await;
+            // Fire PostCompact even on cancel
+            fire_standalone_lifecycle_hooks(
+                &registered_hooks,
+                HookEvent::PostCompact,
+                &cwd,
+                &session_id,
+                &transcript_path,
+                &provider_name,
+                Some(msg_count),
+            )
+            .await;
             return;
         }
         result = full_compact(&messages, model.as_ref(), &config, &instructions) => {
@@ -498,6 +575,17 @@ pub async fn compact_task(
                 Err(e) => {
                     tracing::error!(error = %e, "compact_task: Full Compact 失败");
                     let _ = tx.send(super::AgentEvent::CompactError(e.to_string())).await;
+                    // Fire PostCompact even on failure
+                    fire_standalone_lifecycle_hooks(
+                        &registered_hooks,
+                        HookEvent::PostCompact,
+                        &cwd,
+                        &session_id,
+                        &transcript_path,
+                        &provider_name,
+                        Some(msg_count),
+                    )
+                    .await;
                     return;
                 }
             }
@@ -510,6 +598,16 @@ pub async fn compact_task(
         let _ = tx
             .send(super::AgentEvent::CompactError("已取消".to_string()))
             .await;
+        fire_standalone_lifecycle_hooks(
+            &registered_hooks,
+            HookEvent::PostCompact,
+            &cwd,
+            &session_id,
+            &transcript_path,
+            &provider_name,
+            Some(msg_count),
+        )
+        .await;
         return;
     }
 
@@ -524,6 +622,16 @@ pub async fn compact_task(
         _ = cancel.cancelled() => {
             tracing::info!("compact_task: re_inject 阶段被取消");
             let _ = tx.send(super::AgentEvent::CompactError("已取消".to_string())).await;
+            fire_standalone_lifecycle_hooks(
+                &registered_hooks,
+                HookEvent::PostCompact,
+                &cwd,
+                &session_id,
+                &transcript_path,
+                &provider_name,
+                Some(msg_count),
+            )
+            .await;
             return;
         }
         result = re_inject(&messages, &config, &cwd) => result,
@@ -553,6 +661,18 @@ pub async fn compact_task(
     };
 
     let combined_summary = format!("{}{}", summary_text, re_inject_content);
+
+    // Fire PostCompact hooks on success
+    fire_standalone_lifecycle_hooks(
+        &registered_hooks,
+        HookEvent::PostCompact,
+        &cwd,
+        &session_id,
+        &transcript_path,
+        &provider_name,
+        Some(msg_count),
+    )
+    .await;
 
     let _ = tx
         .send(super::AgentEvent::CompactDone {

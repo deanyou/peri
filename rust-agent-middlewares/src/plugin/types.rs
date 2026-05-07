@@ -1,3 +1,4 @@
+use crate::hooks::types::HooksConfig;
 use crate::mcp::McpServerConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -100,8 +101,8 @@ pub struct PluginManifest {
     pub commands: Option<Vec<PluginCommand>>,
     pub agents: Option<Vec<PluginAgent>>,
     pub skills: Option<Vec<String>>,
-    /// 预留字段，本次不实现
-    pub hooks: Option<serde_json::Value>,
+    /// 插件 hooks 配置
+    pub hooks: Option<HooksConfig>,
     #[serde(rename = "mcpServers")]
     pub mcp_servers: Option<HashMap<String, McpServerEntry>>,
     #[serde(rename = "lspServers")]

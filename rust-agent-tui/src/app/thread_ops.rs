@@ -150,6 +150,34 @@ impl App {
 
     /// 新建 thread：清空消息，关闭 browser（thread id 在首次发送时创建）
     pub fn new_thread(&mut self) {
+        // Fire SessionEnd hooks before clearing session state
+        {
+            let mut hooks = self
+                .plugin_data
+                .as_ref()
+                .map(|pd| pd.all_hooks.clone())
+                .unwrap_or_default();
+            hooks.extend(
+                rust_agent_middlewares::hooks::loader::load_settings_local_hooks(&self.cwd),
+            );
+            if !hooks.is_empty() {
+                let cwd = self.cwd.clone();
+                let provider_name = self.provider_name.clone();
+                tokio::spawn(async move {
+                    rust_agent_middlewares::hooks::middleware::fire_standalone_lifecycle_hooks(
+                        &hooks,
+                        rust_agent_middlewares::hooks::types::HookEvent::SessionEnd,
+                        &cwd,
+                        "",
+                        "",
+                        &provider_name,
+                        None,
+                    )
+                    .await;
+                });
+            }
+        }
+
         self.sessions[self.active].core.view_messages.clear();
         self.sessions[self.active]
             .agent
@@ -262,8 +290,38 @@ impl App {
             .session_token_tracker
             .reset();
 
+        // Merge hooks for PreCompact/PostCompact dispatch
+        let mut compact_hooks: Vec<rust_agent_middlewares::hooks::types::RegisteredHook> = self
+            .plugin_data
+            .as_ref()
+            .map(|pd| pd.all_hooks.clone())
+            .unwrap_or_default();
+        compact_hooks
+            .extend(rust_agent_middlewares::hooks::loader::load_settings_local_hooks(&self.cwd));
+
+        let session_id = self.sessions[self.active]
+            .current_thread_id
+            .clone()
+            .unwrap_or_default();
+        let provider_name = self.provider_name.clone();
+        // transcript_path not available in App; hooks receive empty string
+        let transcript_path = String::new();
+
         tokio::spawn(async move {
-            agent::compact_task(messages, model, instructions, config, cwd, tx, cancel).await;
+            agent::compact_task(
+                messages,
+                model,
+                instructions,
+                config,
+                cwd,
+                tx,
+                cancel,
+                compact_hooks,
+                session_id,
+                transcript_path,
+                provider_name,
+            )
+            .await;
         });
     }
 

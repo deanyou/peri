@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod config;
 pub mod cron;
+pub mod hooks;
 pub mod login;
 pub mod mcp;
 pub mod memory;

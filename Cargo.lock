@@ -3641,6 +3641,7 @@ dependencies = [
  "grep",
  "html2text",
  "ignore",
+ "ipnet",
  "num_cpus",
  "parking_lot",
  "regex",

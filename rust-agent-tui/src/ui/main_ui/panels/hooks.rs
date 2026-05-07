@@ -1,0 +1,235 @@
+use ratatui::{
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span, Text},
+    Frame,
+};
+
+use perihelion_widgets::{BorderedPanel, ScrollState, ScrollableArea};
+
+use crate::app::hooks_panel::{hook_type_label, hook_type_summary};
+use crate::app::App;
+use crate::ui::theme;
+
+/// /hooks 面板渲染（底部展开区）
+pub(crate) fn render_hooks_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    let panel = app.sessions[app.active].core.hooks_panel.clone();
+    let Some(panel) = panel else {
+        return;
+    };
+
+    let total_hooks = panel.total_hooks();
+    let entry_count = panel.total();
+
+    let title = if entry_count == 0 {
+        " Hooks (none configured) "
+    } else {
+        " Hooks "
+    };
+
+    let inner = BorderedPanel::new(Span::styled(
+        title,
+        Style::default()
+            .fg(theme::THINKING)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .border_style(Style::default().fg(theme::BORDER))
+    .render(f, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // 统计行
+    if entry_count > 0 {
+        lines.push(Line::from(vec![Span::styled(
+            format!("{} hooks configured", total_hooks),
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )]));
+    }
+
+    // 只读提示
+    lines.push(Line::from(vec![Span::styled(
+        "This panel is read-only. To add or modify hooks, edit plugin hooks.json.",
+        Style::default().fg(theme::MUTED),
+    )]));
+    lines.push(Line::from(""));
+
+    // 事件列表
+    if entry_count == 0 {
+        lines.push(Line::from(vec![Span::styled(
+            "  No hooks configured.",
+            Style::default().fg(theme::MUTED),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "  Hooks can be added via plugin hooks/hooks.json.",
+            Style::default().fg(theme::MUTED),
+        )]));
+    } else {
+        for (i, entry) in panel.entries.iter().enumerate() {
+            let is_cursor = panel.cursor == i;
+            let cursor_char = if is_cursor { "❯" } else { " " };
+
+            let name_style = if is_cursor {
+                Style::default()
+                    .fg(theme::THINKING)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::TEXT)
+            };
+
+            // 行号 + 事件名 + hook 数量
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} {}. ", cursor_char, i + 1), name_style),
+                Span::styled(format!("{} ", entry.display_name), name_style),
+                Span::styled(
+                    format!("({})  ", entry.hook_count),
+                    Style::default().fg(theme::ACCENT),
+                ),
+                Span::styled(
+                    entry.description.as_str(),
+                    Style::default().fg(theme::MUTED),
+                ),
+            ]));
+
+            // 如果当前光标在此事件上，展开显示 hook 详情
+            if is_cursor {
+                for detail in &entry.hooks {
+                    let type_label = hook_type_label(&detail.hook_type);
+                    let summary = hook_type_summary(&detail.hook_type);
+                    let once_marker = if detail.hook_type.is_once() {
+                        " [once]"
+                    } else {
+                        ""
+                    };
+
+                    lines.push(Line::from(vec![
+                        Span::raw("     "),
+                        Span::styled(
+                            format!("[{}] ", type_label),
+                            Style::default().fg(theme::ACCENT),
+                        ),
+                        Span::styled(summary, Style::default().fg(theme::TEXT)),
+                        Span::styled(once_marker.to_string(), Style::default().fg(theme::WARNING)),
+                    ]));
+
+                    // matcher 行
+                    if let Some(matcher) = &detail.matcher {
+                        lines.push(Line::from(vec![
+                            Span::raw("         "),
+                            Span::styled(
+                                format!("matcher: {}", matcher),
+                                Style::default().fg(theme::MUTED),
+                            ),
+                        ]));
+                    }
+
+                    // plugin 来源行
+                    lines.push(Line::from(vec![
+                        Span::raw("         "),
+                        Span::styled(
+                            format!("plugin: {}", detail.plugin_name),
+                            Style::default().fg(theme::DIM),
+                        ),
+                    ]));
+                }
+                lines.push(Line::from(""));
+            }
+        }
+    }
+
+    // 存储面板元数据供鼠标选区使用
+    let scroll_offset = panel.scroll_offset;
+    app.sessions[app.active].core.panel_area = Some(inner);
+    app.sessions[app.active].core.panel_scroll_offset = scroll_offset;
+    app.sessions[app.active].core.panel_plain_lines = lines
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+
+    let mut scroll_state = ScrollState::with_offset(scroll_offset);
+    ScrollableArea::new(Text::from(lines))
+        .scrollbar_style(Style::default().fg(theme::MUTED))
+        .render(f, inner, &mut scroll_state);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::hooks_panel::HooksPanel;
+    use crate::app::App;
+    use rust_agent_middlewares::hooks::types::{HookEvent, HookType, RegisteredHook};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    async fn render_headless_hooks_empty() -> (App, crate::ui::headless::HeadlessHandle) {
+        let (mut app, mut handle) = App::new_headless(120, 30).await;
+        app.sessions[app.active].core.hooks_panel = Some(HooksPanel::new(vec![]));
+        handle
+            .terminal
+            .draw(|f| crate::ui::main_ui::render(f, &mut app))
+            .unwrap();
+        (app, handle)
+    }
+
+    #[tokio::test]
+    async fn test_hooks_empty_shows_guide() {
+        let (_, handle) = render_headless_hooks_empty().await;
+        let snap = handle.snapshot().join("\n");
+        assert!(
+            snap.contains("none configured") || snap.contains("No hooks"),
+            "empty panel should show guide, actual:\n{}",
+            snap
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hooks_empty_has_panel_title() {
+        let (_, handle) = render_headless_hooks_empty().await;
+        let snap = handle.snapshot().join("\n");
+        assert!(
+            snap.contains("Hooks"),
+            "panel should have Hooks title, actual:\n{}",
+            snap
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hooks_panel_with_data() {
+        let (mut app, mut handle) = App::new_headless(120, 30).await;
+
+        let hook: HookType = serde_json::from_value(serde_json::json!({
+            "type": "command",
+            "command": "echo hello"
+        }))
+        .unwrap();
+
+        let registered = RegisteredHook {
+            hook,
+            event: HookEvent::PreToolUse,
+            matcher: Some("Bash".to_string()),
+            plugin_name: "test-plugin".to_string(),
+            plugin_id: "test-plugin".to_string(),
+            plugin_root: PathBuf::from("/tmp/test"),
+            plugin_data_dir: PathBuf::from("/tmp/test-data"),
+            plugin_options: HashMap::new(),
+        };
+
+        app.sessions[app.active].core.hooks_panel = Some(HooksPanel::new(vec![registered]));
+        handle
+            .terminal
+            .draw(|f| crate::ui::main_ui::render(f, &mut app))
+            .unwrap();
+
+        let snap = handle.snapshot().join("\n");
+        assert!(
+            snap.contains("PreToolUse"),
+            "panel should show PreToolUse event, actual:\n{}",
+            snap
+        );
+        assert!(
+            snap.contains("1 hooks"),
+            "panel should show hook count, actual:\n{}",
+            snap
+        );
+    }
+}

@@ -595,6 +595,7 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
                     text: answer,
                     steps: step + 1,
                     tool_calls: all_tool_calls,
+                    stop_reason: None,
                 };
 
                 tracing::info!(
