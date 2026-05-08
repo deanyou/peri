@@ -90,7 +90,9 @@ impl LangfuseClient {
                 Ok(response) => {
                     let status = response.status();
                     if status.is_success() {
-                        let _ = response.bytes().await;
+                        if let Err(e) = response.bytes().await {
+                            warn!("OTLP ingestion response body read failed: {}", e);
+                        }
                         return Ok(());
                     } else if status.is_client_error() {
                         let error_text = response.text().await.unwrap_or_default();
