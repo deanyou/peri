@@ -75,7 +75,9 @@ impl Batcher {
                         }
                         Some(BatcherCommand::Flush(ack)) => {
                             Self::do_flush(&client, &mut buffer).await;
-                            let _ = ack.send(());
+                            if ack.send(()).is_err() {
+                                warn!("Batcher: flush ack receiver dropped");
+                            }
                         }
                         Some(BatcherCommand::Shutdown) | None => {
                             if !buffer.is_empty() {
