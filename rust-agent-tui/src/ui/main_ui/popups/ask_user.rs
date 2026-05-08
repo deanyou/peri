@@ -18,8 +18,10 @@ use crate::ui::theme;
 /// - 选项编号格式（单选: `❯ 1. label`，多选: `❯ ● 1. label`）
 /// - 自定义输入合并为最后一个编号选项
 pub(crate) fn render_ask_user_popup(f: &mut Frame, app: &App, area: Rect) {
-    let Some(crate::app::InteractionPrompt::Questions(prompt)) =
-        &app.sessions[app.active].agent.interaction_prompt
+    let Some(crate::app::InteractionPrompt::Questions(prompt)) = &app.session_mgr.sessions
+        [app.session_mgr.active]
+        .agent
+        .interaction_prompt
     else {
         return;
     };

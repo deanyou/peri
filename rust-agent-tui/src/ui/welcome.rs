@@ -96,6 +96,7 @@ pub(crate) fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
 
     // ── 首次使用引导（未配置 Provider 时显示）───────────────────────────
     let has_provider = app
+        .services
         .zen_config
         .as_ref()
         .map(|c| !c.config.providers.is_empty())
@@ -137,8 +138,8 @@ pub(crate) fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
 
     // ── 动态信息 ────────────────────────────────────────────────────────
     // 当前模型/Provider 信息
-    let provider = &app.provider_name;
-    let model = &app.model_name;
+    let provider = &app.services.provider_name;
+    let model = &app.services.model_name;
     if !provider.is_empty() || !model.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -150,7 +151,10 @@ pub(crate) fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    let skills_count = app.sessions[app.active].core.skills.len();
+    let skills_count = app.session_mgr.sessions[app.session_mgr.active]
+        .commands
+        .skills
+        .len();
     if skills_count > 0 {
         lines.push(Line::from(vec![
             Span::styled(" #", Style::default().fg(theme::WARNING)),

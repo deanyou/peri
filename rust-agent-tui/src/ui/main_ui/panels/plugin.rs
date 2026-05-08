@@ -433,9 +433,15 @@ fn render_list(f: &mut Frame, panel: &PluginPanel, app: &mut App, area: Rect) {
     .border_style(Style::default().fg(theme::BORDER))
     .render(f, area);
 
-    app.sessions[app.active].core.panel_area = Some(inner);
-    app.sessions[app.active].core.panel_scroll_offset = 0;
-    app.sessions[app.active].core.panel_plain_lines = lines
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(inner);
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_scroll_offset = 0;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_plain_lines = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
@@ -602,9 +608,15 @@ fn render_detail(f: &mut Frame, panel: &PluginPanel, app: &mut App, area: Rect) 
     .border_style(Style::default().fg(theme::BORDER))
     .render(f, area);
 
-    app.sessions[app.active].core.panel_area = Some(inner);
-    app.sessions[app.active].core.panel_scroll_offset = 0;
-    app.sessions[app.active].core.panel_plain_lines = lines
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(inner);
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_scroll_offset = 0;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_plain_lines = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
@@ -729,9 +741,15 @@ fn render_discover_detail(f: &mut Frame, panel: &PluginPanel, app: &mut App, are
     .border_style(Style::default().fg(theme::BORDER))
     .render(f, area);
 
-    app.sessions[app.active].core.panel_area = Some(inner);
-    app.sessions[app.active].core.panel_scroll_offset = 0;
-    app.sessions[app.active].core.panel_plain_lines = lines
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(inner);
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_scroll_offset = 0;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_plain_lines = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
@@ -1002,9 +1020,15 @@ fn render_discover_list(f: &mut Frame, panel: &PluginPanel, app: &mut App, area:
         p.discover_scroll = scroll_state.offset();
     }
 
-    app.sessions[app.active].core.panel_area = Some(inner);
-    app.sessions[app.active].core.panel_scroll_offset = 0;
-    app.sessions[app.active].core.panel_plain_lines = lines
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(inner);
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_scroll_offset = 0;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_plain_lines = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
@@ -1047,7 +1071,9 @@ fn render_add_marketplace(f: &mut Frame, panel: &PluginPanel, app: &mut App, are
     .border_style(Style::default().fg(theme::BORDER))
     .render(f, area);
 
-    app.sessions[app.active].core.panel_area = Some(inner);
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(inner);
 
     // 构建内容行（对齐 Claude Code 布局）
     let mut lines = Vec::new();
@@ -1128,7 +1154,9 @@ fn render_add_marketplace(f: &mut Frame, panel: &PluginPanel, app: &mut App, are
     ]));
 
     // 保存到 panel_plain_lines
-    app.sessions[app.active].core.panel_plain_lines = lines
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_plain_lines = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();

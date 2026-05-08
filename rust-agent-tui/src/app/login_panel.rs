@@ -422,32 +422,35 @@ impl PanelComponent for LoginPanel {
                             .get(self.cursor)
                             .map(|p| p.display_name().to_string())
                             .unwrap_or_default();
-                        let Some(cfg) = ctx.zen_config.as_mut() else {
+                        let Some(cfg) = ctx.services.zen_config.as_mut() else {
                             return EventResult::Consumed;
                         };
                         self.select_provider(cfg);
                         if !selected_name.is_empty() {
-                            ctx.sessions[ctx.active].core.view_messages.push(
-                                MessageViewModel::system(format!(
+                            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                                .messages
+                                .view_messages
+                                .push(MessageViewModel::system(format!(
                                     "已激活 Provider: {}",
                                     selected_name
-                                )),
-                            );
+                                )));
                         }
                         // Save config and update provider name
-                        if let Err(e) =
-                            super::App::save_config(cfg, ctx.config_path_override.as_deref())
-                        {
-                            ctx.sessions[ctx.active].core.view_messages.push(
-                                MessageViewModel::system(format!(
+                        if let Err(e) = super::App::save_config(
+                            cfg,
+                            ctx.services.config_path_override.as_deref(),
+                        ) {
+                            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                                .messages
+                                .view_messages
+                                .push(MessageViewModel::system(format!(
                                     "\u{914d}\u{7f6e}\u{4fdd}\u{5b58}\u{5931}\u{8d25}: {}",
                                     e
-                                )),
-                            );
+                                )));
                         }
                         if let Some(p) = super::agent::LlmProvider::from_config(cfg) {
-                            *ctx.provider_name = p.display_name().to_string();
-                            *ctx.model_name = p.model_name().to_string();
+                            ctx.services.provider_name = p.display_name().to_string();
+                            ctx.services.model_name = p.model_name().to_string();
                         }
                         EventResult::ClosePanel
                     }
@@ -555,15 +558,16 @@ impl PanelComponent for LoginPanel {
                         // apply_edit + auto-activate + close
                         let edit_name = self.buf_name.clone();
                         let is_new = self.mode == LoginPanelMode::New;
-                        let Some(cfg) = ctx.zen_config.as_mut() else {
+                        let Some(cfg) = ctx.services.zen_config.as_mut() else {
                             return EventResult::Consumed;
                         };
                         if !self.apply_edit(cfg) {
-                            ctx.sessions[ctx.active].core.view_messages.push(
-                                MessageViewModel::system(
+                            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                                .messages
+                                .view_messages
+                                .push(MessageViewModel::system(
                                     "保存失败：Provider 名称不能为空".to_string(),
-                                ),
-                            );
+                                ));
                             return EventResult::Consumed;
                         }
                         let display = if edit_name.is_empty() {
@@ -573,8 +577,8 @@ impl PanelComponent for LoginPanel {
                         };
                         // auto-activate saved provider
                         self.select_provider(cfg);
-                        ctx.sessions[ctx.active]
-                            .core
+                        ctx.session_mgr.sessions[ctx.session_mgr.active]
+                            .messages
                             .view_messages
                             .push(MessageViewModel::system(format!(
                                 "已{}并激活 Provider: {}",
@@ -582,19 +586,21 @@ impl PanelComponent for LoginPanel {
                                 display
                             )));
                         // Save config and update provider name
-                        if let Err(e) =
-                            super::App::save_config(cfg, ctx.config_path_override.as_deref())
-                        {
-                            ctx.sessions[ctx.active].core.view_messages.push(
-                                MessageViewModel::system(format!(
+                        if let Err(e) = super::App::save_config(
+                            cfg,
+                            ctx.services.config_path_override.as_deref(),
+                        ) {
+                            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                                .messages
+                                .view_messages
+                                .push(MessageViewModel::system(format!(
                                     "\u{914d}\u{7f6e}\u{4fdd}\u{5b58}\u{5931}\u{8d25}: {}",
                                     e
-                                )),
-                            );
+                                )));
                         }
                         if let Some(p) = super::agent::LlmProvider::from_config(cfg) {
-                            *ctx.provider_name = p.display_name().to_string();
-                            *ctx.model_name = p.model_name().to_string();
+                            ctx.services.provider_name = p.display_name().to_string();
+                            ctx.services.model_name = p.model_name().to_string();
                         }
                         EventResult::ClosePanel
                     }
@@ -614,7 +620,7 @@ impl PanelComponent for LoginPanel {
                         key: Key::Enter, ..
                     } => {
                         // confirm_delete (stay open, don't close)
-                        let Some(cfg) = ctx.zen_config.as_mut() else {
+                        let Some(cfg) = ctx.services.zen_config.as_mut() else {
                             return EventResult::Consumed;
                         };
                         let deleted_name = self
@@ -624,27 +630,30 @@ impl PanelComponent for LoginPanel {
                             .unwrap_or_default();
                         self.confirm_delete(cfg);
                         if !deleted_name.is_empty() {
-                            ctx.sessions[ctx.active].core.view_messages.push(
-                                MessageViewModel::system(format!(
+                            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                                .messages
+                                .view_messages
+                                .push(MessageViewModel::system(format!(
                                     "已删除 Provider: {}",
                                     deleted_name
-                                )),
-                            );
+                                )));
                         }
                         // Save config and update provider name
-                        if let Err(e) =
-                            super::App::save_config(cfg, ctx.config_path_override.as_deref())
-                        {
-                            ctx.sessions[ctx.active].core.view_messages.push(
-                                MessageViewModel::system(format!(
+                        if let Err(e) = super::App::save_config(
+                            cfg,
+                            ctx.services.config_path_override.as_deref(),
+                        ) {
+                            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                                .messages
+                                .view_messages
+                                .push(MessageViewModel::system(format!(
                                     "\u{914d}\u{7f6e}\u{4fdd}\u{5b58}\u{5931}\u{8d25}: {}",
                                     e
-                                )),
-                            );
+                                )));
                         }
                         if let Some(p) = super::agent::LlmProvider::from_config(cfg) {
-                            *ctx.provider_name = p.display_name().to_string();
-                            *ctx.model_name = p.model_name().to_string();
+                            ctx.services.provider_name = p.display_name().to_string();
+                            ctx.services.model_name = p.model_name().to_string();
                         }
                         EventResult::Consumed
                     }

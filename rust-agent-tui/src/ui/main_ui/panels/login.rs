@@ -38,6 +38,7 @@ pub(crate) fn render_login_panel(f: &mut Frame, panel: &LoginPanel, app: &App, a
     .render(f, area);
 
     let active_provider_id = app
+        .services
         .zen_config
         .as_ref()
         .map(|c| c.config.active_provider_id.as_str())
@@ -307,12 +308,10 @@ mod tests {
             cur_haiku_model: 0,
             scroll_offset: 0,
         };
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
             .session_panels
             .open(crate::app::panel_manager::PanelState::Login(panel.clone()));
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
             .session_panels
             .open(crate::app::panel_manager::PanelState::Login(panel));
         handle
@@ -360,12 +359,10 @@ mod tests {
             cur_haiku_model: 0,
             scroll_offset: 0,
         };
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
             .session_panels
             .open(crate::app::panel_manager::PanelState::Login(panel.clone()));
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
             .session_panels
             .open(crate::app::panel_manager::PanelState::Login(panel));
         handle

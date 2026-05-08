@@ -13,9 +13,9 @@ impl Command for CompactCommand {
     }
 
     fn execute(&self, app: &mut App, args: &str) {
-        if app.sessions[app.active].core.loading {
-            app.sessions[app.active]
-                .core
+        if app.session_mgr.sessions[app.session_mgr.active].ui.loading {
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system(
                     "Agent 运行中，无法执行压缩".to_string(),

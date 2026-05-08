@@ -123,22 +123,27 @@ impl PanelComponent for AgentPanel {
                 };
 
                 if is_none {
-                    ctx.sessions[ctx.active].agent.agent_id = None;
-                    ctx.sessions[ctx.active]
-                        .core
+                    ctx.session_mgr.sessions[ctx.session_mgr.active]
+                        .agent
+                        .agent_id = None;
+                    ctx.session_mgr.sessions[ctx.session_mgr.active]
+                        .messages
                         .view_messages
                         .push(crate::app::MessageViewModel::system(
                             "Agent \u{5df2}\u{91cd}\u{7f6e}\u{ff08}\u{672a}\u{8bbe}\u{7f6e} agent_id\u{ff09}".to_string(),
                         ));
                 } else if let Some(id) = agent_id {
-                    ctx.sessions[ctx.active].agent.agent_id = Some(id.clone());
+                    ctx.session_mgr.sessions[ctx.session_mgr.active]
+                        .agent
+                        .agent_id = Some(id.clone());
                     let name = agent_name.unwrap_or_else(|| id.clone());
-                    ctx.sessions[ctx.active].core.view_messages.push(
-                        crate::app::MessageViewModel::system(format!(
+                    ctx.session_mgr.sessions[ctx.session_mgr.active]
+                        .messages
+                        .view_messages
+                        .push(crate::app::MessageViewModel::system(format!(
                             "Agent \u{5df2}\u{5207}\u{6362}\u{4e3a}: {} ({})",
                             name, id
-                        )),
-                    );
+                        )));
                 }
                 EventResult::ClosePanel
             }

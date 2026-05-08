@@ -115,12 +115,24 @@ pub(crate) fn render_agent_panel(f: &mut Frame, panel: &AgentPanel, app: &mut Ap
 
     // 存储面板元数据供鼠标选区使用
     let scroll_offset = panel.scroll_offset;
-    let panel_selection_active = app.sessions[app.active].core.panel_selection.is_active();
-    let panel_selection = app.sessions[app.active].core.panel_selection.clone();
+    let panel_selection_active = app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_selection
+        .is_active();
+    let panel_selection = app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_selection
+        .clone();
 
-    app.sessions[app.active].core.panel_area = Some(inner);
-    app.sessions[app.active].core.panel_scroll_offset = scroll_offset;
-    app.sessions[app.active].core.panel_plain_lines = lines
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(inner);
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_scroll_offset = scroll_offset;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_plain_lines = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
@@ -173,12 +185,10 @@ mod tests {
     async fn render_headless_agent_empty() -> (App, crate::ui::headless::HeadlessHandle) {
         let (mut app, mut handle) = App::new_headless(120, 30).await;
         let panel = AgentPanel::new(vec![], None);
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
             .session_panels
             .open(crate::app::panel_manager::PanelState::Agent(panel.clone()));
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
             .session_panels
             .open(crate::app::panel_manager::PanelState::Agent(panel));
         handle

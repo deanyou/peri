@@ -21,8 +21,8 @@ impl crate::app::App {
             let idx = panel.cursor;
             if idx < panel.tasks.len() {
                 let id = panel.tasks[idx].id.clone();
-                self.cron.scheduler.lock().toggle(&id);
-                panel.refresh(&self.cron.scheduler);
+                self.services.cron.scheduler.lock().toggle(&id);
+                panel.refresh(&self.services.cron.scheduler);
             }
         }
     }
@@ -44,19 +44,25 @@ impl crate::app::App {
             if idx < panel.tasks.len() {
                 let prompt_preview: String = panel.tasks[idx].prompt.chars().take(30).collect();
                 let id = panel.tasks[idx].id.clone();
-                self.cron.scheduler.lock().remove(&id);
-                panel.refresh(&self.cron.scheduler);
-                self.sessions[self.active].core.view_messages.push(
-                    crate::ui::message_view::MessageViewModel::system(format!(
+                self.services.cron.scheduler.lock().remove(&id);
+                panel.refresh(&self.services.cron.scheduler);
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
+                    .view_messages
+                    .push(crate::ui::message_view::MessageViewModel::system(format!(
                         "已删除定时任务: {}",
                         prompt_preview
-                    )),
-                );
+                    )));
                 // 列表为空时关闭面板，清理面板元数据
                 if panel.tasks.is_empty() {
                     self.global_panels.close();
-                    self.sessions[self.active].core.panel_selection.clear();
-                    self.sessions[self.active].core.panel_area = None;
+                    self.session_mgr.sessions[self.session_mgr.active]
+                        .ui
+                        .panel_selection
+                        .clear();
+                    self.session_mgr.sessions[self.session_mgr.active]
+                        .ui
+                        .panel_area = None;
                 }
             }
         }

@@ -21,9 +21,12 @@ impl Command for LoopCommand {
                 "用法: /loop <自然语言时间描述> <提示词>\n例如: /loop 每隔5分钟提醒我喝水"
                     .to_string(),
             );
-            app.sessions[app.active].core.view_messages.push(vm.clone());
-            let _ = app.sessions[app.active]
-                .core
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .push(vm.clone());
+            let _ = app.session_mgr.sessions[app.session_mgr.active]
+                .messages
                 .render_tx
                 .send(RenderEvent::AddMessage(vm));
             return;
@@ -56,8 +59,19 @@ mod tests {
         let mut app = headless_app().await;
         let cmd = LoopCommand;
         cmd.execute(&mut app, "");
-        assert_eq!(app.sessions[app.active].core.view_messages.len(), 1);
-        let text = format!("{:?}", app.sessions[app.active].core.view_messages[0]);
+        assert_eq!(
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .len(),
+            1
+        );
+        let text = format!(
+            "{:?}",
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages[0]
+        );
         assert!(
             text.contains("用法"),
             "空参数应显示用法提示，实际: {}",
@@ -70,24 +84,47 @@ mod tests {
         let mut app = headless_app().await;
         let cmd = LoopCommand;
         cmd.execute(&mut app, "   ");
-        assert_eq!(app.sessions[app.active].core.view_messages.len(), 1);
-        let text = format!("{:?}", app.sessions[app.active].core.view_messages[0]);
+        assert_eq!(
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .len(),
+            1
+        );
+        let text = format!(
+            "{:?}",
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages[0]
+        );
         assert!(text.contains("用法"), "纯空格参数应显示用法提示");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_loop_cmd_valid_args_submits_message() {
         let mut app = headless_app().await;
-        let initial_len = app.sessions[app.active].core.view_messages.len();
+        let initial_len = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages
+            .len();
         let cmd = LoopCommand;
         cmd.execute(&mut app, "每隔5分钟提醒我喝水");
         // submit_message 会添加一条 user 消息到 view_messages
         assert!(
-            app.sessions[app.active].core.view_messages.len() > initial_len,
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .len()
+                > initial_len,
             "有参数时应提交消息给 Agent"
         );
         // 检查提交的消息包含 cron_register 指令
-        let text = format!("{:?}", app.sessions[app.active].core.view_messages);
+        let text = format!(
+            "{:?}",
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+        );
         assert!(
             text.contains("cron_register"),
             "提交的消息应包含 cron_register 指令，实际: {}",

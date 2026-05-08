@@ -236,7 +236,7 @@ impl ModelPanel {
         let alias_label = panel.active_tab.label().to_string();
         let effort = panel.buf_thinking_effort.clone();
 
-        let Some(cfg) = ctx.zen_config.as_mut() else {
+        let Some(cfg) = ctx.services.zen_config.as_mut() else {
             return;
         };
         panel.apply_to_config(cfg);
@@ -247,17 +247,17 @@ impl ModelPanel {
             _ => "Medium",
         };
 
-        ctx.sessions[ctx.active]
-            .core
+        ctx.session_mgr.sessions[ctx.session_mgr.active]
+            .messages
             .view_messages
             .push(crate::app::MessageViewModel::system(format!(
                 "\u{6a21}\u{578b}\u{5df2}\u{5207}\u{6362}\u{4e3a}: {} ({} effort)",
                 alias_label, effort_display
             )));
 
-        if let Err(e) = App::save_config(cfg, ctx.config_path_override.as_deref()) {
-            ctx.sessions[ctx.active]
-                .core
+        if let Err(e) = App::save_config(cfg, ctx.services.config_path_override.as_deref()) {
+            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                .messages
                 .view_messages
                 .push(crate::app::MessageViewModel::system(format!(
                     "\u{914d}\u{7f6e}\u{4fdd}\u{5b58}\u{5931}\u{8d25}: {}",
@@ -266,8 +266,8 @@ impl ModelPanel {
         }
 
         if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
-            *ctx.provider_name = p.display_name().to_string();
-            *ctx.model_name = p.model_name().to_string();
+            ctx.services.provider_name = p.display_name().to_string();
+            ctx.services.model_name = p.model_name().to_string();
         }
     }
 }

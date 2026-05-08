@@ -312,6 +312,7 @@ ReActAgent::new(llm)
 - **快捷键设计**：禁止使用 `Shift + 字母`（A-Z）组合。编辑状态下 `Shift+字母` 等同于输入大写字母，二者不可区分。全局操作用 `Ctrl + 字母` 或功能键，面板操作用 `↑/↓`、`Space`、`Enter`、`Esc`。
 - **字符串显示宽度**：终端列宽计算使用 `unicode-width` crate（`UnicodeWidthStr::width()` / `UnicodeWidthChar::width()`），CJK 等全角字符占 2 列。面板列表项截断需基于显示宽度而非 `char` 数量。
 - **测试隔离——禁止写入全局配置**：`config::save()` 默认写入 `~/.zen-code/settings.json`。Headless 测试（`new_headless`）通过 `App.config_path_override` 将保存路径重定向到临时目录。新增面板操作方法若需持久化配置，必须调用 `App::save_config(cfg, self.config_path_override.as_deref())` 而非直接调用 `crate::config::save(cfg)`，否则测试会覆盖用户的真实 Provider/API Key 配置。
+- **`CommandRegistry::dispatch` 借用限制 [TRAP]**：`dispatch(&self, app: &mut App)` 同时需要 `&self`（registry）和 `&mut App`，由于 registry 通过 session 嵌套在 App 内，Rust 借用检查器无法通过字段投影拆分。当前通过 `std::mem::take` + put-back workaround 解决。若要消除此 workaround，需重构 `dispatch` 签名（如改为传入 `&CommandRegistry` + 独立的 `&mut` 参数而非整个 `&mut App`）。
 
 ## 面板系统
 

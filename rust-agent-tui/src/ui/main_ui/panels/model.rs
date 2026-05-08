@@ -23,12 +23,14 @@ pub(crate) fn render_model_panel(f: &mut Frame, panel: &ModelPanel, app: &App, a
     .render(f, area);
 
     let active_alias = app
+        .services
         .zen_config
         .as_ref()
         .map(|c| c.config.active_alias.as_str())
         .unwrap_or("opus");
 
     let models = app
+        .services
         .zen_config
         .as_ref()
         .and_then(|c| {
@@ -141,8 +143,7 @@ mod tests {
             active_tab: AliasTab::Opus,
             buf_thinking_effort: "medium".to_string(),
         };
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
             .session_panels
             .open(crate::app::panel_manager::PanelState::Model(panel.clone()));
         handle

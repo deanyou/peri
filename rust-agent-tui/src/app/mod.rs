@@ -15,11 +15,27 @@ pub mod status_panel;
 pub mod text_selection;
 pub mod tool_display;
 
+mod service_registry;
+pub use service_registry::ServiceRegistry;
+
+mod session_manager;
+pub use session_manager::SessionManager;
+
+mod ui_state;
+pub use ui_state::UiState;
+
+mod message_state;
+pub use message_state::MessageState;
+
+mod command_system;
+mod session_metadata;
+pub use command_system::CommandSystem;
+pub use session_metadata::SessionMetadata;
+
 mod agent_comm;
 mod agent_ops;
 mod ask_user_ops;
 mod ask_user_prompt;
-mod core;
 mod cron_ops;
 mod cron_state;
 mod hint_ops;
@@ -42,8 +58,6 @@ pub use hitl_prompt::{HitlBatchPrompt, PendingAttachment};
 pub use interaction_broker::TuiInteractionBroker;
 pub use oauth_prompt::OAuthPrompt;
 
-use ratatui::layout::Rect;
-
 /// 统一交互弹窗枚举：同一时刻只允许一种弹窗激活
 pub enum InteractionPrompt {
     Approval(HitlBatchPrompt),
@@ -63,7 +77,6 @@ use tui_textarea::TextArea;
 
 use crate::config::ZenConfig;
 use crate::thread::{SqliteThreadStore, ThreadBrowser, ThreadId, ThreadMeta, ThreadStore};
-use std::path::PathBuf;
 
 // Re-export MessageViewModel from ui::message_view
 use crate::command::agents::AgentItem;
@@ -79,7 +92,6 @@ use crate::ui::render_thread::RenderEvent;
 // Re-export sub-structs
 pub use agent_comm::AgentComm;
 pub use agent_comm::RetryStatus;
-pub use core::AppCore;
 pub use cron_state::{CronPanel, CronState};
 pub use langfuse_state::LangfuseState;
 pub use mcp_panel::{DetailAction, McpPanel, McpPanelView};
@@ -91,46 +103,11 @@ pub use panel_manager::{
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 pub struct App {
-    /// 所有聊天会话（每个 session 独立拥有 UI 状态、Agent 通道、线程上下文）
-    pub sessions: Vec<ChatSession>,
-    /// 当前激活（键盘焦点）的 session 索引
-    pub active: usize,
-    /// 各 session 列区域（供鼠标点击判断）
-    pub session_areas: Vec<Rect>,
-    // ─── 共享字段（跨 session 全局）─────────────────────────────────────────
-    pub cwd: String,
-    pub provider_name: String,
-    pub model_name: String,
-    pub zen_config: Option<ZenConfig>,
-    pub thread_store: Arc<dyn ThreadStore>,
-    pub cron: CronState,
-    pub setup_wizard: Option<SetupWizardPanel>,
-    pub permission_mode: Arc<rust_agent_middlewares::prelude::SharedPermissionMode>,
-    /// 权限模式切换后的闪烁高亮截止时间，None 表示不闪烁
-    pub mode_highlight_until: Option<std::time::Instant>,
-    /// 模型切换后的闪烁高亮截止时间，None 表示不闪烁
-    pub model_highlight_until: Option<std::time::Instant>,
-    /// 测试时覆盖配置文件路径，防止污染全局 ~/.zen-code/settings.json
-    pub config_path_override: Option<PathBuf>,
-    /// 测试时覆盖 ~/.claude/settings.json 路径，防止污染全局配置
-    pub claude_settings_override: Option<PathBuf>,
-    /// MCP 连接池：首次 agent 启动时惰性初始化，App 退出时 shutdown
-    pub mcp_pool: Option<Arc<rust_agent_middlewares::mcp::McpClientPool>>,
-    /// MCP 后台初始化状态接收端
-    pub mcp_init_rx:
-        Option<tokio::sync::watch::Receiver<rust_agent_middlewares::mcp::McpInitStatus>>,
-    /// OAuth 授权弹窗状态（None 表示无弹窗）
-    pub oauth_prompt: Option<OAuthPrompt>,
+    /// 会话管理器（sessions + active + session_areas）
+    pub session_mgr: SessionManager,
+    /// 全局服务/状态聚合（跨 session 共享）
+    pub services: ServiceRegistry,
     pub global_panels: panel_manager::PanelManager,
-    /// 后台事件通道：供 spawn 的 MCP OAuth 等异步任务向 TUI 主循环发送事件
-    pub bg_event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
-    pub bg_event_rx: Option<tokio::sync::mpsc::Receiver<AgentEvent>>,
-    /// MCP 就绪提示显示截止时间（首次 Ready 时设置，3 秒后消失）
-    pub mcp_ready_shown_until: std::cell::Cell<Option<std::time::Instant>>,
-    /// 已加载的插件聚合数据（Skills 路径、MCP 服务器、Agent 路径、命令列表）
-    pub plugin_data: Option<rust_agent_middlewares::plugin::PluginLoadResult>,
-    /// 双击 Ctrl+C 退出：第一次按下时记录时间，2 秒内再次按下才真正退出
-    pub quit_pending_since: Option<std::time::Instant>,
 }
 
 impl App {
@@ -195,33 +172,38 @@ impl App {
 
         let initial_session = ChatSession::new(cwd.clone(), command_registry, skills);
 
-        Self {
-            sessions: vec![initial_session],
-            active: 0,
-            session_areas: Vec::new(),
-            cwd,
-            provider_name,
-            model_name,
-            zen_config,
-            thread_store,
-            cron: cron_state,
-            setup_wizard: None,
-            permission_mode: rust_agent_middlewares::prelude::SharedPermissionMode::new(
-                rust_agent_middlewares::prelude::PermissionMode::Bypass,
-            ),
-            mode_highlight_until: None,
-            model_highlight_until: None,
-            config_path_override: None,
-            claude_settings_override: None,
+        let session_mgr = SessionManager::new(initial_session);
+
+        let permission_mode = rust_agent_middlewares::prelude::SharedPermissionMode::new(
+            rust_agent_middlewares::prelude::PermissionMode::Bypass,
+        );
+        let services = ServiceRegistry {
+            zen_config: zen_config.clone(),
+            cwd: cwd.clone(),
+            provider_name: provider_name.clone(),
+            model_name: model_name.clone(),
+            permission_mode: permission_mode.clone(),
+            thread_store: thread_store.clone(),
             mcp_pool: None,
             mcp_init_rx: None,
-            global_panels: panel_manager::PanelManager::new(),
-            oauth_prompt: None,
-            bg_event_tx,
-            bg_event_rx: Some(bg_event_rx),
-            mcp_ready_shown_until: std::cell::Cell::new(None),
+            cron: cron_state,
             plugin_data: None,
+            bg_event_tx: bg_event_tx.clone(),
+            bg_event_rx: Some(bg_event_rx),
+            config_path_override: None,
+            claude_settings_override: None,
+            setup_wizard: None,
+            oauth_prompt: None,
+            mode_highlight_until: None,
+            model_highlight_until: None,
+            mcp_ready_shown_until: std::cell::Cell::new(None),
             quit_pending_since: None,
+        };
+
+        Self {
+            session_mgr,
+            services,
+            global_panels: panel_manager::PanelManager::new(),
         }
     }
 
@@ -229,22 +211,22 @@ impl App {
 
     /// 获取当前激活 session 的不可变引用
     pub fn active(&self) -> &ChatSession {
-        &self.sessions[self.active]
+        self.session_mgr.current()
     }
 
     /// 获取当前激活 session 的可变引用
     pub fn active_mut(&mut self) -> &mut ChatSession {
-        &mut self.sessions[self.active]
+        self.session_mgr.current_mut()
     }
 
     /// 获取指定 session 的不可变引用
     pub fn session_at(&self, idx: usize) -> Option<&ChatSession> {
-        self.sessions.get(idx)
+        self.session_mgr.session_at(idx)
     }
 
     /// 获取指定 session 的可变引用
     pub fn session_at_mut(&mut self, idx: usize) -> Option<&mut ChatSession> {
-        self.sessions.get_mut(idx)
+        self.session_mgr.session_at_mut(idx)
     }
 
     /// 创建新 session 并切换到它
@@ -264,7 +246,7 @@ impl App {
             rust_agent_middlewares::skills::list_skills(&dirs)
         };
         // 追加插件 skills（去重）
-        if let Some(pd) = &self.plugin_data {
+        if let Some(pd) = &self.services.plugin_data {
             let plugin_skills = rust_agent_middlewares::skills::list_skills(&pd.all_skill_dirs);
             let existing_names: std::collections::HashSet<String> =
                 skills.iter().map(|s| s.name.clone()).collect();
@@ -275,46 +257,46 @@ impl App {
             }
             command_registry.register_plugin_commands(pd.all_commands.clone());
         }
-        let session = ChatSession::new(self.cwd.clone(), command_registry, skills);
-        self.sessions.push(session);
-        self.active = self.sessions.len() - 1;
+        let session = ChatSession::new(self.services.cwd.clone(), command_registry, skills);
+        self.session_mgr.sessions.push(session);
+        self.session_mgr.active = self.session_mgr.sessions.len() - 1;
     }
 
     /// 关闭当前 session（保留 ≥1），返回被关闭 session 的 index
     pub fn close_session(&mut self) -> Option<usize> {
-        if self.sessions.len() <= 1 {
+        if self.session_mgr.sessions.len() <= 1 {
             return None;
         }
-        let idx = self.active;
+        let idx = self.session_mgr.active;
         // 如果有运行中的 agent，取消它
-        if let Some(token) = &self.sessions[idx].agent.cancel_token {
+        if let Some(token) = &self.session_mgr.sessions[idx].agent.cancel_token {
             token.cancel();
         }
-        self.sessions.remove(idx);
+        self.session_mgr.sessions.remove(idx);
         // 调整 active index
-        if self.active >= self.sessions.len() {
-            self.active = self.sessions.len() - 1;
+        if self.session_mgr.active >= self.session_mgr.sessions.len() {
+            self.session_mgr.active = self.session_mgr.sessions.len() - 1;
         }
         Some(idx)
     }
 
     /// 切换到下一个 session（循环）
     pub fn switch_next_session(&mut self) {
-        if self.sessions.len() <= 1 {
+        if self.session_mgr.sessions.len() <= 1 {
             return;
         }
-        self.active = (self.active + 1) % self.sessions.len();
+        self.session_mgr.active = (self.session_mgr.active + 1) % self.session_mgr.sessions.len();
     }
 
     /// 切换到上一个 session（循环）
     pub fn switch_prev_session(&mut self) {
-        if self.sessions.len() <= 1 {
+        if self.session_mgr.sessions.len() <= 1 {
             return;
         }
-        self.active = if self.active == 0 {
-            self.sessions.len() - 1
+        self.session_mgr.active = if self.session_mgr.active == 0 {
+            self.session_mgr.sessions.len() - 1
         } else {
-            self.active - 1
+            self.session_mgr.active - 1
         };
     }
 
@@ -323,13 +305,13 @@ impl App {
         use rust_agent_middlewares::mcp::{McpClientPool, McpInitStatus};
 
         let pool = Arc::new(McpClientPool::new_pending());
-        self.mcp_pool = Some(pool.clone());
+        self.services.mcp_pool = Some(pool.clone());
 
         let (init_tx, init_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
-        self.mcp_init_rx = Some(init_rx);
+        self.services.mcp_init_rx = Some(init_rx);
 
-        let cwd = self.cwd.clone();
-        let tx = self.bg_event_tx.clone();
+        let cwd = self.services.cwd.clone();
+        let tx = self.services.bg_event_tx.clone();
         let oauth_cb: Box<dyn Fn(rust_agent_middlewares::mcp::OAuthFlowEvent) + Send + Sync> =
             Box::new(move |ev| {
                 use rust_agent_middlewares::mcp::OAuthFlowEvent;
@@ -378,87 +360,130 @@ impl App {
 
     /// 中断正在运行的 Agent（Ctrl+C during loading）
     pub fn interrupt(&mut self) {
-        if let Some(token) = &self.sessions[self.active].agent.cancel_token {
+        if let Some(token) = &self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .cancel_token
+        {
             token.cancel();
-        } else if self.sessions[self.active].core.loading {
+        } else if self.session_mgr.sessions[self.session_mgr.active]
+            .ui
+            .loading
+        {
             tracing::warn!("interrupt: 无 cancel_token 但 loading=true，强制清理");
             self.set_loading(false);
-            self.sessions[self.active].agent.agent_rx = None;
-            self.sessions[self.active].agent.interaction_prompt = None;
-            self.sessions[self.active].agent.pending_hitl_items = None;
-            self.sessions[self.active].agent.pending_ask_user = None;
-            if let Some(start) = self.sessions[self.active].agent.task_start_time {
-                self.sessions[self.active].agent.last_task_duration = Some(start.elapsed());
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .agent_rx = None;
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .interaction_prompt = None;
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .pending_hitl_items = None;
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .pending_ask_user = None;
+            if let Some(start) = self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .task_start_time
+            {
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .last_task_duration = Some(start.elapsed());
             }
 
             // 如果 agent 尚未回复，恢复用户文本到输入框
-            if !self.sessions[self.active].agent.agent_replied {
-                if let Some(text) = self.sessions[self.active].core.last_submitted_text.take() {
-                    let round_start = self.sessions[self.active].core.round_start_vm_idx;
-                    self.sessions[self.active]
-                        .core
+            if !self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .agent_replied
+            {
+                if let Some(text) = self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
+                    .last_submitted_text
+                    .take()
+                {
+                    let round_start = self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
+                        .round_start_vm_idx;
+                    self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
                         .view_messages
                         .truncate(round_start);
                     {
-                        let remaining = self.sessions[self.active].core.view_messages.clone();
-                        let _ = self.sessions[self.active]
-                            .core
+                        let remaining = self.session_mgr.sessions[self.session_mgr.active]
+                            .messages
+                            .view_messages
+                            .clone();
+                        let _ = self.session_mgr.sessions[self.session_mgr.active]
+                            .messages
                             .render_tx
                             .send(RenderEvent::LoadHistory(remaining));
                     }
                     // 截断 agent_state_messages（回滚 StateSnapshot 扩展的内容）
-                    let pre_len = self.sessions[self.active].core.pre_submit_state_len;
-                    self.sessions[self.active]
+                    let pre_len = self.session_mgr.sessions[self.session_mgr.active]
+                        .metadata
+                        .pre_submit_state_len;
+                    self.session_mgr.sessions[self.session_mgr.active]
                         .agent
                         .agent_state_messages
                         .truncate(pre_len);
                     // 清除 pipeline 状态
-                    self.sessions[self.active].core.pipeline.done();
-                    let restored = self.sessions[self.active]
+                    self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
+                        .pipeline
+                        .done();
+                    let restored = self.session_mgr.sessions[self.session_mgr.active]
                         .agent
                         .agent_state_messages
                         .clone();
-                    self.sessions[self.active]
-                        .core
+                    self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
                         .pipeline
                         .restore_completed(restored);
                     let mut ta = build_textarea(false);
                     ta.insert_str(text.clone());
-                    self.sessions[self.active].core.textarea = ta;
-                    self.sessions[self.active].core.pending_messages.clear();
-                    self.sessions[self.active].core.last_human_message = None;
+                    self.session_mgr.sessions[self.session_mgr.active]
+                        .ui
+                        .textarea = ta;
+                    self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
+                        .pending_messages
+                        .clear();
+                    self.session_mgr.sessions[self.session_mgr.active]
+                        .metadata
+                        .last_human_message = None;
                     let vm =
                         MessageViewModel::system("⚠ 已强制中断（输入已恢复到输入框）".to_string());
-                    self.sessions[self.active]
-                        .core
+                    self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
                         .view_messages
                         .push(vm.clone());
-                    let _ = self.sessions[self.active]
-                        .core
+                    let _ = self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
                         .render_tx
                         .send(RenderEvent::AddMessage(vm));
                 } else {
                     let vm = MessageViewModel::system(
                         "⚠ 已强制中断（后台任务可能仍在运行）".to_string(),
                     );
-                    self.sessions[self.active]
-                        .core
+                    self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
                         .view_messages
                         .push(vm.clone());
-                    let _ = self.sessions[self.active]
-                        .core
+                    let _ = self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
                         .render_tx
                         .send(RenderEvent::AddMessage(vm));
                 }
             } else {
                 let vm =
                     MessageViewModel::system("⚠ 已强制中断（后台任务可能仍在运行）".to_string());
-                self.sessions[self.active]
-                    .core
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
                     .view_messages
                     .push(vm.clone());
-                let _ = self.sessions[self.active]
-                    .core
+                let _ = self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
                     .render_tx
                     .send(RenderEvent::AddMessage(vm));
             }
@@ -467,9 +492,9 @@ impl App {
 
     pub fn set_loading(&mut self, loading: bool) {
         let s = self.active_mut();
-        s.core.loading = loading;
+        s.ui.loading = loading;
         if loading {
-            s.core.textarea = build_textarea(true);
+            s.ui.textarea = build_textarea(true);
             s.spinner_state
                 .set_mode(perihelion_widgets::SpinnerMode::Responding);
         } else {
@@ -486,19 +511,21 @@ impl App {
 
     /// 设置当前 Agent 的 ID（用于 AgentDefineMiddleware）
     pub fn set_agent_id(&mut self, id: Option<String>) {
-        self.sessions[self.active].agent.agent_id = id;
+        self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .agent_id = id;
     }
 
     /// 获取当前 Agent 的 ID
     pub fn get_agent_id(&self) -> Option<&String> {
-        self.active().agent.agent_id.as_ref()
+        self.session_mgr.current().agent.agent_id.as_ref()
     }
 
     /// 获取当前任务运行时长（运行中）或上次任务时长（已完成）
     pub fn get_current_task_duration(&self) -> Option<std::time::Duration> {
-        let s = self.active();
+        let s = self.session_mgr.current();
         if let Some(start) = s.agent.task_start_time {
-            if s.core.loading {
+            if s.ui.loading {
                 Some(start.elapsed())
             } else {
                 s.agent.last_task_duration
@@ -513,13 +540,17 @@ impl App {
         match state.kind().scope() {
             panel_manager::PanelScope::Session => {
                 self.global_panels.close();
-                self.sessions[self.active].core.session_panels.close();
-                self.sessions[self.active].core.session_panels.open(state);
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .session_panels
+                    .close();
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .session_panels
+                    .open(state);
             }
             panel_manager::PanelScope::Global => {
                 self.global_panels.close();
-                for session in &mut self.sessions {
-                    session.core.session_panels.close();
+                for session in &mut self.session_mgr.sessions {
+                    session.session_panels.close();
                 }
                 self.global_panels.open(state);
             }
@@ -529,23 +560,24 @@ impl App {
     /// 关闭所有面板（跨所有作用域）
     pub fn close_all_panels(&mut self) {
         self.global_panels.close();
-        for session in &mut self.sessions {
-            session.core.session_panels.close();
+        for session in &mut self.session_mgr.sessions {
+            session.session_panels.close();
         }
     }
 
     /// Setup 向导保存后刷新内存中的 Provider 状态
     pub fn refresh_after_setup(&mut self, cfg: crate::config::ZenConfig) {
-        self.zen_config = Some(cfg);
-        let cfg_ref = self.zen_config.as_ref().unwrap();
+        self.services.zen_config = Some(cfg);
+        let cfg_ref = self.services.zen_config.as_ref().unwrap();
         if let Some(p) = agent::LlmProvider::from_config(cfg_ref) {
-            self.provider_name = p.display_name().to_string();
-            self.model_name = p.model_name().to_string();
+            self.services.provider_name = p.display_name().to_string();
+            self.services.model_name = p.model_name().to_string();
         }
     }
 
     pub fn get_compact_config(&self) -> rust_create_agent::agent::compact::CompactConfig {
         let mut config = self
+            .services
             .zen_config
             .as_ref()
             .and_then(|zc| zc.config.compact.clone())

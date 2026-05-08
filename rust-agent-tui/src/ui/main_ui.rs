@@ -18,14 +18,14 @@ use rust_agent_middlewares::prelude::TodoStatus;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     // Setup 向导：全屏覆盖，优先于所有正常界面
-    if app.setup_wizard.is_some() {
+    if app.services.setup_wizard.is_some() {
         popups::setup_wizard::render_setup_wizard(f, app);
         return;
     }
 
     let area = f.area();
 
-    if app.sessions.len() > 1 {
+    if app.session_mgr.sessions.len() > 1 {
         // ── 多 Session 分栏布局 ──
         // 外层：水平切分（各 session 列）+ 底部共享状态栏
         let outer = Layout::default()
@@ -38,19 +38,28 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints(vec![Constraint::Percentage(50); app.sessions.len()])
+            .constraints(vec![
+                Constraint::Percentage(50);
+                app.session_mgr.sessions.len()
+            ])
             .split(outer[0]);
 
-        app.session_areas = cols.iter().copied().collect();
+        app.session_mgr.session_areas = cols.iter().copied().collect();
 
         // 先渲染非 active session，再渲染 active session（确保光标位置正确）
         for (i, col_area) in cols.iter().enumerate() {
-            if i == app.active {
+            if i == app.session_mgr.active {
                 continue;
             }
             render_session_column(f, app, i, *col_area, false);
         }
-        render_session_column(f, app, app.active, cols[app.active], true);
+        render_session_column(
+            f,
+            app,
+            app.session_mgr.active,
+            cols[app.session_mgr.active],
+            true,
+        );
 
         status_bar::render_status_bar(f, app, outer[1]);
     } else {
@@ -67,12 +76,12 @@ fn render_session_column(
     area: Rect,
     is_active: bool,
 ) {
-    // 临时切换 active 以便现有 render 函数使用 app.sessions[app.active]
-    let prev_active = app.active;
-    app.active = session_idx;
+    // 临时切换 active 以便现有 render 函数使用 app.session_mgr.sessions[app.session_mgr.active]
+    let prev_active = app.session_mgr.active;
+    app.session_mgr.active = session_idx;
 
     // 多 session 模式：外层 block 作为聚焦指示
-    let area = if app.sessions.len() > 1 {
+    let area = if app.session_mgr.sessions.len() > 1 {
         let border_color = if is_active {
             theme::ACCENT
         } else {
@@ -89,20 +98,28 @@ fn render_session_column(
     };
 
     // 动态输入框高度
-    let line_count = app.sessions[session_idx].core.textarea.lines().len() as u16;
+    let line_count = app.session_mgr.sessions[session_idx]
+        .ui
+        .textarea
+        .lines()
+        .len() as u16;
     let input_height = (line_count + 2).min(area.height * 2 / 5).max(3);
 
     // 缓冲消息高度（loading 时在输入框上方显示待发送消息）
-    let pending_count = app.sessions[session_idx].core.pending_messages.len();
-    let queued_height: u16 = if pending_count > 0 && app.sessions[session_idx].core.loading {
-        (pending_count as u16).min(3)
-    } else {
-        0
-    };
+    let pending_count = app.session_mgr.sessions[session_idx]
+        .messages
+        .pending_messages
+        .len();
+    let queued_height: u16 =
+        if pending_count > 0 && app.session_mgr.sessions[session_idx].ui.loading {
+            (pending_count as u16).min(3)
+        } else {
+            0
+        };
 
     // 附件栏高度
-    let attachment_height: u16 = if app.sessions[session_idx]
-        .core
+    let attachment_height: u16 = if app.session_mgr.sessions[session_idx]
+        .metadata
         .pending_attachments
         .is_empty()
     {
@@ -115,8 +132,8 @@ fn render_session_column(
     let panel_height = active_panel_height(app, area.height, area.width);
 
     // Sticky header 高度
-    let sticky_header_height: u16 = app.sessions[session_idx]
-        .core
+    let sticky_header_height: u16 = app.session_mgr.sessions[session_idx]
+        .metadata
         .last_human_message
         .as_ref()
         .map(|msg| {
@@ -126,7 +143,11 @@ fn render_session_column(
         })
         .unwrap_or(0);
 
-    let status_bar_height = if app.sessions.len() > 1 { 0 } else { 3 };
+    let status_bar_height = if app.session_mgr.sessions.len() > 1 {
+        0
+    } else {
+        3
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -147,7 +168,10 @@ fn render_session_column(
     // 底部展开区
     if panel_height > 0 {
         let panel_area = chunks[3];
-        match &app.sessions[session_idx].agent.interaction_prompt {
+        match &app.session_mgr.sessions[session_idx]
+            .agent
+            .interaction_prompt
+        {
             Some(crate::app::InteractionPrompt::Approval(_)) => {
                 popups::hitl::render_hitl_popup(f, app, panel_area);
             }
@@ -156,22 +180,26 @@ fn render_session_column(
             }
             None => {}
         }
-        if app.oauth_prompt.is_some() {
+        if app.services.oauth_prompt.is_some() {
             popups::oauth::render_oauth_popup(f, app, panel_area);
         }
         // PanelManager 统一渲染分发：session 面板优先，global 面板次之
-        if !app.sessions[session_idx].agent.interaction_prompt.is_some()
-            && app.oauth_prompt.is_none()
+        if !app.session_mgr.sessions[session_idx]
+            .agent
+            .interaction_prompt
+            .is_some()
+            && app.services.oauth_prompt.is_none()
         {
-            if app.sessions[session_idx].core.session_panels.is_any_open() {
-                let mut state = app.sessions[session_idx]
-                    .core
+            if app.session_mgr.sessions[session_idx]
+                .session_panels
+                .is_any_open()
+            {
+                let mut state = app.session_mgr.sessions[session_idx]
                     .session_panels
                     .take_active()
                     .expect("is_any_open was true");
                 state.render(f, app, panel_area);
-                app.sessions[session_idx]
-                    .core
+                app.session_mgr.sessions[session_idx]
                     .session_panels
                     .put_active(state);
             } else if app.global_panels.is_any_open() {
@@ -188,7 +216,9 @@ fn render_session_column(
     // 缓冲消息预览（loading 时在输入框上方显示待发送消息）
     if queued_height > 0 {
         let queued_area = chunks[4];
-        let msgs = &app.sessions[session_idx].core.pending_messages;
+        let msgs = &app.session_mgr.sessions[session_idx]
+            .messages
+            .pending_messages;
         let visible_count = (pending_count).min(queued_height as usize);
         let dim_style = Style::default().fg(theme::MUTED);
         for (i, msg) in msgs.iter().take(visible_count).enumerate() {
@@ -227,8 +257,11 @@ fn render_session_column(
     }
 
     // 输入框（直接渲染，不 clone/set_block，避免 tui_textarea 内部状态丢失）
-    f.render_widget(&app.sessions[session_idx].core.textarea, chunks[5]);
-    app.sessions[session_idx].core.textarea_area = Some(chunks[5]);
+    f.render_widget(
+        &app.session_mgr.sessions[session_idx].ui.textarea,
+        chunks[5],
+    );
+    app.session_mgr.sessions[session_idx].ui.textarea_area = Some(chunks[5]);
 
     // ❯ 前缀
     let prompt_x = chunks[5].x;
@@ -239,7 +272,7 @@ fn render_session_column(
         width: 2,
         height: 1,
     };
-    let loading = app.sessions[session_idx].core.loading;
+    let loading = app.session_mgr.sessions[session_idx].ui.loading;
     let prompt_color = if !is_active || loading {
         theme::MUTED
     } else {
@@ -258,12 +291,12 @@ fn render_session_column(
     }
 
     // 单 session 模式下渲染状态栏
-    if app.sessions.len() == 1 {
+    if app.session_mgr.sessions.len() == 1 {
         status_bar::render_status_bar(f, app, chunks[6]);
     }
 
     // 恢复原始 active
-    app.active = prev_active;
+    app.session_mgr.active = prev_active;
 }
 
 /// 计算底部展开区所需高度（无激活面板时返回 0）
@@ -275,8 +308,7 @@ fn active_panel_height(app: &App, screen_height: u16, screen_width: u16) -> u16 
     } else {
         screen_height * 3 / 5
     };
-    let raw = if let Some(h) = app.sessions[app.active]
-        .core
+    let raw = if let Some(h) = app.session_mgr.sessions[app.session_mgr.active]
         .session_panels
         .dispatch_desired_height(screen_height, screen_width)
     {
@@ -286,14 +318,18 @@ fn active_panel_height(app: &App, screen_height: u16, screen_width: u16) -> u16 
         .dispatch_desired_height(screen_height, screen_width)
     {
         h
-    } else if let Some(crate::app::InteractionPrompt::Approval(p)) =
-        &app.sessions[app.active].agent.interaction_prompt
+    } else if let Some(crate::app::InteractionPrompt::Approval(p)) = &app.session_mgr.sessions
+        [app.session_mgr.active]
+        .agent
+        .interaction_prompt
     {
         (p.items.len() as u16 * 2 + 5).max(5)
-    } else if app.oauth_prompt.is_some() {
+    } else if app.services.oauth_prompt.is_some() {
         9 // 标题1 + 提示1 + URL1 + 空行1 + 输入框1 + 错误1 + 快捷键1 + 边框2
-    } else if let Some(crate::app::InteractionPrompt::Questions(p)) =
-        &app.sessions[app.active].agent.interaction_prompt
+    } else if let Some(crate::app::InteractionPrompt::Questions(p)) = &app.session_mgr.sessions
+        [app.session_mgr.active]
+        .agent
+        .interaction_prompt
     {
         let cur = &p.questions[p.active_tab];
         // 自适应高度：考虑文本自动换行
@@ -334,72 +370,93 @@ fn active_panel_height(app: &App, screen_height: u16, screen_width: u16) -> u16 
 
 fn render_messages(f: &mut Frame, app: &mut App, header_area: Rect, messages_area: Rect) {
     // Welcome Card 或消息列表
-    if app.sessions[app.active].core.view_messages.is_empty() {
+    if app.session_mgr.sessions[app.session_mgr.active]
+        .messages
+        .view_messages
+        .is_empty()
+    {
         welcome::render_welcome(f, app, messages_area);
         return;
     }
 
     let inner = messages_area;
-    app.sessions[app.active].core.messages_area = Some(inner);
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .messages_area = Some(inner);
     let visible_height = inner.height;
 
     // 计算 loading spinner 行（Claude Code 风格：✻ verb (Xm Xs · ↓ X.Xk tokens)）
     // compact 时紫色，其余橙色；loading 结束后显示总结行：✻ Brewed for Xm Xs
-    let spinner_line: Option<Line<'static>> = if app.sessions[app.active].core.loading {
-        let frame = perihelion_widgets::spinner::animation::tick_to_frame(
-            app.sessions[app.active].spinner_state.tick(),
-        );
-        let verb = app.sessions[app.active].spinner_state.verb();
-        let elapsed = perihelion_widgets::spinner::animation::format_elapsed(
-            app.sessions[app.active].spinner_state.elapsed_ms(),
-        );
-        let tokens = app.sessions[app.active].spinner_state.displayed_tokens();
-
-        let is_compact = verb.starts_with("压缩上下文");
-        let accent = if is_compact {
-            Style::default().fg(theme::THINKING)
-        } else {
-            Style::default().fg(theme::ACCENT)
-        };
-        let gray = Style::default().fg(theme::MUTED);
-        let mut parts = vec![
-            Span::styled(format!(" {} {}", frame, verb), accent),
-            Span::styled(format!(" ({elapsed}"), gray),
-        ];
-        if tokens > 0 {
-            let tokens_fmt = perihelion_widgets::spinner::animation::format_tokens(tokens);
-            parts.push(Span::styled(format!(" · ↓ {tokens_fmt} tokens"), gray));
-        }
-        parts.push(Span::styled(")", gray));
-        Some(Line::from(parts))
-    } else if app.sessions[app.active]
-        .spinner_state
-        .last_summary_elapsed_ms()
-        > 0
-    {
-        let elapsed = perihelion_widgets::spinner::animation::format_elapsed(
-            app.sessions[app.active]
+    let spinner_line: Option<Line<'static>> =
+        if app.session_mgr.sessions[app.session_mgr.active].ui.loading {
+            let frame = perihelion_widgets::spinner::animation::tick_to_frame(
+                app.session_mgr.sessions[app.session_mgr.active]
+                    .spinner_state
+                    .tick(),
+            );
+            let verb = app.session_mgr.sessions[app.session_mgr.active]
                 .spinner_state
-                .last_summary_elapsed_ms(),
-        );
-        Some(Line::from(Span::styled(
-            format!("  ✻  Brewed for {elapsed}"),
-            Style::default().fg(theme::MUTED),
-        )))
-    } else {
-        None
-    };
+                .verb();
+            let elapsed = perihelion_widgets::spinner::animation::format_elapsed(
+                app.session_mgr.sessions[app.session_mgr.active]
+                    .spinner_state
+                    .elapsed_ms(),
+            );
+            let tokens = app.session_mgr.sessions[app.session_mgr.active]
+                .spinner_state
+                .displayed_tokens();
+
+            let is_compact = verb.starts_with("压缩上下文");
+            let accent = if is_compact {
+                Style::default().fg(theme::THINKING)
+            } else {
+                Style::default().fg(theme::ACCENT)
+            };
+            let gray = Style::default().fg(theme::MUTED);
+            let mut parts = vec![
+                Span::styled(format!(" {} {}", frame, verb), accent),
+                Span::styled(format!(" ({elapsed}"), gray),
+            ];
+            if tokens > 0 {
+                let tokens_fmt = perihelion_widgets::spinner::animation::format_tokens(tokens);
+                parts.push(Span::styled(format!(" · ↓ {tokens_fmt} tokens"), gray));
+            }
+            parts.push(Span::styled(")", gray));
+            Some(Line::from(parts))
+        } else if app.session_mgr.sessions[app.session_mgr.active]
+            .spinner_state
+            .last_summary_elapsed_ms()
+            > 0
+        {
+            let elapsed = perihelion_widgets::spinner::animation::format_elapsed(
+                app.session_mgr.sessions[app.session_mgr.active]
+                    .spinner_state
+                    .last_summary_elapsed_ms(),
+            );
+            Some(Line::from(Span::styled(
+                format!("  ✻  Brewed for {elapsed}"),
+                Style::default().fg(theme::MUTED),
+            )))
+        } else {
+            None
+        };
 
     // 从 RenderCache 读取已渲染好的行（浅克隆 Vec 头，开销极小）
     let (mut all_lines, _total_lines, max_scroll, offset, scroll_follow, last_render_version) = {
-        let cache = app.sessions[app.active].core.render_cache.read();
+        let cache = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .render_cache
+            .read();
 
         // total_lines 已是 wrap 后的真实视觉行数（由渲染线程通过 Paragraph::line_count 计算）
         let total_lines = cache.total_lines;
         let spinner_extra: u16 = if spinner_line.is_some() {
             let base = 1; // spinner summary line
-            if app.sessions[app.active].core.loading {
-                base + 1 + app.sessions[app.active].todo_items.len() as u16 // tip + todo items
+            if app.session_mgr.sessions[app.session_mgr.active].ui.loading {
+                base + 1
+                    + app.session_mgr.sessions[app.session_mgr.active]
+                        .todo_items
+                        .len() as u16 // tip + todo items
             } else {
                 base
             }
@@ -408,8 +465,12 @@ fn render_messages(f: &mut Frame, app: &mut App, header_area: Rect, messages_are
         };
         let visual_total = (total_lines as u16).saturating_add(spinner_extra);
         let max_scroll = visual_total.saturating_sub(visible_height);
-        let scroll_follow = app.sessions[app.active].core.scroll_follow;
-        let scroll_offset = app.sessions[app.active].core.scroll_offset;
+        let scroll_follow = app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .scroll_follow;
+        let scroll_offset = app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .scroll_offset;
         let (new_follow, off, ver) = if scroll_follow {
             (scroll_follow, max_scroll, cache.version)
         } else {
@@ -429,20 +490,30 @@ fn render_messages(f: &mut Frame, app: &mut App, header_area: Rect, messages_are
         )
     };
     // 在 cache read guard 释放后写入
-    app.sessions[app.active].core.last_render_version = last_render_version;
-    app.sessions[app.active].core.scroll_follow = scroll_follow;
-    app.sessions[app.active].core.scroll_offset = offset;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .messages
+        .last_render_version = last_render_version;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .scroll_follow = scroll_follow;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .scroll_offset = offset;
     if let Some(line) = spinner_line {
         all_lines.push(line);
         // Tip + TODO 仅在活跃 loading 时显示
-        if app.sessions[app.active].core.loading {
-            let tip = crate::ui::tips::pick_tip(app.sessions[app.active].spinner_state.raw_tick());
+        if app.session_mgr.sessions[app.session_mgr.active].ui.loading {
+            let tip = crate::ui::tips::pick_tip(
+                app.session_mgr.sessions[app.session_mgr.active]
+                    .spinner_state
+                    .raw_tick(),
+            );
             all_lines.push(Line::from(vec![
                 Span::styled("  ⎿  Tip: ", Style::default().fg(theme::MUTED)),
                 Span::styled(tip, Style::default().fg(theme::MUTED)),
             ]));
             all_lines.push(Line::from(""));
-            for item in &app.sessions[app.active].todo_items {
+            for item in &app.session_mgr.sessions[app.session_mgr.active].todo_items {
                 let (icon, icon_style, text_style) = match item.status {
                     TodoStatus::InProgress => (
                         "  ◼  ",
@@ -484,13 +555,22 @@ fn render_messages(f: &mut Frame, app: &mut App, header_area: Rect, messages_are
     }
 
     // 字符级选区高亮
-    if app.sessions[app.active].core.text_selection.is_active() {
-        let ts = &app.sessions[app.active].core.text_selection;
+    if app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .text_selection
+        .is_active()
+    {
+        let ts = &app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .text_selection;
         if let (Some(start), Some(end)) = (ts.start, ts.end) {
-            let cache = app.sessions[app.active].core.render_cache.read();
+            let cache = app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .render_cache
+                .read();
             let wrap_map = &cache.wrap_map;
-            let usable_width = app.sessions[app.active]
-                .core
+            let usable_width = app.session_mgr.sessions[app.session_mgr.active]
+                .ui
                 .messages_area
                 .map(|a| a.width.saturating_sub(1))
                 .unwrap_or(0);
@@ -575,8 +655,8 @@ fn render_attachment_bar(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
 
     // 第 1 行：所有附件标签
-    let tags: String = app.sessions[app.active]
-        .core
+    let tags: String = app.session_mgr.sessions[app.session_mgr.active]
+        .metadata
         .pending_attachments
         .iter()
         .map(|att| {

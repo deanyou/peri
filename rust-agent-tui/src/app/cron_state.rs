@@ -146,8 +146,8 @@ impl CronPanel {
         let idx = self.cursor;
         if idx < self.tasks.len() {
             let id = self.tasks[idx].id.clone();
-            ctx.cron.scheduler.lock().toggle(&id);
-            self.refresh(&ctx.cron.scheduler);
+            ctx.services.cron.scheduler.lock().toggle(&id);
+            self.refresh(&ctx.services.cron.scheduler);
         }
     }
 
@@ -157,14 +157,15 @@ impl CronPanel {
         if idx < self.tasks.len() {
             let prompt_preview: String = self.tasks[idx].prompt.chars().take(30).collect();
             let id = self.tasks[idx].id.clone();
-            ctx.cron.scheduler.lock().remove(&id);
-            self.refresh(&ctx.cron.scheduler);
-            ctx.sessions[ctx.active].core.view_messages.push(
-                crate::ui::message_view::MessageViewModel::system(format!(
+            ctx.services.cron.scheduler.lock().remove(&id);
+            self.refresh(&ctx.services.cron.scheduler);
+            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                .messages
+                .view_messages
+                .push(crate::ui::message_view::MessageViewModel::system(format!(
                     "\u{5df2}\u{5220}\u{9664}\u{5b9a}\u{65f6}\u{4efb}\u{52a1}: {}",
                     prompt_preview
-                )),
-            );
+                )));
         }
     }
 }

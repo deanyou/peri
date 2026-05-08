@@ -132,9 +132,12 @@ mod tests {
         let notified = handle.render_notify.notified();
         // 使用 ASCII 内容避免 CJK 宽字符在 buffer 中的空格填充问题
         let vm = MessageViewModel::user("hello from user".into());
-        app.sessions[app.active].core.view_messages.push(vm.clone());
-        let _ = app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages
+            .push(vm.clone());
+        let _ = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .render_tx
             .send(RenderEvent::AddMessage(vm));
         notified.await;
@@ -165,8 +168,8 @@ mod tests {
         tokio::join!(n1, n2);
 
         // 验证 RenderCache 有内容
-        let lines_before = app.sessions[app.active]
-            .core
+        let lines_before = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .render_cache
             .read()
             .total_lines;
@@ -174,15 +177,21 @@ mod tests {
 
         // 注册监听后发送 Clear，确保不错过通知
         let notified_clear = handle.render_notify.notified();
-        app.sessions[app.active].core.view_messages.clear();
-        let _ = app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages
+            .clear();
+        let _ = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .render_tx
             .send(RenderEvent::Clear);
         notified_clear.await;
 
         // 验证 RenderCache 已清空
-        let cache = app.sessions[app.active].core.render_cache.read();
+        let cache = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .render_cache
+            .read();
         assert_eq!(cache.total_lines, 0, "清空后 RenderCache 应为空");
     }
 
@@ -539,7 +548,11 @@ mod tests {
         );
 
         // 验证 SubAgentGroup 已完成（is_running=false）
-        if let Some(vm) = app.sessions[app.active].core.view_messages.last() {
+        if let Some(vm) = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages
+            .last()
+        {
             assert!(vm.is_subagent_group(), "最后一条消息应为 SubAgentGroup");
             if let crate::app::MessageViewModel::SubAgentGroup {
                 is_running,
@@ -584,7 +597,10 @@ mod tests {
             recent_messages,
             is_running,
             ..
-        }) = app.sessions[app.active].core.view_messages.last()
+        }) = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages
+            .last()
         {
             assert_eq!(*total_steps, 6, "total_steps 应为 6，实际: {}", total_steps);
             assert!(
@@ -620,7 +636,10 @@ mod tests {
             recent_messages,
             final_result,
             ..
-        }) = app.sessions[app.active].core.view_messages.last()
+        }) = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages
+            .last()
         {
             let has_assistant = recent_messages.iter().any(|m| m.is_assistant());
             assert!(has_assistant, "recent_messages 应包含 AssistantBubble");
@@ -683,9 +702,15 @@ mod tests {
 
         // view_messages 应为空（没有创建空白气泡）
         assert!(
-            app.sessions[app.active].core.view_messages.is_empty(),
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .is_empty(),
             "空 AssistantChunk 不应创建 AssistantBubble，实际: {:?}",
-            app.sessions[app.active].core.view_messages.len()
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .len()
         );
 
         // 发送多个空 chunk，仍不应创建气泡
@@ -694,7 +719,10 @@ mod tests {
         app.process_pending_events();
 
         assert!(
-            app.sessions[app.active].core.view_messages.is_empty(),
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .is_empty(),
             "多个空 AssistantChunk 仍不应创建 AssistantBubble"
         );
     }
@@ -730,12 +758,18 @@ mod tests {
 
         // Done 触发 reconcile_tail 从 completed 重建，应包含 Human + AI 两条消息
         assert_eq!(
-            app.sessions[app.active].core.view_messages.len(),
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .len(),
             2,
             "应有 2 条消息（Human+AI）"
         );
         assert!(
-            app.sessions[app.active].core.view_messages[1].is_assistant(),
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages[1]
+                .is_assistant(),
             "第二条应为 AssistantBubble"
         );
         assert!(handle.contains("Hello"), "应显示 Hello 内容");
@@ -765,13 +799,19 @@ mod tests {
 
         // 应该有 1 个 ToolBlock，不应有空白 AssistantBubble
         assert_eq!(
-            app.sessions[app.active].core.view_messages.len(),
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .len(),
             1,
             "应有 1 条消息（ToolBlock）"
         );
         // 确保不是 AssistantBubble（空白气泡）
         assert!(
-            !app.sessions[app.active].core.view_messages[0].is_assistant(),
+            !app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages[0]
+                .is_assistant(),
             "不应创建 AssistantBubble，应为 ToolBlock"
         );
     }
@@ -881,7 +921,10 @@ mod tests {
         // 无消息时 sticky header 应完全隐藏
         let (mut app, mut handle) = App::new_headless(80, 24).await;
         assert!(
-            app.sessions[app.active].core.last_human_message.is_none(),
+            app.session_mgr.sessions[app.session_mgr.active]
+                .metadata
+                .last_human_message
+                .is_none(),
             "默认应无 last_human_message"
         );
         handle
@@ -907,16 +950,21 @@ mod tests {
         for i in 0..30 {
             let notified = handle.render_notify.notified();
             let vm = MessageViewModel::user(format!("message line {}", i));
-            app.sessions[app.active].core.view_messages.push(vm.clone());
-            let _ = app.sessions[app.active]
-                .core
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .push(vm.clone());
+            let _ = app.session_mgr.sessions[app.session_mgr.active]
+                .messages
                 .render_tx
                 .send(RenderEvent::AddMessage(vm));
             notified.await;
         }
 
         // 设置 last_human_message（模拟 submit_message 的效果）
-        app.sessions[app.active].core.last_human_message = Some("hello from user".to_string());
+        app.session_mgr.sessions[app.session_mgr.active]
+            .metadata
+            .last_human_message = Some("hello from user".to_string());
 
         handle
             .terminal
@@ -938,9 +986,14 @@ mod tests {
         let (mut app, mut handle) = App::new_headless(80, 24).await;
 
         // 模拟已有消息
-        app.sessions[app.active].core.last_human_message = Some("some message".to_string());
+        app.session_mgr.sessions[app.session_mgr.active]
+            .metadata
+            .last_human_message = Some("some message".to_string());
         assert!(
-            app.sessions[app.active].core.last_human_message.is_some(),
+            app.session_mgr.sessions[app.session_mgr.active]
+                .metadata
+                .last_human_message
+                .is_some(),
             "应有 last_human_message"
         );
 
@@ -950,7 +1003,10 @@ mod tests {
         notified.await;
 
         assert!(
-            app.sessions[app.active].core.last_human_message.is_none(),
+            app.session_mgr.sessions[app.session_mgr.active]
+                .metadata
+                .last_human_message
+                .is_none(),
             "/clear 后 last_human_message 应为 None"
         );
 
@@ -976,18 +1032,25 @@ mod tests {
         for i in 0..30 {
             let notified = handle.render_notify.notified();
             let vm = MessageViewModel::user(format!("padding line {}", i));
-            app.sessions[app.active].core.view_messages.push(vm.clone());
-            let _ = app.sessions[app.active]
-                .core
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .push(vm.clone());
+            let _ = app.session_mgr.sessions[app.session_mgr.active]
+                .messages
                 .render_tx
                 .send(RenderEvent::AddMessage(vm));
             notified.await;
         }
 
         // 模拟第一条消息
-        app.sessions[app.active].core.last_human_message = Some("first message".to_string());
+        app.session_mgr.sessions[app.session_mgr.active]
+            .metadata
+            .last_human_message = Some("first message".to_string());
         // 模拟第二条消息（覆盖）
-        app.sessions[app.active].core.last_human_message = Some("second message".to_string());
+        app.session_mgr.sessions[app.session_mgr.active]
+            .metadata
+            .last_human_message = Some("second message".to_string());
 
         handle
             .terminal
@@ -1017,9 +1080,12 @@ mod tests {
         for i in 0..30 {
             let notified = handle.render_notify.notified();
             let vm = MessageViewModel::user(format!("padding {}", i));
-            app.sessions[app.active].core.view_messages.push(vm.clone());
-            let _ = app.sessions[app.active]
-                .core
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .push(vm.clone());
+            let _ = app.session_mgr.sessions[app.session_mgr.active]
+                .messages
                 .render_tx
                 .send(RenderEvent::AddMessage(vm));
             notified.await;
@@ -1029,7 +1095,9 @@ mod tests {
         let long_msg =
             "hello this is a very long message that definitely exceeds header capacity".to_string();
         assert!(long_msg.chars().count() > 40);
-        app.sessions[app.active].core.last_human_message = Some(long_msg.clone());
+        app.session_mgr.sessions[app.session_mgr.active]
+            .metadata
+            .last_human_message = Some(long_msg.clone());
 
         handle
             .terminal
@@ -1053,12 +1121,14 @@ mod tests {
         let (mut app, mut handle) = App::new_headless(120, 30).await;
 
         // Register a cron task
-        app.cron
+        app.services
+            .cron
             .scheduler
             .lock()
             .register("* * * * *", "hello cron test")
             .unwrap();
         let tasks: Vec<_> = app
+            .services
             .cron
             .scheduler
             .lock()
@@ -1100,9 +1170,11 @@ mod tests {
         // BorderedPanel 集成冒烟测试：渲染 agent panel 验证无 panic 且输出正确
         let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-        app.sessions[app.active].core.session_panels.open(
-            crate::app::panel_manager::PanelState::Agent(crate::app::AgentPanel::new(vec![], None)),
-        );
+        app.session_mgr.sessions[app.session_mgr.active]
+            .session_panels
+            .open(crate::app::panel_manager::PanelState::Agent(
+                crate::app::AgentPanel::new(vec![], None),
+            ));
 
         handle
             .terminal
@@ -1153,8 +1225,9 @@ mod tests {
             },
         ]);
         let prompt = AskUserBatchPrompt::from_request(req);
-        app.sessions[app.active].agent.interaction_prompt =
-            Some(crate::app::InteractionPrompt::Questions(prompt));
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .interaction_prompt = Some(crate::app::InteractionPrompt::Questions(prompt));
 
         handle
             .terminal
@@ -1235,7 +1308,7 @@ mod tests {
         #[tokio::test]
         async fn test_needs_setup_triggers_for_empty_config() {
             let (app, _handle) = App::new_headless(120, 30).await;
-            assert!(app.zen_config.is_none());
+            assert!(app.services.zen_config.is_none());
             let empty_cfg = crate::config::types::ZenConfig::default();
             assert!(needs_setup(&empty_cfg.config));
         }
@@ -1308,8 +1381,8 @@ mod tests {
         #[tokio::test]
         async fn test_setup_wizard_skip_on_choose() {
             let (mut app, _handle) = App::new_headless(120, 30).await;
-            app.setup_wizard = Some(SetupWizardPanel::new());
-            let wizard = app.setup_wizard.as_mut().unwrap();
+            app.services.setup_wizard = Some(SetupWizardPanel::new());
+            let wizard = app.services.setup_wizard.as_mut().unwrap();
             let action = handle_setup_wizard_key(wizard, make_key(Key::Esc));
             assert!(matches!(action, Some(SetupWizardAction::Skip)));
         }
@@ -1379,19 +1452,19 @@ mod tests {
             fill_and_submit(&mut wizard, "sk-final-test");
             assert_eq!(wizard.step, SetupStep::Done);
 
-            app.setup_wizard = Some(wizard);
-            let wizard = app.setup_wizard.as_mut().unwrap();
+            app.services.setup_wizard = Some(wizard);
+            let wizard = app.services.setup_wizard.as_mut().unwrap();
             let action = handle_setup_wizard_key(wizard, make_key(Key::Enter));
             assert!(matches!(action, Some(SetupWizardAction::SaveAndClose)));
 
-            let wizard = app.setup_wizard.take().unwrap();
+            let wizard = app.services.setup_wizard.take().unwrap();
             let temp_dir =
                 std::env::temp_dir().join(format!("zen-setup-final-{}", uuid::Uuid::now_v7()));
             let config_path = temp_dir.join("settings.json");
             let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
             assert!(!needs_setup(&cfg.config));
-            app.zen_config = Some(cfg);
-            assert!(app.setup_wizard.is_none());
+            app.services.zen_config = Some(cfg);
+            assert!(app.services.setup_wizard.is_none());
             let _ = std::fs::remove_dir_all(&temp_dir);
         }
     }
@@ -1402,7 +1475,7 @@ mod tests {
         let (app, _handle) = App::new_headless(80, 24).await;
         use rust_agent_middlewares::prelude::PermissionMode;
         assert_eq!(
-            app.permission_mode.load(),
+            app.services.permission_mode.load(),
             PermissionMode::Bypass,
             "headless App 默认应为 Bypass"
         );
@@ -1419,9 +1492,9 @@ mod tests {
             PermissionMode::AutoMode,
             PermissionMode::Bypass,
         ] {
-            app.permission_mode.store(mode);
+            app.services.permission_mode.store(mode);
             assert_eq!(
-                app.permission_mode.load(),
+                app.services.permission_mode.load(),
                 mode,
                 "store/load 应一致: {:?}",
                 mode
@@ -1434,10 +1507,10 @@ mod tests {
         let (app, _handle) = App::new_headless(80, 24).await;
         use rust_agent_middlewares::prelude::PermissionMode;
         // cycle 从 Bypass 开始 → Default
-        let next = app.permission_mode.cycle();
+        let next = app.services.permission_mode.cycle();
         assert_eq!(next, PermissionMode::Default);
         // 继续循环 → DontAsk
-        let next2 = app.permission_mode.cycle();
+        let next2 = app.services.permission_mode.cycle();
         assert_eq!(next2, PermissionMode::DontAsk);
     }
 
@@ -1461,7 +1534,7 @@ mod tests {
         use rust_agent_middlewares::prelude::PermissionMode;
         let (mut app, mut handle) = App::new_headless(120, 24).await;
         // 切换到 Default - 不显示标签
-        app.permission_mode.store(PermissionMode::Default);
+        app.services.permission_mode.store(PermissionMode::Default);
         handle
             .terminal
             .draw(|f| crate::ui::main_ui::render(f, &mut app))
@@ -1473,7 +1546,7 @@ mod tests {
         );
 
         // 切换到 DontAsk
-        app.permission_mode.store(PermissionMode::DontAsk);
+        app.services.permission_mode.store(PermissionMode::DontAsk);
         handle
             .terminal
             .draw(|f| crate::ui::main_ui::render(f, &mut app))
@@ -1485,7 +1558,9 @@ mod tests {
         );
 
         // 切换到 AcceptEdit
-        app.permission_mode.store(PermissionMode::AcceptEdit);
+        app.services
+            .permission_mode
+            .store(PermissionMode::AcceptEdit);
         handle
             .terminal
             .draw(|f| crate::ui::main_ui::render(f, &mut app))
@@ -1497,7 +1572,7 @@ mod tests {
         );
 
         // 切换到 AutoMode
-        app.permission_mode.store(PermissionMode::AutoMode);
+        app.services.permission_mode.store(PermissionMode::AutoMode);
         handle
             .terminal
             .draw(|f| crate::ui::main_ui::render(f, &mut app))
@@ -1514,16 +1589,16 @@ mod tests {
         use rust_agent_middlewares::prelude::PermissionMode;
         let (app, _handle) = App::new_headless(120, 24).await;
         // 初始 Bypass
-        assert_eq!(app.permission_mode.load(), PermissionMode::Bypass);
+        assert_eq!(app.services.permission_mode.load(), PermissionMode::Bypass);
         // 模拟 Shift+Tab 按键效果（直接调用 cycle）
-        let next = app.permission_mode.cycle();
+        let next = app.services.permission_mode.cycle();
         assert_eq!(next, PermissionMode::Default, "Bypass 之后应为 Default");
-        assert_eq!(app.permission_mode.load(), PermissionMode::Default);
+        assert_eq!(app.services.permission_mode.load(), PermissionMode::Default);
         // 继续循环 4 次回到 Bypass
-        app.permission_mode.cycle(); // DontAsk
-        app.permission_mode.cycle(); // AcceptEdit
-        app.permission_mode.cycle(); // AutoMode
-        let final_mode = app.permission_mode.cycle(); // Bypass
+        app.services.permission_mode.cycle(); // DontAsk
+        app.services.permission_mode.cycle(); // AcceptEdit
+        app.services.permission_mode.cycle(); // AutoMode
+        let final_mode = app.services.permission_mode.cycle(); // Bypass
         assert_eq!(final_mode, PermissionMode::Bypass, "循环 5 次回到起点");
     }
 
@@ -1531,17 +1606,20 @@ mod tests {
     async fn test_mode_highlight_until_set_on_cycle() {
         let (mut app, _handle) = App::new_headless(120, 24).await;
         // 初始无闪烁
-        assert!(app.mode_highlight_until.is_none(), "初始不应有闪烁");
+        assert!(
+            app.services.mode_highlight_until.is_none(),
+            "初始不应有闪烁"
+        );
         // 模拟 Shift+Tab: cycle + 设置 highlight
-        app.permission_mode.cycle();
-        app.mode_highlight_until =
+        app.services.permission_mode.cycle();
+        app.services.mode_highlight_until =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
         assert!(
-            app.mode_highlight_until.is_some(),
+            app.services.mode_highlight_until.is_some(),
             "cycle 后应设置闪烁截止时间"
         );
         // 验证截止时间在未来
-        let until = app.mode_highlight_until.unwrap();
+        let until = app.services.mode_highlight_until.unwrap();
         assert!(std::time::Instant::now() < until, "截止时间应在未来");
     }
 
@@ -1549,14 +1627,14 @@ mod tests {
     async fn test_spinner_shows_verb_in_status_bar() {
         let (mut app, mut handle) = crate::app::App::new_headless(120, 30).await;
         // 添加一条消息，否则 render_messages 会走 welcome 分支提前 return
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .view_messages
             .push(crate::app::MessageViewModel::user("hello".into()));
-        app.sessions[app.active]
+        app.session_mgr.sessions[app.session_mgr.active]
             .spinner_state
             .set_verb(Some("Searching code"));
-        app.sessions[app.active].core.loading = true;
+        app.session_mgr.sessions[app.session_mgr.active].ui.loading = true;
 
         handle
             .terminal
@@ -1602,7 +1680,9 @@ mod tests {
         let (mut app, mut handle) = App::new_headless(120, 30).await;
 
         // 直接设置 retry_status 并渲染
-        app.sessions[app.active].agent.retry_status = Some(crate::app::RetryStatus {
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .retry_status = Some(crate::app::RetryStatus {
             attempt: 2,
             max_attempts: 5,
             delay_ms: 2000,
@@ -1651,7 +1731,9 @@ mod tests {
         notified.await;
 
         // view_messages 应包含压缩提示、摘要和重新注入信息
-        let msgs = &app.sessions[app.active].core.view_messages;
+        let msgs = &app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages;
         assert!(msgs.len() >= 2, "应有至少 2 条消息，实际: {}", msgs.len());
         let has_compact = msgs.iter().any(|m| {
             if let MessageViewModel::SystemNote { content } = m {
@@ -1679,7 +1761,9 @@ mod tests {
         app.process_pending_events();
         notified.await;
 
-        let msgs = &app.sessions[app.active].core.view_messages;
+        let msgs = &app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages;
         assert!(!msgs.is_empty(), "应有至少 1 条消息");
         let has_summary = msgs.iter().any(|m| {
             if let MessageViewModel::AssistantBubble { blocks, .. } = m {
@@ -1722,7 +1806,7 @@ mod tests {
             auto_compact_threshold: 0.9,
             ..Default::default()
         });
-        app.zen_config = Some(zen);
+        app.services.zen_config = Some(zen);
         let config = app.get_compact_config();
         assert!(
             (config.auto_compact_threshold - 0.9).abs() < 0.001,
@@ -1741,12 +1825,12 @@ mod tests {
 
         // 模拟用户发送消息
         let user_vm = MessageViewModel::user("my question".into());
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .view_messages
             .push(user_vm.clone());
-        let _ = app.sessions[app.active]
-            .core
+        let _ = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .render_tx
             .send(RenderEvent::AddMessage(user_vm));
 
@@ -1768,9 +1852,16 @@ mod tests {
 
         // view_messages 应包含用户消息 + AI 消息
         assert!(
-            app.sessions[app.active].core.view_messages.len() >= 2,
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .len()
+                >= 2,
             "应有至少 2 条消息（用户+AI），实际: {}",
-            app.sessions[app.active].core.view_messages.len()
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .len()
         );
         assert!(
             handle.contains("my question"),
@@ -1793,15 +1884,19 @@ mod tests {
 
         // 第一轮：用户 → AI
         // 模拟 submit_message：先记录 round_start_vm_idx，再 push Human VM
-        app.sessions[app.active].core.round_start_vm_idx =
-            app.sessions[app.active].core.view_messages.len();
+        app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages
+            .len();
         let user1 = MessageViewModel::user("turn1".into());
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .view_messages
             .push(user1.clone());
-        let _ = app.sessions[app.active]
-            .core
+        let _ = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .render_tx
             .send(RenderEvent::AddMessage(user1));
 
@@ -1818,15 +1913,19 @@ mod tests {
 
         // 第二轮：用户 → AI
         // 模拟 submit_message：先记录 round_start_vm_idx，再 push Human VM
-        app.sessions[app.active].core.round_start_vm_idx =
-            app.sessions[app.active].core.view_messages.len();
+        app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages
+            .len();
         let user2 = MessageViewModel::user("turn2".into());
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .view_messages
             .push(user2.clone());
-        let _ = app.sessions[app.active]
-            .core
+        let _ = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .render_tx
             .send(RenderEvent::AddMessage(user2));
 
@@ -1850,10 +1949,16 @@ mod tests {
 
         // 应累积 4 条消息
         assert_eq!(
-            app.sessions[app.active].core.view_messages.len(),
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .len(),
             4,
             "两轮对话应有 4 条消息，实际: {}",
-            app.sessions[app.active].core.view_messages.len()
+            app.session_mgr.sessions[app.session_mgr.active]
+                .messages
+                .view_messages
+                .len()
         );
         assert!(handle.contains("turn1"), "第一轮用户消息应可见");
         assert!(handle.contains("turn2"), "第二轮用户消息应可见");
@@ -1876,8 +1981,8 @@ mod tests {
         app.process_pending_events();
 
         // 统计包含 "unique text" 的 assistant bubble 数量
-        let assistant_count = app.sessions[app.active]
-            .core
+        let assistant_count = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .view_messages
             .iter()
             .filter(|m| m.is_assistant())
@@ -1942,13 +2047,13 @@ mod tests {
             .unwrap();
 
         // ToolBlock 和 AssistantBubble 都应存在
-        let has_tool = app.sessions[app.active]
-            .core
+        let has_tool = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .view_messages
             .iter()
             .any(|m| matches!(m, MessageViewModel::ToolBlock { .. }));
-        let has_assistant = app.sessions[app.active]
-            .core
+        let has_assistant = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .view_messages
             .iter()
             .any(|m| m.is_assistant());
@@ -1965,20 +2070,30 @@ mod tests {
         let (mut app, mut handle) = App::new_headless(120, 30).await;
 
         // 设置输入框内容为 /
-        app.sessions[app.active].core.textarea = crate::app::build_textarea(false);
-        app.sessions[app.active].core.textarea.insert_str("/");
+        app.session_mgr.sessions[app.session_mgr.active].ui.textarea =
+            crate::app::build_textarea(false);
+        app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .textarea
+            .insert_str("/");
 
         // 注入 2 个 Skills
-        app.sessions[app.active].core.skills.push(SkillMetadata {
-            name: "commit".into(),
-            description: "commit changes".into(),
-            path: "/tmp/commit.md".into(),
-        });
-        app.sessions[app.active].core.skills.push(SkillMetadata {
-            name: "review".into(),
-            description: "review code".into(),
-            path: "/tmp/review.md".into(),
-        });
+        app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .skills
+            .push(SkillMetadata {
+                name: "commit".into(),
+                description: "commit changes".into(),
+                path: "/tmp/commit.md".into(),
+            });
+        app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .skills
+            .push(SkillMetadata {
+                name: "review".into(),
+                description: "review code".into(),
+                path: "/tmp/review.md".into(),
+            });
 
         handle
             .terminal
@@ -2012,14 +2127,21 @@ mod tests {
         use rust_agent_middlewares::skills::loader::SkillMetadata;
         let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-        app.sessions[app.active].core.textarea = crate::app::build_textarea(false);
-        app.sessions[app.active].core.textarea.insert_str("/mo");
+        app.session_mgr.sessions[app.session_mgr.active].ui.textarea =
+            crate::app::build_textarea(false);
+        app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .textarea
+            .insert_str("/mo");
 
-        app.sessions[app.active].core.skills.push(SkillMetadata {
-            name: "commit".into(),
-            description: "commit changes".into(),
-            path: "/tmp/commit.md".into(),
-        });
+        app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .skills
+            .push(SkillMetadata {
+                name: "commit".into(),
+                description: "commit changes".into(),
+                path: "/tmp/commit.md".into(),
+            });
 
         handle
             .terminal
@@ -2047,14 +2169,21 @@ mod tests {
         use rust_agent_middlewares::skills::loader::SkillMetadata;
         let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-        app.sessions[app.active].core.textarea = crate::app::build_textarea(false);
-        app.sessions[app.active].core.textarea.insert_str("#skill");
+        app.session_mgr.sessions[app.session_mgr.active].ui.textarea =
+            crate::app::build_textarea(false);
+        app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .textarea
+            .insert_str("#skill");
 
-        app.sessions[app.active].core.skills.push(SkillMetadata {
-            name: "skill".into(),
-            description: "a skill".into(),
-            path: "/tmp/skill.md".into(),
-        });
+        app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .skills
+            .push(SkillMetadata {
+                name: "skill".into(),
+                description: "a skill".into(),
+                path: "/tmp/skill.md".into(),
+            });
 
         handle
             .terminal
@@ -2078,23 +2207,40 @@ mod tests {
         use rust_agent_middlewares::skills::loader::SkillMetadata;
         let (mut app, _handle) = App::new_headless(120, 30).await;
 
-        app.sessions[app.active].core.textarea = crate::app::build_textarea(false);
-        app.sessions[app.active].core.textarea.insert_str("/review");
-        app.sessions[app.active].core.skills.push(SkillMetadata {
-            name: "review".into(),
-            description: "code review".into(),
-            path: "/tmp/review.md".into(),
-        });
+        app.session_mgr.sessions[app.session_mgr.active].ui.textarea =
+            crate::app::build_textarea(false);
+        app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .textarea
+            .insert_str("/review");
+        app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .skills
+            .push(SkillMetadata {
+                name: "review".into(),
+                description: "code review".into(),
+                path: "/tmp/review.md".into(),
+            });
 
         // 模拟 Enter 事件处理
-        let text: String = app.sessions[app.active].core.textarea.lines().join("\n");
+        let text: String = app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .textarea
+            .lines()
+            .join("\n");
         let text = text.trim().to_string();
         assert!(text.starts_with('/'));
 
         // 验证命令 dispatch 不匹配后 Skill fallback
-        let registry = std::mem::take(&mut app.sessions[app.active].core.command_registry);
+        let registry = std::mem::take(
+            &mut app.session_mgr.sessions[app.session_mgr.active]
+                .commands
+                .command_registry,
+        );
         let known = registry.dispatch(&mut app, &text);
-        app.sessions[app.active].core.command_registry = registry;
+        app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .command_registry = registry;
         assert!(!known, "review 不应是已知命令");
 
         // 验证 Skill 匹配
@@ -2104,8 +2250,8 @@ mod tests {
             .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
             .collect();
         assert_eq!(skill_name, "review");
-        let skill_found = app.sessions[app.active]
-            .core
+        let skill_found = app.session_mgr.sessions[app.session_mgr.active]
+            .commands
             .skills
             .iter()
             .find(|s| s.name == skill_name);
@@ -2116,18 +2262,29 @@ mod tests {
     async fn test_enter_unknown_command_shows_error() {
         let (mut app, _handle) = App::new_headless(120, 30).await;
 
-        app.sessions[app.active].core.textarea = crate::app::build_textarea(false);
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active].ui.textarea =
+            crate::app::build_textarea(false);
+        app.session_mgr.sessions[app.session_mgr.active]
+            .ui
             .textarea
             .insert_str("/nonexistent");
 
         // 模拟 Enter 处理逻辑
-        let text: String = app.sessions[app.active].core.textarea.lines().join("\n");
+        let text: String = app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .textarea
+            .lines()
+            .join("\n");
         let text = text.trim().to_string();
-        let registry = std::mem::take(&mut app.sessions[app.active].core.command_registry);
+        let registry = std::mem::take(
+            &mut app.session_mgr.sessions[app.session_mgr.active]
+                .commands
+                .command_registry,
+        );
         let known = registry.dispatch(&mut app, &text);
-        app.sessions[app.active].core.command_registry = registry;
+        app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .command_registry = registry;
         assert!(!known, "nonexistent 不应是已知命令");
 
         // Skill fallback 也应失败
@@ -2136,8 +2293,8 @@ mod tests {
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
             .collect();
-        let skill_found = app.sessions[app.active]
-            .core
+        let skill_found = app.session_mgr.sessions[app.session_mgr.active]
+            .commands
             .skills
             .iter()
             .find(|s| s.name == skill_name);
@@ -2150,16 +2307,25 @@ mod tests {
         let (mut app, _handle) = App::new_headless(120, 30).await;
 
         // 注入名为 help 的 Skill
-        app.sessions[app.active].core.skills.push(SkillMetadata {
-            name: "help".into(),
-            description: "help skill".into(),
-            path: "/tmp/help.md".into(),
-        });
+        app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .skills
+            .push(SkillMetadata {
+                name: "help".into(),
+                description: "help skill".into(),
+                path: "/tmp/help.md".into(),
+            });
 
         // /help 应被命令 dispatch 拦截，不走 Skill fallback
-        let registry = std::mem::take(&mut app.sessions[app.active].core.command_registry);
+        let registry = std::mem::take(
+            &mut app.session_mgr.sessions[app.session_mgr.active]
+                .commands
+                .command_registry,
+        );
         let known = registry.dispatch(&mut app, "/help");
-        app.sessions[app.active].core.command_registry = registry;
+        app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .command_registry = registry;
         assert!(known, "/help 应是已知命令，优先于同名 Skill");
     }
 
@@ -2205,13 +2371,21 @@ mod tests {
     async fn test_ambiguous_command_shows_candidates() {
         let (mut app, _handle) = App::new_headless(120, 30).await;
         // /c 前缀匹配 clear/compact/cron
-        let registry = &app.sessions[app.active].core.command_registry;
+        let registry = &app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .command_registry;
         let matches = registry.match_prefix("c");
         assert!(matches.len() >= 2, "/c 应匹配多个命令，实际: {:?}", matches);
         // dispatch 应返回 false（歧义）
-        let registry = std::mem::take(&mut app.sessions[app.active].core.command_registry);
+        let registry = std::mem::take(
+            &mut app.session_mgr.sessions[app.session_mgr.active]
+                .commands
+                .command_registry,
+        );
         let known = registry.dispatch(&mut app, "/c");
-        app.sessions[app.active].core.command_registry = registry;
+        app.session_mgr.sessions[app.session_mgr.active]
+            .commands
+            .command_registry = registry;
         assert!(!known, "歧义前缀 dispatch 应返回 false");
     }
 
@@ -2244,7 +2418,9 @@ mod tests {
         let (mut app, _handle) = App::new_headless(120, 30).await;
         // 空消息时调用 compact 应提示无上下文
         app.start_compact(String::new());
-        let msgs = &app.sessions[app.active].core.view_messages;
+        let msgs = &app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages;
         let has_hint = msgs.iter().any(|vm| {
             if let crate::ui::message_view::MessageViewModel::SystemNote { content } = vm {
                 content.contains("无可压缩")
@@ -2558,14 +2734,13 @@ mod tests {
                 ..Default::default()
             },
         };
-        app.zen_config = Some(cfg);
-        app.sessions[app.active].core.session_panels.open(
-            crate::app::panel_manager::PanelState::Model(ModelPanel::from_config(
-                app.zen_config.as_ref().unwrap(),
-            )),
-        );
-        app.sessions[app.active]
-            .core
+        app.services.zen_config = Some(cfg);
+        app.session_mgr.sessions[app.session_mgr.active]
+            .session_panels
+            .open(crate::app::panel_manager::PanelState::Model(
+                ModelPanel::from_config(app.services.zen_config.as_ref().unwrap()),
+            ));
+        app.session_mgr.sessions[app.session_mgr.active]
             .session_panels
             .get_mut::<ModelPanel>()
             .unwrap()
@@ -2573,7 +2748,10 @@ mod tests {
 
         app.model_panel_confirm();
 
-        let last_msg = app.sessions[app.active].core.view_messages.last();
+        let last_msg = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages
+            .last();
         assert!(last_msg.is_some(), "Model 面板确认后应有反馈消息");
         let msg_text = match last_msg.unwrap() {
             MessageViewModel::SystemNote { content, .. } => content.clone(),
@@ -2585,8 +2763,7 @@ mod tests {
             msg_text
         );
         assert!(
-            !app.sessions[app.active]
-                .core
+            !app.session_mgr.sessions[app.session_mgr.active]
                 .session_panels
                 .is_active(crate::app::PanelKind::Model),
             "确认后面板应关闭"
@@ -2620,15 +2797,14 @@ mod tests {
                 ..Default::default()
             },
         };
-        app.zen_config = Some(cfg);
-        app.sessions[app.active].core.session_panels.open(
-            crate::app::panel_manager::PanelState::Login(LoginPanel::from_config(
-                app.zen_config.as_ref().unwrap(),
-            )),
-        );
+        app.services.zen_config = Some(cfg);
+        app.session_mgr.sessions[app.session_mgr.active]
+            .session_panels
+            .open(crate::app::panel_manager::PanelState::Login(
+                LoginPanel::from_config(app.services.zen_config.as_ref().unwrap()),
+            ));
         // 光标移到第二个 Provider
-        app.sessions[app.active]
-            .core
+        app.session_mgr.sessions[app.session_mgr.active]
             .session_panels
             .get_mut::<LoginPanel>()
             .unwrap()
@@ -2636,7 +2812,10 @@ mod tests {
 
         app.login_panel_select_provider();
 
-        let last_msg = app.sessions[app.active].core.view_messages.last();
+        let last_msg = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .view_messages
+            .last();
         assert!(last_msg.is_some(), "Login 面板激活后应有反馈消息");
         let msg_text = match last_msg.unwrap() {
             MessageViewModel::SystemNote { content, .. } => content.clone(),
@@ -2648,8 +2827,7 @@ mod tests {
             msg_text
         );
         assert!(
-            !app.sessions[app.active]
-                .core
+            !app.session_mgr.sessions[app.session_mgr.active]
                 .session_panels
                 .is_active(crate::app::PanelKind::Login),
             "激活后面板应关闭"
@@ -2682,7 +2860,7 @@ mod tests {
         let (mut app, handle) = App::new_headless(120, 30).await;
 
         // 先设置后台任务计数
-        app.sessions[app.active].background_task_count = 1;
+        app.session_mgr.sessions[app.session_mgr.active].background_task_count = 1;
 
         let notified = handle.render_notify.notified();
 
@@ -2707,14 +2885,14 @@ mod tests {
 
         // 断言：后台任务计数递减
         assert_eq!(
-            app.sessions[app.active].background_task_count, 0,
+            app.session_mgr.sessions[app.session_mgr.active].background_task_count, 0,
             "BackgroundTaskCompleted should decrement background_task_count"
         );
 
         // 断言：view_messages 包含后台任务 ToolBlock 通知
         use crate::ui::message_view::MessageViewModel;
-        let has_notification = app.sessions[app.active]
-            .core
+        let has_notification = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .view_messages
             .iter()
             .any(|vm| matches!(vm, MessageViewModel::ToolBlock { tool_name, display_name, .. } if tool_name.contains("bg:") && display_name.contains("LGTM")));
@@ -2729,7 +2907,7 @@ mod tests {
     async fn test_background_task_status_bar() {
         let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-        app.sessions[app.active].background_task_count = 2;
+        app.session_mgr.sessions[app.session_mgr.active].background_task_count = 2;
 
         let notified = handle.render_notify.notified();
         // Trigger a render
@@ -2762,18 +2940,24 @@ mod tests {
         app.set_loading(true);
 
         // 用户在 loading 时输入文字
-        app.sessions[app.active].core.textarea.input(Input {
-            key: Key::Char('h'),
-            ctrl: false,
-            alt: false,
-            shift: false,
-        });
-        app.sessions[app.active].core.textarea.input(Input {
-            key: Key::Char('i'),
-            ctrl: false,
-            alt: false,
-            shift: false,
-        });
+        app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .textarea
+            .input(Input {
+                key: Key::Char('h'),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .textarea
+            .input(Input {
+                key: Key::Char('i'),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
 
         handle
             .terminal
@@ -2845,8 +3029,8 @@ mod tests {
         let _ = n;
 
         // 5. 记录 Done 前 SubAgentGroup 状态
-        let pre_done_sub = app.sessions[app.active]
-            .core
+        let pre_done_sub = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .view_messages
             .iter()
             .find(|m| m.is_subagent_group())
@@ -2885,8 +3069,8 @@ mod tests {
         app.process_pending_events();
 
         // 8. 验证 Done 后 SubAgentGroup 状态保留
-        let post_done_sub = app.sessions[app.active]
-            .core
+        let post_done_sub = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
             .view_messages
             .iter()
             .find(|m| m.is_subagent_group())
@@ -2932,38 +3116,35 @@ mod tests {
 
             // 创建第二个 session
             app.new_session();
-            assert_eq!(app.sessions.len(), 2);
+            assert_eq!(app.session_mgr.sessions.len(), 2);
 
             // 在 session 0 打开 Model 面板
-            app.active = 0;
+            app.session_mgr.active = 0;
             app.open_model_panel();
             assert!(
-                app.sessions[0]
-                    .core
+                app.session_mgr.sessions[0]
                     .session_panels
                     .is_active(PanelKind::Model),
                 "session 0 应有 Model 面板"
             );
             assert!(
-                !app.sessions[1].core.session_panels.is_any_open(),
+                !app.session_mgr.sessions[1].session_panels.is_any_open(),
                 "session 1 不应有面板"
             );
 
             // 在 session 1 打开 Login 面板（需要 zen_config）
-            app.active = 1;
-            app.zen_config = Some(crate::config::ZenConfig::default());
+            app.session_mgr.active = 1;
+            app.services.zen_config = Some(crate::config::ZenConfig::default());
             app.open_login_panel();
             assert!(
-                app.sessions[1]
-                    .core
+                app.session_mgr.sessions[1]
                     .session_panels
                     .is_active(PanelKind::Login),
                 "session 1 应有 Login 面板"
             );
             // session 0 的面板不应被关闭
             assert!(
-                app.sessions[0]
-                    .core
+                app.session_mgr.sessions[0]
                     .session_panels
                     .is_active(PanelKind::Model),
                 "session 0 的 Model 面板不应被关闭"
@@ -2975,25 +3156,25 @@ mod tests {
             let (mut app, _handle) = App::new_headless(120, 40).await;
 
             app.new_session();
-            assert_eq!(app.sessions.len(), 2);
+            assert_eq!(app.session_mgr.sessions.len(), 2);
 
             // session 0 打开 Model 面板
-            app.active = 0;
+            app.session_mgr.active = 0;
             app.open_model_panel();
 
             // session 1 打开全局 Status 面板 → 应关闭所有 session 面板
-            app.active = 1;
+            app.session_mgr.active = 1;
             app.open_status_panel(0);
             assert!(
                 app.global_panels.is_active(PanelKind::Status),
                 "应有 Status 全局面板"
             );
             assert!(
-                !app.sessions[0].core.session_panels.is_any_open(),
+                !app.session_mgr.sessions[0].session_panels.is_any_open(),
                 "session 0 的 Model 面板应被关闭"
             );
             assert!(
-                !app.sessions[1].core.session_panels.is_any_open(),
+                !app.session_mgr.sessions[1].session_panels.is_any_open(),
                 "session 1 不应有 session 面板"
             );
         }

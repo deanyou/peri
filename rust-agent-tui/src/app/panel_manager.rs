@@ -1,31 +1,25 @@
 #![allow(dead_code)]
 
 use std::any::Any;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::mpsc;
+
 use tui_textarea::Input;
 
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
 use super::agent_panel::AgentPanel;
-use super::chat_session::ChatSession;
 use super::config_panel::ConfigPanel;
-use super::cron_state::{CronPanel, CronState};
-use super::events::AgentEvent;
+use super::cron_state::CronPanel;
 use super::hooks_panel::HooksPanel;
 use super::login_panel::LoginPanel;
 use super::mcp_panel::McpPanel;
 use super::memory_panel::MemoryPanel;
 use super::model_panel::ModelPanel;
 use super::plugin_panel::PluginPanel;
+use super::service_registry::ServiceRegistry;
+use super::session_manager::SessionManager;
 use super::status_panel::StatusPanel;
-use crate::config::ZenConfig;
 use crate::thread::ThreadBrowser;
-use crate::thread::ThreadStore;
-use rust_agent_middlewares::mcp::McpClientPool;
-use rust_agent_middlewares::plugin::PluginLoadResult;
 
 // ─── PanelScope ─────────────────────────────────────────────────────────────
 
@@ -263,19 +257,8 @@ impl PanelState {
 
 /// 面板处理器上下文：解耦面板与 App 的借用冲突
 pub struct PanelContext<'a> {
-    pub sessions: &'a mut Vec<ChatSession>,
-    pub active: usize,
-    pub cwd: String,
-    pub zen_config: &'a mut Option<ZenConfig>,
-    pub config_path_override: Option<PathBuf>,
-    pub claude_settings_override: Option<&'a PathBuf>,
-    pub provider_name: &'a mut String,
-    pub model_name: &'a mut String,
-    pub mcp_pool: &'a mut Option<Arc<McpClientPool>>,
-    pub cron: &'a mut CronState,
-    pub plugin_data: &'a mut Option<PluginLoadResult>,
-    pub bg_event_tx: &'a mpsc::Sender<AgentEvent>,
-    pub thread_store: &'a Arc<dyn ThreadStore>,
+    pub services: &'a mut ServiceRegistry,
+    pub session_mgr: &'a mut SessionManager,
 }
 
 // ─── PanelManager ───────────────────────────────────────────────────────────

@@ -322,24 +322,28 @@ impl PanelComponent for ConfigPanel {
                         key: Key::Enter, ..
                     } => {
                         // apply_config and close
-                        let Some(cfg) = ctx.zen_config.as_mut() else {
+                        let Some(cfg) = ctx.services.zen_config.as_mut() else {
                             return EventResult::Consumed;
                         };
                         self.apply_edit(cfg);
                         use super::App;
-                        if let Err(e) = App::save_config(cfg, ctx.config_path_override.as_deref()) {
-                            ctx.sessions[ctx.active].core.view_messages.push(
-                                MessageViewModel::system(format!(
+                        if let Err(e) =
+                            App::save_config(cfg, ctx.services.config_path_override.as_deref())
+                        {
+                            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                                .messages
+                                .view_messages
+                                .push(MessageViewModel::system(format!(
                                     "\u{914d}\u{7f6e}\u{4fdd}\u{5b58}\u{5931}\u{8d25}: {}",
                                     e
-                                )),
-                            );
+                                )));
                         } else {
-                            ctx.sessions[ctx.active].core.view_messages.push(
-                                MessageViewModel::system(
+                            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                                .messages
+                                .view_messages
+                                .push(MessageViewModel::system(
                                     "\u{914d}\u{7f6e}\u{5df2}\u{4fdd}\u{5b58}".to_string(),
-                                ),
-                            );
+                                ));
                         }
                         EventResult::ClosePanel
                     }

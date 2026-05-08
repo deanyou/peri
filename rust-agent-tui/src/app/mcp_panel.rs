@@ -139,11 +139,13 @@ impl crate::app::App {
                     let name = panel.servers[panel.cursor].name.clone();
                     let server = &panel.servers[panel.cursor];
                     let tools = self
+                        .services
                         .mcp_pool
                         .as_ref()
                         .map(|p| p.get_tools(&name))
                         .unwrap_or_default();
                     let resources = self
+                        .services
                         .mcp_pool
                         .as_ref()
                         .map(|p| p.get_resources(&name))
@@ -214,8 +216,8 @@ impl crate::app::App {
             DetailAction::ClearAuth => {
                 self.mcp_panel_back();
                 self.set_mcp_cursor_to_server(&server_name);
-                let pool = self.mcp_pool.clone();
-                let tx = self.bg_event_tx.clone();
+                let pool = self.services.mcp_pool.clone();
+                let tx = self.services.bg_event_tx.clone();
                 let name_clone = server_name.clone();
                 if let Some(pool) = pool {
                     tokio::spawn(async move {
@@ -305,14 +307,14 @@ impl crate::app::App {
     fn mcp_panel_toggle_disabled(&mut self, server_name: &str, disabled: bool) {
         // 持久化 disabled 字段到配置文件
         let _ = rust_agent_middlewares::mcp::set_server_disabled(
-            std::path::Path::new(&self.cwd),
+            std::path::Path::new(&self.services.cwd),
             server_name,
             disabled,
         );
 
         if disabled {
             // 禁用：断开连接，将 handle 状态设为 Disabled（保留 config 和 handle）
-            if let Some(pool) = self.mcp_pool.clone() {
+            if let Some(pool) = self.services.mcp_pool.clone() {
                 let name_clone = server_name.to_string();
                 tokio::spawn(async move {
                     pool.set_disabled(&name_clone).await;
@@ -320,8 +322,8 @@ impl crate::app::App {
             }
         } else {
             // 启用：触发重连（使用 pool 中保存的 config）
-            if let Some(pool) = self.mcp_pool.clone() {
-                let tx = self.bg_event_tx.clone();
+            if let Some(pool) = self.services.mcp_pool.clone() {
+                let tx = self.services.bg_event_tx.clone();
                 let pool2 = pool.clone();
                 let name2 = server_name.to_string();
                 let tx2 = tx.clone();
@@ -358,6 +360,7 @@ impl crate::app::App {
         // 刷新面板列表
         if let Some(ref mut panel) = self.global_panels.get_mut::<McpPanel>() {
             panel.servers = self
+                .services
                 .mcp_pool
                 .as_ref()
                 .map(|p| p.all_server_infos())
@@ -375,7 +378,7 @@ impl crate::app::App {
                 None => return,
             };
             // 异步断开连接
-            if let Some(pool) = self.mcp_pool.clone() {
+            if let Some(pool) = self.services.mcp_pool.clone() {
                 let name_clone = name.clone();
                 tokio::spawn(async move {
                     pool.remove_server(&name_clone).await;
@@ -383,11 +386,12 @@ impl crate::app::App {
             }
             // 持久化删除配置
             let _ = rust_agent_middlewares::mcp::remove_server_from_config(
-                std::path::Path::new(&self.cwd),
+                std::path::Path::new(&self.services.cwd),
                 &name,
             );
             // 刷新列表
             panel.servers = self
+                .services
                 .mcp_pool
                 .as_ref()
                 .map(|p| p.all_server_infos())
@@ -416,8 +420,8 @@ impl crate::app::App {
                 return;
             }
             let name = panel.servers[panel.cursor].name.clone();
-            if let Some(pool) = self.mcp_pool.clone() {
-                let tx = self.bg_event_tx.clone();
+            if let Some(pool) = self.services.mcp_pool.clone() {
+                let tx = self.services.bg_event_tx.clone();
                 let pool2 = pool.clone();
                 let name2 = name.clone();
                 let tx2 = tx.clone();
@@ -466,10 +470,10 @@ impl crate::app::App {
                 return;
             }
             let name = server.name.clone();
-            if let Some(pool) = self.mcp_pool.clone() {
-                let tx = self.bg_event_tx.clone();
-                let ok_tx = self.bg_event_tx.clone();
-                let err_tx = self.bg_event_tx.clone();
+            if let Some(pool) = self.services.mcp_pool.clone() {
+                let tx = self.services.bg_event_tx.clone();
+                let ok_tx = self.services.bg_event_tx.clone();
+                let err_tx = self.services.bg_event_tx.clone();
                 tokio::spawn(async move {
                     let result = pool
                         .start_oauth_flow(
@@ -685,11 +689,13 @@ impl McpPanel {
                 let name = self.servers[self.cursor].name.clone();
                 let server = &self.servers[self.cursor];
                 let tools = ctx
+                    .services
                     .mcp_pool
                     .as_ref()
                     .map(|p| p.get_tools(&name))
                     .unwrap_or_default();
                 let resources = ctx
+                    .services
                     .mcp_pool
                     .as_ref()
                     .map(|p| p.get_resources(&name))
@@ -765,7 +771,7 @@ impl McpPanel {
             None => return,
         };
         // Async disconnect
-        if let Some(pool) = ctx.mcp_pool.clone() {
+        if let Some(pool) = ctx.services.mcp_pool.clone() {
             let name_clone = name.clone();
             tokio::spawn(async move {
                 pool.remove_server(&name_clone).await;
@@ -773,11 +779,12 @@ impl McpPanel {
         }
         // Persist delete
         let _ = rust_agent_middlewares::mcp::remove_server_from_config(
-            std::path::Path::new(&ctx.cwd),
+            std::path::Path::new(&ctx.services.cwd),
             &name,
         );
         // Refresh list
         self.servers = ctx
+            .services
             .mcp_pool
             .as_ref()
             .map(|p| p.all_server_infos())
@@ -795,8 +802,8 @@ impl McpPanel {
             return;
         }
         let name = self.servers[self.cursor].name.clone();
-        if let Some(pool) = ctx.mcp_pool.clone() {
-            let tx = ctx.bg_event_tx.clone();
+        if let Some(pool) = ctx.services.mcp_pool.clone() {
+            let tx = ctx.services.bg_event_tx.clone();
             let pool2 = pool.clone();
             let name2 = name.clone();
             let tx2 = tx.clone();
@@ -851,8 +858,8 @@ impl McpPanel {
             DetailAction::ClearAuth => {
                 self.do_back();
                 self.set_cursor_to_server(&server_name);
-                let pool = ctx.mcp_pool.clone();
-                let tx = ctx.bg_event_tx.clone();
+                let pool = ctx.services.mcp_pool.clone();
+                let tx = ctx.services.bg_event_tx.clone();
                 let name_clone = server_name.clone();
                 if let Some(pool) = pool {
                     tokio::spawn(async move {
@@ -876,6 +883,7 @@ impl McpPanel {
                 Self::toggle_disabled(ctx, &server_name, true);
                 // Refresh
                 self.servers = ctx
+                    .services
                     .mcp_pool
                     .as_ref()
                     .map(|p| p.all_server_infos())
@@ -890,6 +898,7 @@ impl McpPanel {
                 Self::toggle_disabled(ctx, &server_name, false);
                 // Refresh
                 self.servers = ctx
+                    .services
                     .mcp_pool
                     .as_ref()
                     .map(|p| p.all_server_infos())
@@ -921,10 +930,10 @@ impl McpPanel {
             return;
         }
         let name = server.name.clone();
-        if let Some(pool) = ctx.mcp_pool.clone() {
-            let tx = ctx.bg_event_tx.clone();
-            let ok_tx = ctx.bg_event_tx.clone();
-            let err_tx = ctx.bg_event_tx.clone();
+        if let Some(pool) = ctx.services.mcp_pool.clone() {
+            let tx = ctx.services.bg_event_tx.clone();
+            let ok_tx = ctx.services.bg_event_tx.clone();
+            let err_tx = ctx.services.bg_event_tx.clone();
             tokio::spawn(async move {
                 let result = pool
                     .start_oauth_flow(
@@ -961,21 +970,21 @@ impl McpPanel {
 
     fn toggle_disabled(ctx: &mut PanelContext<'_>, server_name: &str, disabled: bool) {
         let _ = rust_agent_middlewares::mcp::set_server_disabled(
-            std::path::Path::new(&ctx.cwd),
+            std::path::Path::new(&ctx.services.cwd),
             server_name,
             disabled,
         );
 
         if disabled {
-            if let Some(pool) = ctx.mcp_pool.clone() {
+            if let Some(pool) = ctx.services.mcp_pool.clone() {
                 let name_clone = server_name.to_string();
                 tokio::spawn(async move {
                     pool.set_disabled(&name_clone).await;
                 });
             }
         } else {
-            if let Some(pool) = ctx.mcp_pool.clone() {
-                let tx = ctx.bg_event_tx.clone();
+            if let Some(pool) = ctx.services.mcp_pool.clone() {
+                let tx = ctx.services.bg_event_tx.clone();
                 let pool2 = pool.clone();
                 let name2 = server_name.to_string();
                 let tx2 = tx.clone();

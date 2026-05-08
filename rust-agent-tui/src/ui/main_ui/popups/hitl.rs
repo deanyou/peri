@@ -13,8 +13,10 @@ use crate::ui::theme;
 
 /// HITL 批量确认弹窗（底部展开区）
 pub(crate) fn render_hitl_popup(f: &mut Frame, app: &App, area: Rect) {
-    let Some(crate::app::InteractionPrompt::Approval(prompt)) =
-        &app.sessions[app.active].agent.interaction_prompt
+    let Some(crate::app::InteractionPrompt::Approval(prompt)) = &app.session_mgr.sessions
+        [app.session_mgr.active]
+        .agent
+        .interaction_prompt
     else {
         return;
     };
@@ -145,8 +147,9 @@ mod tests {
             input: serde_json::json!({"command": "ls"}),
         }];
         let prompt = HitlBatchPrompt::new(items, tx);
-        app.sessions[app.active].agent.interaction_prompt =
-            Some(InteractionPrompt::Approval(prompt));
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .interaction_prompt = Some(InteractionPrompt::Approval(prompt));
         handle
             .terminal
             .draw(|f| crate::ui::main_ui::render(f, &mut app))
@@ -168,8 +171,9 @@ mod tests {
             },
         ];
         let prompt = HitlBatchPrompt::new(items, tx);
-        app.sessions[app.active].agent.interaction_prompt =
-            Some(InteractionPrompt::Approval(prompt));
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .interaction_prompt = Some(InteractionPrompt::Approval(prompt));
         // 通过 main_ui::render 渲染完整布局，确保面板高度正确
         handle
             .terminal

@@ -462,7 +462,7 @@ impl PluginPanel {
                     self.uninstalling.insert(plugin_id.clone());
                     self.confirm_delete = None;
 
-                    let tx = ctx.bg_event_tx.clone();
+                    let tx = ctx.services.bg_event_tx.clone();
                     let claude_dir = rust_agent_middlewares::plugin::claude_home();
                     let project_dir = project_path.map(std::path::PathBuf::from);
                     tokio::spawn(async move {
@@ -592,11 +592,11 @@ impl PluginPanel {
                             let marketplace = dp.marketplace.clone();
                             let plugin_id = format!("{}@{}", name, marketplace);
                             self.installing.insert(plugin_id.clone());
-                            let project_dir = std::path::PathBuf::from(&ctx.cwd);
+                            let project_dir = std::path::PathBuf::from(&ctx.services.cwd);
                             let claude_dir = rust_agent_middlewares::plugin::claude_home();
                             let cache_dir =
                                 rust_agent_middlewares::plugin::marketplaces_cache_dir();
-                            let tx = ctx.bg_event_tx.clone();
+                            let tx = ctx.services.bg_event_tx.clone();
                             tokio::spawn(async move {
                                 let result = rust_agent_middlewares::plugin::install_plugin(
                                     &name,
@@ -626,11 +626,11 @@ impl PluginPanel {
                             let marketplace = dp.marketplace.clone();
                             let plugin_id = format!("{}@{}", name, marketplace);
                             self.installing.insert(plugin_id.clone());
-                            let project_dir = std::path::PathBuf::from(&ctx.cwd);
+                            let project_dir = std::path::PathBuf::from(&ctx.services.cwd);
                             let claude_dir = rust_agent_middlewares::plugin::claude_home();
                             let cache_dir =
                                 rust_agent_middlewares::plugin::marketplaces_cache_dir();
-                            let tx = ctx.bg_event_tx.clone();
+                            let tx = ctx.services.bg_event_tx.clone();
                             tokio::spawn(async move {
                                 let result = rust_agent_middlewares::plugin::install_plugin(
                                     &name,
@@ -741,7 +741,7 @@ impl PluginPanel {
                         entry.enabled = !entry.enabled;
                     }
                 }
-                self.persist_enabled_state(ctx.claude_settings_override);
+                self.persist_enabled_state(ctx.services.claude_settings_override.as_ref());
                 EventResult::Consumed
             }
             Input {
@@ -868,7 +868,7 @@ impl PluginPanel {
                     self.marketplace_updating.insert(name.clone());
                     let name_for_msg = name.clone();
                     let source_for_update = source.clone();
-                    let tx = ctx.bg_event_tx.clone();
+                    let tx = ctx.services.bg_event_tx.clone();
                     tokio::spawn(async move {
                         let result =
                             rust_agent_middlewares::plugin::marketplace::refresh_marketplace(
@@ -917,12 +917,13 @@ impl PluginPanel {
                             }
                         }
                     });
-                    ctx.sessions[ctx.active].core.view_messages.push(
-                        super::MessageViewModel::system(format!(
+                    ctx.session_mgr.sessions[ctx.session_mgr.active]
+                        .messages
+                        .view_messages
+                        .push(super::MessageViewModel::system(format!(
                             "\u{6b63}\u{5728}\u{66f4}\u{65b0} marketplace: {}",
                             name_for_msg
-                        )),
-                    );
+                        )));
                 }
                 EventResult::Consumed
             }
@@ -967,12 +968,13 @@ impl PluginPanel {
 
                         // Persist delete
                         if let Err(e) = self.persist_marketplace_delete(&name) {
-                            ctx.sessions[ctx.active].core.view_messages.push(
-                                super::MessageViewModel::system(format!(
+                            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                                .messages
+                                .view_messages
+                                .push(super::MessageViewModel::system(format!(
                                     "\u{5220}\u{9664}\u{5931}\u{8d25}: {}",
                                     e
-                                )),
-                            );
+                                )));
                         }
                     }
                 }
@@ -997,12 +999,13 @@ impl PluginPanel {
                 self.add_marketplace_input = InputState::new();
                 if !input_str.is_empty() {
                     if let Err(e) = self.persist_marketplace_add(&input_str, ctx) {
-                        ctx.sessions[ctx.active].core.view_messages.push(
-                            super::MessageViewModel::system(format!(
+                        ctx.session_mgr.sessions[ctx.session_mgr.active]
+                            .messages
+                            .view_messages
+                            .push(super::MessageViewModel::system(format!(
                                 "\u{6dfb}\u{52a0}\u{5931}\u{8d25}: {}",
                                 e
-                            )),
-                        );
+                            )));
                     }
                 }
                 EventResult::Consumed
@@ -1037,10 +1040,10 @@ impl PluginPanel {
         let plugin_id = plugin.plugin_id.clone();
         self.installing.insert(plugin_id.clone());
 
-        let project_dir = std::path::PathBuf::from(&ctx.cwd);
+        let project_dir = std::path::PathBuf::from(&ctx.services.cwd);
         let claude_dir = rust_agent_middlewares::plugin::claude_home();
         let cache_dir = rust_agent_middlewares::plugin::marketplaces_cache_dir();
-        let tx = ctx.bg_event_tx.clone();
+        let tx = ctx.services.bg_event_tx.clone();
         tokio::spawn(async move {
             let result = rust_agent_middlewares::plugin::install_plugin(
                 &name,
@@ -1073,7 +1076,7 @@ impl PluginPanel {
                         entry.enabled = !entry.enabled;
                     }
                 }
-                self.persist_enabled_state(ctx.claude_settings_override);
+                self.persist_enabled_state(ctx.services.claude_settings_override.as_ref());
             }
             Some(DetailAction::Uninstall) => {
                 if let Some(idx) = entry_idx {
@@ -1179,8 +1182,8 @@ impl PluginPanel {
         marketplaces.push(new_entry);
         save_known_marketplaces(&marketplaces, None)?;
 
-        ctx.sessions[ctx.active]
-            .core
+        ctx.session_mgr.sessions[ctx.session_mgr.active]
+            .messages
             .view_messages
             .push(super::MessageViewModel::system(format!(
                 "Marketplace \u{5df2}\u{6dfb}\u{52a0}: {} (\u{6b63}\u{5728}\u{83b7}\u{53d6}\u{5185}\u{5bb9}...)",
@@ -1201,7 +1204,7 @@ impl PluginPanel {
 
         // Spawn background refresh
         let name_clone = name.clone();
-        let tx = ctx.bg_event_tx.clone();
+        let tx = ctx.services.bg_event_tx.clone();
         tokio::spawn(async move {
             use rust_agent_middlewares::plugin::marketplace::refresh_marketplace;
             match refresh_marketplace(&source, &name_clone).await {
@@ -1333,7 +1336,7 @@ impl App {
                 .collect();
             if let Err(e) = rust_agent_middlewares::plugin::save_claude_settings_enabled_plugins(
                 &states,
-                self.claude_settings_override.as_deref(),
+                self.services.claude_settings_override.as_deref(),
             ) {
                 tracing::warn!(error = %e, "保存 enabledPlugins 失败");
             }
@@ -1399,7 +1402,7 @@ impl App {
                         if let Err(e) =
                             rust_agent_middlewares::plugin::save_claude_settings_enabled_plugins(
                                 &states,
-                                self.claude_settings_override.as_deref(),
+                                self.services.claude_settings_override.as_deref(),
                             )
                         {
                             tracing::warn!(error = %e, "保存 enabledPlugins 失败");

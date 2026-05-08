@@ -2,24 +2,33 @@ use super::*;
 
 impl App {
     pub fn ask_user_next_tab(&mut self) {
-        if let Some(InteractionPrompt::Questions(p)) =
-            self.sessions[self.active].agent.interaction_prompt.as_mut()
+        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
+            [self.session_mgr.active]
+            .agent
+            .interaction_prompt
+            .as_mut()
         {
             p.next_tab();
         }
     }
 
     pub fn ask_user_prev_tab(&mut self) {
-        if let Some(InteractionPrompt::Questions(p)) =
-            self.sessions[self.active].agent.interaction_prompt.as_mut()
+        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
+            [self.session_mgr.active]
+            .agent
+            .interaction_prompt
+            .as_mut()
         {
             p.prev_tab();
         }
     }
 
     pub fn ask_user_move(&mut self, delta: isize) {
-        if let Some(InteractionPrompt::Questions(p)) =
-            self.sessions[self.active].agent.interaction_prompt.as_mut()
+        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
+            [self.session_mgr.active]
+            .agent
+            .interaction_prompt
+            .as_mut()
         {
             p.current().move_option_cursor(delta);
             // 光标跟随滚动
@@ -29,16 +38,22 @@ impl App {
     }
 
     pub fn ask_user_toggle(&mut self) {
-        if let Some(InteractionPrompt::Questions(p)) =
-            self.sessions[self.active].agent.interaction_prompt.as_mut()
+        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
+            [self.session_mgr.active]
+            .agent
+            .interaction_prompt
+            .as_mut()
         {
             p.current().toggle_current();
         }
     }
 
     pub fn ask_user_edit_key(&mut self, input: tui_textarea::Input) {
-        if let Some(InteractionPrompt::Questions(p)) =
-            self.sessions[self.active].agent.interaction_prompt.as_mut()
+        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
+            [self.session_mgr.active]
+            .agent
+            .interaction_prompt
+            .as_mut()
         {
             let q = p.current();
             if q.in_custom_input {
@@ -51,7 +66,11 @@ impl App {
     /// 若当前问题没有选中任何选项（且不在自定义输入模式），自动选中光标所在选项。
     pub fn ask_user_confirm(&mut self) {
         let all_done = {
-            let p = match self.sessions[self.active].agent.interaction_prompt.as_mut() {
+            let p = match self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .interaction_prompt
+                .as_mut()
+            {
                 Some(InteractionPrompt::Questions(p)) => p,
                 _ => return,
             };
@@ -67,9 +86,14 @@ impl App {
         };
 
         if all_done {
-            self.sessions[self.active].agent.pending_ask_user = None;
-            if let Some(InteractionPrompt::Questions(p)) =
-                self.sessions[self.active].agent.interaction_prompt.take()
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .pending_ask_user = None;
+            if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
+                [self.session_mgr.active]
+                .agent
+                .interaction_prompt
+                .take()
             {
                 // 在消息流中显示用户的回答
                 let answers: Vec<(String, String)> = p
@@ -82,12 +106,12 @@ impl App {
                     .map(|(header, answer)| format!("[{}] {}", header, answer))
                     .collect();
                 let vm = MessageViewModel::user(answer_lines.join("\n"));
-                self.sessions[self.active]
-                    .core
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
                     .view_messages
                     .push(vm.clone());
-                let _ = self.sessions[self.active]
-                    .core
+                let _ = self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
                     .render_tx
                     .send(RenderEvent::AddMessage(vm));
                 p.confirm();

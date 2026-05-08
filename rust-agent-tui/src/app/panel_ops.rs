@@ -5,15 +5,17 @@ impl App {
 
     /// 打开 /model 面板
     pub fn open_model_panel(&mut self) {
-        let cfg = self.zen_config.get_or_insert_with(ZenConfig::default);
+        let cfg = self
+            .services
+            .zen_config
+            .get_or_insert_with(ZenConfig::default);
         let panel = ModelPanel::from_config(cfg);
         self.open_panel(PanelState::Model(panel));
     }
 
     /// 关闭 /model 面板（不保存）
     pub fn close_model_panel(&mut self) {
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .close_if(PanelKind::Model);
     }
@@ -23,8 +25,7 @@ impl App {
         let alias_label;
         let effort;
         {
-            let Some(panel) = self.sessions[self.active]
-                .core
+            let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
                 .session_panels
                 .get::<ModelPanel>()
             else {
@@ -32,7 +33,7 @@ impl App {
             };
             alias_label = panel.active_tab.label().to_string();
             effort = panel.buf_thinking_effort.clone();
-            let Some(cfg) = self.zen_config.as_mut() else {
+            let Some(cfg) = self.services.zen_config.as_mut() else {
                 return;
             };
             panel.apply_to_config(cfg);
@@ -42,28 +43,27 @@ impl App {
             "high" => "High",
             _ => "Medium",
         };
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
+            .messages
             .view_messages
             .push(MessageViewModel::system(format!(
                 "模型已切换为: {} ({} effort)",
                 alias_label, effort_display
             )));
         {
-            let cfg = self.zen_config.as_ref().unwrap();
-            if let Err(e) = Self::save_config(cfg, self.config_path_override.as_deref()) {
-                self.sessions[self.active]
-                    .core
+            let cfg = self.services.zen_config.as_ref().unwrap();
+            if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
                     .view_messages
                     .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
             }
             if let Some(p) = agent::LlmProvider::from_config(cfg) {
-                self.provider_name = p.display_name().to_string();
-                self.model_name = p.model_name().to_string();
+                self.services.provider_name = p.display_name().to_string();
+                self.services.model_name = p.model_name().to_string();
             }
         }
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .close_if(PanelKind::Model);
     }
@@ -72,23 +72,24 @@ impl App {
 
     /// 打开 /login 面板
     pub fn open_login_panel(&mut self) {
-        let cfg = self.zen_config.get_or_insert_with(ZenConfig::default);
+        let cfg = self
+            .services
+            .zen_config
+            .get_or_insert_with(ZenConfig::default);
         let panel = login_panel::LoginPanel::from_config(cfg);
         self.open_panel(PanelState::Login(panel));
     }
 
     /// 关闭 /login 面板（不保存）
     pub fn close_login_panel(&mut self) {
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .close_if(PanelKind::Login);
     }
 
     /// 选中（激活）光标处的 Provider
     pub fn login_panel_select_provider(&mut self) {
-        let Some(panel) = self.sessions[self.active]
-            .core
+        let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .get_mut::<login_panel::LoginPanel>()
         else {
@@ -99,36 +100,35 @@ impl App {
             .get(panel.cursor)
             .map(|p| p.display_name().to_string())
             .unwrap_or_default();
-        let Some(cfg) = self.zen_config.as_mut() else {
+        let Some(cfg) = self.services.zen_config.as_mut() else {
             return;
         };
         panel.select_provider(cfg);
         if !selected_name.is_empty() {
-            self.sessions[self.active]
-                .core
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system(format!(
                     "已激活 Provider: {}",
                     selected_name
                 )));
         }
-        if let Err(e) = Self::save_config(cfg, self.config_path_override.as_deref()) {
-            self.sessions[self.active]
-                .core
+        if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
         }
         if let Some(p) = agent::LlmProvider::from_config(cfg) {
-            self.provider_name = p.display_name().to_string();
-            self.model_name = p.model_name().to_string();
+            self.services.provider_name = p.display_name().to_string();
+            self.services.model_name = p.model_name().to_string();
         }
         self.close_login_panel();
     }
 
     /// 保存 Login 面板的编辑/新建内容到 ZenConfig，自动激活并关闭面板
     pub fn login_panel_apply_edit(&mut self) {
-        let Some(panel) = self.sessions[self.active]
-            .core
+        let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .get_mut::<login_panel::LoginPanel>()
         else {
@@ -136,12 +136,12 @@ impl App {
         };
         let edit_name = panel.buf_name.clone();
         let is_new = matches!(panel.mode, login_panel::LoginPanelMode::New);
-        let Some(cfg) = self.zen_config.as_mut() else {
+        let Some(cfg) = self.services.zen_config.as_mut() else {
             return;
         };
         if !panel.apply_edit(cfg) {
-            self.sessions[self.active]
-                .core
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system(
                     "保存失败：Provider 名称不能为空".to_string(),
@@ -155,37 +155,36 @@ impl App {
         };
         // 自动激活保存的 provider
         panel.select_provider(cfg);
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
+            .messages
             .view_messages
             .push(MessageViewModel::system(format!(
                 "已{}并激活 Provider: {}",
                 if is_new { "新建" } else { "保存" },
                 display
             )));
-        if let Err(e) = Self::save_config(cfg, self.config_path_override.as_deref()) {
-            self.sessions[self.active]
-                .core
+        if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
         }
         if let Some(p) = agent::LlmProvider::from_config(cfg) {
-            self.provider_name = p.display_name().to_string();
-            self.model_name = p.model_name().to_string();
+            self.services.provider_name = p.display_name().to_string();
+            self.services.model_name = p.model_name().to_string();
         }
         self.close_login_panel();
     }
 
     /// 确认删除光标处的 Provider
     pub fn login_panel_confirm_delete(&mut self) {
-        let Some(panel) = self.sessions[self.active]
-            .core
+        let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .get_mut::<login_panel::LoginPanel>()
         else {
             return;
         };
-        let Some(cfg) = self.zen_config.as_mut() else {
+        let Some(cfg) = self.services.zen_config.as_mut() else {
             return;
         };
         let deleted_name = panel
@@ -195,23 +194,23 @@ impl App {
             .unwrap_or_default();
         panel.confirm_delete(cfg);
         if !deleted_name.is_empty() {
-            self.sessions[self.active]
-                .core
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system(format!(
                     "已删除 Provider: {}",
                     deleted_name
                 )));
         }
-        if let Err(e) = Self::save_config(cfg, self.config_path_override.as_deref()) {
-            self.sessions[self.active]
-                .core
+        if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
         }
         if let Some(p) = agent::LlmProvider::from_config(cfg) {
-            self.provider_name = p.display_name().to_string();
-            self.model_name = p.model_name().to_string();
+            self.services.provider_name = p.display_name().to_string();
+            self.services.model_name = p.model_name().to_string();
         }
     }
 
@@ -219,45 +218,45 @@ impl App {
 
     /// 打开 /config 面板
     pub fn open_config_panel(&mut self) {
-        let cfg = self.zen_config.get_or_insert_with(ZenConfig::default);
+        let cfg = self
+            .services
+            .zen_config
+            .get_or_insert_with(ZenConfig::default);
         let panel = config_panel::ConfigPanel::from_config(cfg);
         self.open_panel(PanelState::Config(panel));
     }
 
     /// 关闭 /config 面板
     pub fn close_config_panel(&mut self) {
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .close_if(PanelKind::Config);
     }
 
     /// 保存 Config 面板编辑并关闭
     pub fn config_panel_apply(&mut self) {
-        let Some(panel) = self.sessions[self.active]
-            .core
+        let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .get_mut::<config_panel::ConfigPanel>()
         else {
             return;
         };
-        let Some(cfg) = self.zen_config.as_mut() else {
+        let Some(cfg) = self.services.zen_config.as_mut() else {
             return;
         };
         panel.apply_edit(cfg);
-        if let Err(e) = Self::save_config(cfg, self.config_path_override.as_deref()) {
-            self.sessions[self.active]
-                .core
+        if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
         } else {
-            self.sessions[self.active]
-                .core
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system("配置已保存".to_string()));
         }
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .close_if(PanelKind::Config);
     }
@@ -280,7 +279,7 @@ impl App {
     /// 打开 /memory 面板
     pub fn open_memory_panel(&mut self) {
         let home_dir = dirs_next::home_dir();
-        let mut panel = crate::app::memory_panel::MemoryPanel::new(&self.cwd, home_dir);
+        let mut panel = crate::app::memory_panel::MemoryPanel::new(&self.services.cwd, home_dir);
         panel.refresh_exists();
         self.open_panel(PanelState::Memory(panel));
     }
@@ -293,6 +292,7 @@ impl App {
     /// 打开 MCP 面板
     pub fn open_mcp_panel(&mut self) {
         let infos = self
+            .services
             .mcp_pool
             .as_ref()
             .map(|p| p.all_server_infos())
@@ -301,12 +301,12 @@ impl App {
             let vm = crate::ui::message_view::MessageViewModel::system(
                 "无 MCP 服务器配置（请在 .mcp.json 或 settings.json 中添加）".to_string(),
             );
-            self.sessions[self.active]
-                .core
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(vm.clone());
-            let _ = self.sessions[self.active]
-                .core
+            let _ = self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .render_tx
                 .send(crate::ui::render_thread::RenderEvent::AddMessage(vm));
             return;
@@ -318,6 +318,7 @@ impl App {
     /// 打开 Cron 面板
     pub fn open_cron_panel(&mut self) {
         let tasks: Vec<_> = self
+            .services
             .cron
             .scheduler
             .lock()
@@ -327,12 +328,12 @@ impl App {
             .collect();
         if tasks.is_empty() {
             let vm = crate::ui::message_view::MessageViewModel::system("无定时任务".to_string());
-            self.sessions[self.active]
-                .core
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(vm.clone());
-            let _ = self.sessions[self.active]
-                .core
+            let _ = self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .render_tx
                 .send(crate::ui::render_thread::RenderEvent::AddMessage(vm));
             return;
@@ -607,7 +608,7 @@ impl App {
 
         // 缓存不存在或过期时，后台刷新安装量数据
         if !rust_agent_middlewares::plugin::is_install_counts_cache_valid() {
-            let tx = self.bg_event_tx.clone();
+            let tx = self.services.bg_event_tx.clone();
             tokio::spawn(async move {
                 let result = rust_agent_middlewares::plugin::fetch_install_counts().await;
                 if result.is_some() {
@@ -668,8 +669,8 @@ impl App {
         save_known_marketplaces(&marketplaces, None)?;
 
         // 显示成功消息
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
+            .messages
             .view_messages
             .push(crate::app::MessageViewModel::system(format!(
                 "Marketplace 已添加: {} (正在获取内容...)",
@@ -681,7 +682,7 @@ impl App {
 
         // 启动后台任务获取内容并更新 installLocation
         let name_clone = name.clone();
-        let tx = self.bg_event_tx.clone();
+        let tx = self.services.bg_event_tx.clone();
         tokio::spawn(async move {
             use rust_agent_middlewares::plugin::marketplace::refresh_marketplace;
             match refresh_marketplace(&source, &name_clone).await {
@@ -773,8 +774,8 @@ impl App {
         save_known_marketplaces(&filtered, None)?;
 
         // 显示成功消息
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
+            .messages
             .view_messages
             .push(crate::app::MessageViewModel::system(format!(
                 "Marketplace 已移除: {}",
@@ -862,22 +863,26 @@ impl App {
 
     /// 打开 /agents 面板（传入扫描到的 agent 列表）
     pub fn open_agent_panel(&mut self, agents: Vec<AgentItem>) {
-        let panel = AgentPanel::new(agents, self.sessions[self.active].agent.agent_id.clone());
+        let panel = AgentPanel::new(
+            agents,
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .agent_id
+                .clone(),
+        );
         self.open_panel(PanelState::Agent(panel));
     }
 
     /// 关闭 /agents 面板（不选择任何 agent）
     pub fn close_agent_panel(&mut self) {
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .close_if(PanelKind::Agent);
     }
 
     /// 在 agent 面板中上移光标
     pub fn agent_panel_move_up(&mut self) {
-        if let Some(panel) = self.sessions[self.active]
-            .core
+        if let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .get_mut::<AgentPanel>()
         {
@@ -889,8 +894,7 @@ impl App {
 
     /// 在 agent 面板中下移光标
     pub fn agent_panel_move_down(&mut self) {
-        if let Some(panel) = self.sessions[self.active]
-            .core
+        if let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .get_mut::<AgentPanel>()
         {
@@ -904,8 +908,7 @@ impl App {
     pub fn agent_panel_confirm(&mut self) {
         // 先取出 selection，避免同时借用 panel 和 agent_id
         let (is_none, agent_id, agent_name) = {
-            let panel = match self.sessions[self.active]
-                .core
+            let panel = match self.session_mgr.sessions[self.session_mgr.active]
                 .session_panels
                 .get_mut::<AgentPanel>()
             {
@@ -925,8 +928,8 @@ impl App {
 
         if is_none {
             self.set_agent_id(None);
-            self.sessions[self.active]
-                .core
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system(
                     "Agent 已重置（未设置 agent_id）".to_string(),
@@ -934,16 +937,15 @@ impl App {
         } else if let Some(id) = agent_id {
             self.set_agent_id(Some(id.clone()));
             let name = agent_name.unwrap_or_else(|| id.clone());
-            self.sessions[self.active]
-                .core
+            self.session_mgr.sessions[self.session_mgr.active]
+                .messages
                 .view_messages
                 .push(MessageViewModel::system(format!(
                     "Agent 已切换为: {} ({})",
                     name, id
                 )));
         }
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .close_if(PanelKind::Agent);
     }
@@ -951,8 +953,7 @@ impl App {
     /// 取消选择（不改变当前 agent_id），关闭面板
     #[allow(dead_code)]
     pub fn agent_panel_clear(&mut self) {
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .close_if(PanelKind::Agent);
     }
@@ -962,13 +963,14 @@ impl App {
     /// 打开 /hooks 面板（只读）
     pub fn open_hooks_panel(&mut self) {
         let mut hooks = self
+            .services
             .plugin_data
             .as_ref()
             .map(|pd| pd.all_hooks.clone())
             .unwrap_or_default();
         // 合并 settings.local.json 中的 hooks
         let local_hooks =
-            rust_agent_middlewares::hooks::loader::load_settings_local_hooks(&self.cwd);
+            rust_agent_middlewares::hooks::loader::load_settings_local_hooks(&self.services.cwd);
         hooks.extend(local_hooks);
         let panel = HooksPanel::new(hooks);
         self.open_panel(PanelState::Hooks(panel));
@@ -976,16 +978,14 @@ impl App {
 
     /// 关闭 /hooks 面板
     pub fn close_hooks_panel(&mut self) {
-        self.sessions[self.active]
-            .core
+        self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .close_if(PanelKind::Hooks);
     }
 
     /// 在 hooks 面板中上移光标
     pub fn hooks_panel_move_up(&mut self) {
-        if let Some(panel) = self.sessions[self.active]
-            .core
+        if let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .get_mut::<HooksPanel>()
         {
@@ -997,8 +997,7 @@ impl App {
 
     /// 在 hooks 面板中下移光标
     pub fn hooks_panel_move_down(&mut self) {
-        if let Some(panel) = self.sessions[self.active]
-            .core
+        if let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
             .session_panels
             .get_mut::<HooksPanel>()
         {
@@ -1015,7 +1014,7 @@ impl App {
 impl App {
     /// 向事件队列注入 AgentEvent（测试用）
     pub fn push_agent_event(&mut self, event: AgentEvent) {
-        self.sessions[self.active]
+        self.session_mgr.sessions[self.session_mgr.active]
             .agent
             .agent_event_queue
             .push(event);
@@ -1023,8 +1022,11 @@ impl App {
 
     /// 批量处理队列中所有待处理事件，复用 handle_agent_event 逻辑
     pub fn process_pending_events(&mut self) {
-        let events: Vec<AgentEvent> =
-            std::mem::take(&mut self.sessions[self.active].agent.agent_event_queue);
+        let events: Vec<AgentEvent> = std::mem::take(
+            &mut self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .agent_event_queue,
+        );
         for event in events {
             let (_updated, should_break, should_return) = self.handle_agent_event(event);
             if should_return || should_break {
@@ -1062,19 +1064,21 @@ impl App {
             uuid::Uuid::now_v7()
         ));
 
-        let core = super::AppCore::new(
-            "/tmp".to_string(),
-            render_tx,
-            render_cache,
-            Arc::clone(&render_notify),
-            crate::command::default_registry(),
-            Vec::new(),
-        );
-
         let (bg_event_tx, bg_event_rx) = tokio::sync::mpsc::channel(32);
 
+        let commands = super::CommandSystem::new(crate::command::default_registry(), Vec::new());
+
         let session = super::ChatSession {
-            core,
+            ui: super::UiState::new(super::build_textarea(false)),
+            messages: super::MessageState::new(
+                "/tmp".to_string(),
+                render_tx.clone(),
+                std::sync::Arc::clone(&render_cache),
+                std::sync::Arc::clone(&render_notify),
+            ),
+            session_panels: super::panel_manager::PanelManager::new(),
+            commands,
+            metadata: super::SessionMetadata::new(),
             agent: super::AgentComm::default(),
             langfuse: super::LangfuseState::default(),
             current_thread_id: None,
@@ -1086,35 +1090,35 @@ impl App {
         };
 
         let app = App {
-            sessions: vec![session],
-            active: 0,
-            session_areas: Vec::new(),
-            cwd: "/tmp".to_string(),
-            provider_name: "test".to_string(),
-            model_name: "test-model".to_string(),
-            zen_config: None,
-            thread_store,
-            cron: super::CronState::default(),
-            setup_wizard: None,
-            permission_mode: rust_agent_middlewares::prelude::SharedPermissionMode::new(
-                rust_agent_middlewares::prelude::PermissionMode::Bypass,
-            ),
-            mode_highlight_until: None,
-            model_highlight_until: None,
-            config_path_override: Some(test_config_path),
-            claude_settings_override: Some(std::env::temp_dir().join(format!(
-                "claude-settings-test-{}.json",
-                uuid::Uuid::now_v7()
-            ))),
-            mcp_pool: None,
-            mcp_init_rx: None,
+            session_mgr: super::SessionManager::new(session),
+            services: super::ServiceRegistry {
+                zen_config: None,
+                cwd: "/tmp".to_string(),
+                provider_name: "test".to_string(),
+                model_name: "test-model".to_string(),
+                permission_mode: rust_agent_middlewares::prelude::SharedPermissionMode::new(
+                    rust_agent_middlewares::prelude::PermissionMode::Bypass,
+                ),
+                thread_store,
+                mcp_pool: None,
+                mcp_init_rx: None,
+                cron: super::CronState::default(),
+                plugin_data: None,
+                bg_event_tx,
+                bg_event_rx: Some(bg_event_rx),
+                config_path_override: Some(test_config_path),
+                claude_settings_override: Some(std::env::temp_dir().join(format!(
+                    "claude-settings-test-{}.json",
+                    uuid::Uuid::now_v7()
+                ))),
+                setup_wizard: None,
+                oauth_prompt: None,
+                mode_highlight_until: None,
+                model_highlight_until: None,
+                mcp_ready_shown_until: std::cell::Cell::new(None),
+                quit_pending_since: None,
+            },
             global_panels: PanelManager::new(),
-            mcp_ready_shown_until: std::cell::Cell::new(None),
-            plugin_data: None,
-            oauth_prompt: None,
-            bg_event_tx,
-            bg_event_rx: Some(bg_event_rx),
-            quit_pending_since: None,
         };
 
         let handle = crate::ui::headless::HeadlessHandle {

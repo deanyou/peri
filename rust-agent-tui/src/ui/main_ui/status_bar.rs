@@ -31,7 +31,7 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
     // 权限模式标签
     {
         use rust_agent_middlewares::prelude::PermissionMode;
-        let mode = app.permission_mode.load();
+        let mode = app.services.permission_mode.load();
         let (label, color) = match mode {
             PermissionMode::Default => ("", theme::TEXT),
             PermissionMode::DontAsk => ("Don't Ask", theme::WARNING),
@@ -43,6 +43,7 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
         // Default 模式不显示标签
         if !label.is_empty() {
             let is_highlight = app
+                .services
                 .mode_highlight_until
                 .is_some_and(|until| std::time::Instant::now() < until);
             let mut style = Style::default().fg(color);
@@ -55,10 +56,10 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
 
     // 工作目录
     spans.push(Span::styled(" │ ", Style::default().fg(theme::MUTED)));
-    let cwd_short = std::path::Path::new(&app.cwd)
+    let cwd_short = std::path::Path::new(&app.services.cwd)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or(&app.cwd);
+        .unwrap_or(&app.services.cwd);
     spans.push(Span::styled(
         format!("📁 {}", cwd_short),
         Style::default().fg(theme::MUTED),
@@ -68,23 +69,30 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::styled(" │ ", Style::default().fg(theme::MUTED)));
     {
         let is_highlight = app
+            .services
             .model_highlight_until
             .is_some_and(|until| std::time::Instant::now() < until);
         let mut style = Style::default().fg(theme::MODEL_INFO);
         if is_highlight {
             style = style.add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK);
         }
-        spans.push(Span::styled(format!(" {}", app.model_name), style));
+        spans.push(Span::styled(format!(" {}", app.services.model_name), style));
     }
 
     // 上下文使用率
     {
-        let tracker = &app.sessions[app.active].agent.session_token_tracker;
-        if let Some(pct) =
-            tracker.context_usage_percent(app.sessions[app.active].agent.context_window)
-        {
+        let tracker = &app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .session_token_tracker;
+        if let Some(pct) = tracker.context_usage_percent(
+            app.session_mgr.sessions[app.session_mgr.active]
+                .agent
+                .context_window,
+        ) {
             let used = tracker.estimated_context_tokens().unwrap_or(0);
-            let total = app.sessions[app.active].agent.context_window;
+            let total = app.session_mgr.sessions[app.session_mgr.active]
+                .agent
+                .context_window;
             let color = if pct >= 85.0 {
                 theme::ERROR
             } else if pct >= 70.0 {
@@ -106,7 +114,10 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // 重试状态
-    if let Some(ref retry) = app.sessions[app.active].agent.retry_status {
+    if let Some(ref retry) = app.session_mgr.sessions[app.session_mgr.active]
+        .agent
+        .retry_status
+    {
         let delay_sec = retry.delay_ms as f64 / 1000.0;
         spans.push(Span::styled(" │ ", Style::default().fg(theme::MUTED)));
         spans.push(Span::styled(
@@ -119,7 +130,7 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // MCP 初始化进度
-    if let Some(ref rx) = app.mcp_init_rx {
+    if let Some(ref rx) = app.services.mcp_init_rx {
         let status = rx.borrow().clone();
         use rust_agent_middlewares::mcp::McpInitStatus;
         match status {
@@ -132,12 +143,12 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
             }
             McpInitStatus::Ready { total } if total > 0 => {
                 // 首次检测到 Ready 时设置 3 秒显示窗口
-                if app.mcp_ready_shown_until.get().is_none() {
-                    app.mcp_ready_shown_until.set(Some(
+                if app.services.mcp_ready_shown_until.get().is_none() {
+                    app.services.mcp_ready_shown_until.set(Some(
                         std::time::Instant::now() + std::time::Duration::from_secs(3),
                     ));
                 }
-                if let Some(until) = app.mcp_ready_shown_until.get() {
+                if let Some(until) = app.services.mcp_ready_shown_until.get() {
                     if std::time::Instant::now() < until {
                         spans.push(Span::styled(" │ ", Style::default().fg(theme::MUTED)));
                         spans.push(Span::styled(
@@ -159,7 +170,7 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // 任务运行时长（仅在 loading 时显示）
-    if app.sessions[app.active].core.loading {
+    if app.session_mgr.sessions[app.session_mgr.active].ui.loading {
         if let Some(duration) = app.get_current_task_duration() {
             let secs = duration.as_secs();
             let time_str = if secs >= 60 {
@@ -184,12 +195,17 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
     let mut has_content = false;
 
     // 复制成功提示
-    if let Some(until) = app.sessions[app.active].core.copy_message_until {
+    if let Some(until) = app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .copy_message_until
+    {
         if std::time::Instant::now() < until {
             left_spans.push(Span::styled(
                 format!(
                     " 已复制 {} 个字符",
-                    app.sessions[app.active].core.copy_char_count
+                    app.session_mgr.sessions[app.session_mgr.active]
+                        .ui
+                        .copy_char_count
                 ),
                 Style::default().fg(theme::MUTED),
             ));
@@ -198,20 +214,22 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // 后台任务指示器
-    if app.sessions[app.active].background_task_count > 0 {
+    if app.session_mgr.sessions[app.session_mgr.active].background_task_count > 0 {
         if has_content {
             left_spans.push(Span::styled(" │ ", Style::default().fg(theme::MUTED)));
         }
         left_spans.push(Span::styled(
-            format!("[BG: {}]", app.sessions[app.active].background_task_count),
+            format!(
+                "[BG: {}]",
+                app.session_mgr.sessions[app.session_mgr.active].background_task_count
+            ),
             Style::default().fg(theme::WARNING),
         ));
         has_content = true;
     }
 
     // Agent 面板信息（仅面板激活时）
-    if let Some(panel) = app.sessions[app.active]
-        .core
+    if let Some(panel) = app.session_mgr.sessions[app.session_mgr.active]
         .session_panels
         .get::<AgentPanel>()
     {
@@ -242,8 +260,11 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
         .add_modifier(Modifier::BOLD);
     let desc_style = Style::default().fg(theme::MUTED);
 
-    let right_spans: Vec<Span> = match &app.sessions[app.active].agent.interaction_prompt {
-        Some(_) if app.oauth_prompt.is_some() => format_hints(
+    let right_spans: Vec<Span> = match &app.session_mgr.sessions[app.session_mgr.active]
+        .agent
+        .interaction_prompt
+    {
+        Some(_) if app.services.oauth_prompt.is_some() => format_hints(
             &[
                 ("Ctrl+O", ":打开浏览器"),
                 ("Enter", ":提交"),
@@ -268,20 +289,22 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
             desc_style,
         ),
         None => {
-            let hints = if app.sessions[app.active].core.session_panels.is_any_open() {
-                app.sessions[app.active]
-                    .core
+            let hints = if app.session_mgr.sessions[app.session_mgr.active]
+                .session_panels
+                .is_any_open()
+            {
+                app.session_mgr.sessions[app.session_mgr.active]
                     .session_panels
                     .status_bar_hints()
             } else if app.global_panels.is_any_open() {
                 app.global_panels.status_bar_hints()
-            } else if app.sessions.len() > 1 {
+            } else if app.session_mgr.sessions.len() > 1 {
                 vec![
                     ("/", "命令"),
                     ("Ctrl+N/P", ":切换Session"),
                     ("Ctrl+W", ":关闭"),
                 ]
-            } else if app.quit_pending_since.is_some() {
+            } else if app.services.quit_pending_since.is_some() {
                 vec![("Ctrl+C", ":关闭"), ("其他键", ":取消")]
             } else {
                 vec![("/", "命令"), ("Alt+Enter", ":换行")]

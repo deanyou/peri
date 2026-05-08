@@ -23,7 +23,7 @@ impl Command for PluginCommandAdapter {
         match &self.entry.source {
             CommandSource::Plugin { path } => {
                 if let Ok(content) = std::fs::read_to_string(path) {
-                    app.active_mut().core.textarea.insert_str(&content);
+                    app.active_mut().ui.textarea.insert_str(&content);
                 } else {
                     tracing::warn!(path = %path.display(), "读取插件命令文件失败");
                 }

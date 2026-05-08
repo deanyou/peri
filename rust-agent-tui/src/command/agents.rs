@@ -18,7 +18,7 @@ impl Command for AgentsCommand {
 
     fn execute(&self, app: &mut App, _args: &str) {
         // 扫描可用的 agent 文件
-        let agents = list_available_agents(&app.cwd);
+        let agents = list_available_agents(&app.services.cwd);
         app.open_agent_panel(agents);
     }
 }

@@ -85,23 +85,37 @@ pub(crate) fn render_cron_panel(f: &mut Frame, panel: &CronPanel, app: &mut App,
     }
 
     // 存储面板元数据供鼠标选区使用
-    app.sessions[app.active].core.panel_area = Some(inner);
-    app.sessions[app.active].core.panel_scroll_offset = panel.scroll_offset;
-    app.sessions[app.active].core.panel_plain_lines = lines
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(inner);
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_scroll_offset = panel.scroll_offset;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_plain_lines = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
 
     // 应用面板选区高亮
-    if app.sessions[app.active].core.panel_selection.is_active() {
-        let sel = &app.sessions[app.active].core.panel_selection;
+    if app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_selection
+        .is_active()
+    {
+        let sel = &app.session_mgr.sessions[app.session_mgr.active]
+            .ui
+            .panel_selection;
         if let (Some(start), Some(end)) = (sel.start, sel.end) {
             let ((sr, sc), (er, ec)) = if start <= end {
                 (start, end)
             } else {
                 (end, start)
             };
-            let scroll = app.sessions[app.active].core.panel_scroll_offset as usize;
+            let scroll = app.session_mgr.sessions[app.session_mgr.active]
+                .ui
+                .panel_scroll_offset as usize;
             let visible_start = scroll;
             let visible_end = scroll + inner.height as usize;
             for line_idx in sr as usize..=er as usize {

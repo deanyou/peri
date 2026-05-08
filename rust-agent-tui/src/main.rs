@@ -177,17 +177,17 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Resul
         } else {
             PermissionMode::Default
         };
-        app.permission_mode.store(initial_mode);
+        app.services.permission_mode.store(initial_mode);
     }
 
     // 检测是否需要 Setup 向导
-    if let Some(ref cfg) = app.zen_config {
+    if let Some(ref cfg) = app.services.zen_config {
         if rust_agent_tui::app::setup_wizard::needs_setup(&cfg.config) {
-            app.setup_wizard = Some(rust_agent_tui::app::SetupWizardPanel::new());
+            app.services.setup_wizard = Some(rust_agent_tui::app::SetupWizardPanel::new());
         }
     } else {
         // 无配置文件 → 必然需要 setup
-        app.setup_wizard = Some(rust_agent_tui::app::SetupWizardPanel::new());
+        app.services.setup_wizard = Some(rust_agent_tui::app::SetupWizardPanel::new());
     }
 
     // 后台初始化 MCP 连接池（不阻塞 UI）
@@ -198,56 +198,64 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Resul
         let claude_dir = dirs_next::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".claude");
-        app.plugin_data =
+        app.services.plugin_data =
             Some(rust_agent_middlewares::plugin::load_enabled_plugins_aggregated(&claude_dir));
         // 将插件命令注册到所有 session 的 CommandRegistry
         let plugin_commands = app
+            .services
             .plugin_data
             .as_ref()
             .map(|pd| pd.all_commands.clone())
             .unwrap_or_default();
         // 将插件 skills 追加到所有 session 的 skill 列表
         let plugin_skill_dirs = app
+            .services
             .plugin_data
             .as_ref()
             .map(|pd| pd.all_skill_dirs.clone())
             .unwrap_or_default();
         let plugin_skills = rust_agent_middlewares::skills::list_skills(&plugin_skill_dirs);
-        for session in &mut app.sessions {
+        for session in &mut app.session_mgr.sessions {
             session
-                .core
+                .commands
                 .command_registry
                 .register_plugin_commands(plugin_commands.clone());
         }
-        for session in &mut app.sessions {
-            let existing_names: std::collections::HashSet<String> =
-                session.core.skills.iter().map(|s| s.name.clone()).collect();
+        for session in &mut app.session_mgr.sessions {
+            let existing_names: std::collections::HashSet<String> = session
+                .commands
+                .skills
+                .iter()
+                .map(|s| s.name.clone())
+                .collect();
             for skill in &plugin_skills {
                 if !existing_names.contains(&skill.name) {
-                    session.core.skills.push(skill.clone());
+                    session.commands.skills.push(skill.clone());
                 }
             }
         }
     }
 
     // Spinner tick 驱动：每次渲染前推进一帧
-    app.sessions[app.active].spinner_state.advance_tick();
+    app.session_mgr.sessions[app.session_mgr.active]
+        .spinner_state
+        .advance_tick();
 
     // 初始全量绘制一次
     terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
 
     'event_loop: loop {
         // 推进所有 session 的 Spinner 动画帧
-        for i in 0..app.sessions.len() {
-            app.sessions[i].spinner_state.advance_tick();
+        for i in 0..app.session_mgr.sessions.len() {
+            app.session_mgr.sessions[i].spinner_state.advance_tick();
         }
         // 轮询所有 session 的 agent 结果
         let mut agent_updated = false;
-        for i in 0..app.sessions.len() {
-            let prev_active = app.active;
-            app.active = i;
+        for i in 0..app.session_mgr.sessions.len() {
+            let prev_active = app.session_mgr.active;
+            app.session_mgr.active = i;
             agent_updated |= app.poll_agent();
-            app.active = prev_active;
+            app.session_mgr.active = prev_active;
         }
         // 轮询后台事件（MCP OAuth 等）
         let bg_updated = app.poll_background_events();
@@ -269,13 +277,19 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Resul
             None => {
                 // 无用户事件（poll 超时）：在阻塞结束后重新读取缓存版本
                 // 这样能捕获渲染线程在等待期间发出的更新
-                let cache_version = app.sessions[app.active].core.render_cache.read().version;
-                let cache_updated =
-                    cache_version != app.sessions[app.active].core.last_render_version;
+                let cache_version = app.session_mgr.sessions[app.session_mgr.active]
+                    .messages
+                    .render_cache
+                    .read()
+                    .version;
+                let cache_updated = cache_version
+                    != app.session_mgr.sessions[app.session_mgr.active]
+                        .messages
+                        .last_render_version;
                 if cache_updated
                     || agent_updated
                     || bg_updated
-                    || app.sessions[app.active].core.loading
+                    || app.session_mgr.sessions[app.session_mgr.active].ui.loading
                 {
                     terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
                 }
@@ -284,14 +298,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Resul
     }
 
     // 关闭 MCP 连接池（断开所有 MCP 服务器连接，清理子进程）
-    if let Some(pool) = app.mcp_pool.take() {
+    if let Some(pool) = app.services.mcp_pool.take() {
         tracing::info!("正在关闭 MCP 连接池...");
         tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(pool.shutdown()));
         tracing::info!("MCP 连接池已关闭");
     }
 
     // 等待最后一次 Langfuse flush 完成，防止 runtime drop 前 batcher 数据丢失
-    if let Some(handle) = app.sessions[app.active]
+    if let Some(handle) = app.session_mgr.sessions[app.session_mgr.active]
         .langfuse
         .langfuse_flush_handle
         .take()

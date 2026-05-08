@@ -128,7 +128,9 @@ pub(crate) fn render_thread_browser(
     app: &mut App,
     area: Rect,
 ) {
-    let current_thread_id = app.sessions[app.active].current_thread_id.clone();
+    let current_thread_id = app.session_mgr.sessions[app.session_mgr.active]
+        .current_thread_id
+        .clone();
 
     let popup_area = area;
 
@@ -249,12 +251,24 @@ pub(crate) fn render_thread_browser(
 
     // 存储面板元数据供鼠标选区使用（仅列表区域）
     let scroll_offset = browser.scroll_offset;
-    let panel_selection_active = app.sessions[app.active].core.panel_selection.is_active();
-    let panel_selection = app.sessions[app.active].core.panel_selection.clone();
+    let panel_selection_active = app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_selection
+        .is_active();
+    let panel_selection = app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_selection
+        .clone();
 
-    app.sessions[app.active].core.panel_area = Some(list_area);
-    app.sessions[app.active].core.panel_scroll_offset = scroll_offset;
-    app.sessions[app.active].core.panel_plain_lines = lines
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(list_area);
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_scroll_offset = scroll_offset;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_plain_lines = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
@@ -268,7 +282,9 @@ pub(crate) fn render_thread_browser(
             } else {
                 (end, start)
             };
-            let scroll = app.sessions[app.active].core.panel_scroll_offset as usize;
+            let scroll = app.session_mgr.sessions[app.session_mgr.active]
+                .ui
+                .panel_scroll_offset as usize;
             let visible_start = scroll;
             let visible_end = scroll + list_area.height as usize;
             for line_idx in sr as usize..=er as usize {
