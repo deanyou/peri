@@ -55,8 +55,6 @@ pub use hitl::{
     Classification, HitlDecision, HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode,
     SharedPermissionMode,
 };
-#[allow(deprecated)]
-pub use middleware::PrependSystemMiddleware;
 pub use skills::{
     list_skills, load_global_skills_dir, load_skill_metadata, SkillMetadata, SkillsMiddleware,
 };
@@ -82,8 +80,6 @@ pub mod prelude {
         SharedPermissionMode,
     };
     pub use crate::hooks::{HookMiddleware, RegisteredHook};
-    #[allow(deprecated)]
-    pub use crate::middleware::PrependSystemMiddleware;
     pub use crate::middleware::{
         FilesystemMiddleware, TerminalMiddleware, TodoMiddleware, WebMiddleware,
     };
@@ -101,8 +97,6 @@ pub mod prelude {
         ArcToolWrapper, AskUserTool, BoxToolWrapper, EditFileTool, FolderOperationsTool,
         GlobFilesTool, GrepTool, ReadFileTool, TodoItem, TodoStatus, TodoWriteTool, WriteFileTool,
     };
-    pub use rust_create_agent::tools::ToolProvider;
-
     // 重导出 rust-create-agent 核心类型
     pub use rust_create_agent::prelude::*;
 }

@@ -12,7 +12,7 @@ use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, ToolCallRequest};
 use crate::middleware::chain::MiddlewareChain;
 use crate::middleware::r#trait::Middleware;
-use crate::tools::{BaseTool, ToolProvider};
+use crate::tools::BaseTool;
 use std::collections::HashMap;
 
 pub use tokio_util::sync::CancellationToken as AgentCancellationToken;
@@ -56,7 +56,6 @@ where
 {
     llm: L,
     tools: HashMap<String, Box<dyn BaseTool>>,
-    tool_providers: Vec<Box<dyn ToolProvider>>,
     chain: MiddlewareChain<S>,
     max_iterations: usize,
     /// 可选事件回调：在工具调用、答案生成等关键节点触发
@@ -79,7 +78,6 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
         Self {
             llm,
             tools: HashMap::new(),
-            tool_providers: Vec::new(),
             chain: MiddlewareChain::new(),
             max_iterations: 10,
             event_handler: None,
@@ -103,12 +101,6 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
 
     pub fn add_middleware(mut self, middleware: Box<dyn Middleware<S>>) -> Self {
         self.chain.add(middleware);
-        self
-    }
-
-    /// 注册工具提供者（独立于中间件，专注于工具供给）
-    pub fn add_tool_provider(mut self, provider: Box<dyn ToolProvider>) -> Self {
-        self.tool_providers.push(provider);
         self
     }
 
@@ -208,26 +200,18 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
         // 消息计数：从用户消息之后开始跟踪（局部变量，避免并发 execute 时的竞态）
         let mut last_message_count: usize = state.messages().len();
 
-        // 从 ToolProvider 和中间件各收集工具，手动注册的同名工具优先级最高
-        let provider_tools: Vec<Box<dyn BaseTool>> = self
-            .tool_providers
-            .iter()
-            .flat_map(|p| p.tools(state.cwd()))
-            .collect();
+        // 从中间件收集工具，手动注册的同名工具优先级最高
         let middleware_tools = self.chain.collect_tools(state.cwd());
 
         // 将所有工具转为 Arc 并收集
         let mut tool_arcs: Vec<Arc<dyn BaseTool>> = Vec::new();
-        for tool in provider_tools {
-            tool_arcs.push(box_to_arc(tool));
-        }
         for tool in middleware_tools {
             tool_arcs.push(box_to_arc(tool));
         }
         // 手动注册的工具也需要转为 Arc
         // 由于 BaseTool 不实现 Clone，手动注册的工具无法转为 Arc
         // 但手动注册的工具（通过 register_tool）不会被 deferred filter 过滤
-        // 所以 shared_tools 中只需要 provider 和 middleware 的工具
+        // 所以 shared_tools 中只需要 middleware 的工具
 
         // 构建引用 map（用于 executor 内部工具查找）
         let mut all_tools: HashMap<String, &dyn BaseTool> = HashMap::new();

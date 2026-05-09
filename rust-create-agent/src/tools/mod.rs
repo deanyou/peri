@@ -1,7 +1,3 @@
-pub mod provider;
-
-pub use provider::ToolProvider;
-
 use serde::{Deserialize, Serialize};
 
 /// 工具定义（JSON Schema 格式参数描述）

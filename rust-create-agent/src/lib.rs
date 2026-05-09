@@ -34,5 +34,5 @@ pub mod prelude {
     pub use crate::middleware::{
         r#trait::Middleware, LoggingMiddleware, MetricsMiddleware, MiddlewareChain, NoopMiddleware,
     };
-    pub use crate::tools::{BaseTool, ToolDefinition, ToolProvider};
+    pub use crate::tools::{BaseTool, ToolDefinition};
 }
