@@ -96,7 +96,7 @@ impl ToolCategory {
 }
 
 /// ToolCallGroup 中的单条工具记录
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolEntry {
     pub tool_name: String,
     pub display_name: String,
@@ -235,6 +235,97 @@ pub enum MessageViewModel {
     },
 }
 
+/// 语义级相等比较，用于判断 Done 时是否需要 RebuildAll。
+///
+/// 忽略 UI-only 字段（rendered、is_streaming、collapsed、color 等），
+/// 只比较影响显示内容的字段。
+impl PartialEq for MessageViewModel {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                MessageViewModel::UserBubble { content: a, .. },
+                MessageViewModel::UserBubble { content: b, .. },
+            ) => a == b,
+            (
+                MessageViewModel::AssistantBubble { blocks: a, .. },
+                MessageViewModel::AssistantBubble { blocks: b, .. },
+            ) => a == b,
+            (
+                MessageViewModel::ToolBlock {
+                    tool_name: a_name,
+                    tool_call_id: a_tc,
+                    args_display: a_args,
+                    content: a_content,
+                    is_error: a_err,
+                    ..
+                },
+                MessageViewModel::ToolBlock {
+                    tool_name: b_name,
+                    tool_call_id: b_tc,
+                    args_display: b_args,
+                    content: b_content,
+                    is_error: b_err,
+                    ..
+                },
+            ) => {
+                a_name == b_name
+                    && a_tc == b_tc
+                    && a_args == b_args
+                    && a_content == b_content
+                    && a_err == b_err
+            }
+            (
+                MessageViewModel::SystemNote { content: a },
+                MessageViewModel::SystemNote { content: b },
+            ) => a == b,
+            (
+                MessageViewModel::CacheWarning { content: a },
+                MessageViewModel::CacheWarning { content: b },
+            ) => a == b,
+            (
+                MessageViewModel::ToolCallGroup {
+                    category: a,
+                    tools: a_tools,
+                    ..
+                },
+                MessageViewModel::ToolCallGroup {
+                    category: b,
+                    tools: b_tools,
+                    ..
+                },
+            ) => a == b && a_tools == b_tools,
+            (
+                MessageViewModel::SubAgentGroup {
+                    agent_id: a_id,
+                    task_preview: a_preview,
+                    total_steps: a_steps,
+                    recent_messages: a_msgs,
+                    final_result: a_result,
+                    is_error: a_err,
+                    ..
+                },
+                MessageViewModel::SubAgentGroup {
+                    agent_id: b_id,
+                    task_preview: b_preview,
+                    total_steps: b_steps,
+                    recent_messages: b_msgs,
+                    final_result: b_result,
+                    is_error: b_err,
+                    ..
+                },
+            ) => {
+                a_id == b_id
+                    && a_preview == b_preview
+                    && a_steps == b_steps
+                    && a_msgs == b_msgs
+                    && a_result == b_result
+                    && a_err == b_err
+            }
+            _ => false,
+        }
+    }
+}
+
 /// ContentBlock 的视图化表示
 #[derive(Debug, Clone)]
 pub enum ContentBlockView {
@@ -248,6 +339,34 @@ pub enum ContentBlockView {
     Reasoning { char_count: usize },
     /// 工具使用请求（AI 发起的调用请求）
     ToolUse { name: String },
+}
+
+/// 只比较有意义的字段（忽略 `rendered`，因为 markdown 解析可能因宽度不同而异）
+impl PartialEq for ContentBlockView {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                ContentBlockView::Text {
+                    raw: a_raw,
+                    dirty: a_dirty,
+                    ..
+                },
+                ContentBlockView::Text {
+                    raw: b_raw,
+                    dirty: b_dirty,
+                    ..
+                },
+            ) => a_raw == b_raw && a_dirty == b_dirty,
+            (
+                ContentBlockView::Reasoning { char_count: a },
+                ContentBlockView::Reasoning { char_count: b },
+            ) => a == b,
+            (ContentBlockView::ToolUse { name: a }, ContentBlockView::ToolUse { name: b }) => {
+                a == b
+            }
+            _ => false,
+        }
+    }
 }
 
 impl MessageViewModel {

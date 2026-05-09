@@ -408,8 +408,10 @@ impl App {
                     self.session_mgr.sessions[self.session_mgr.active]
                         .messages
                         .view_messages[idx] = (*vm).clone();
-                    // AskUserQuestion 结束后聚合尾部（多个并行调用合并为一个块）
-                    if matches!(&*vm, MessageViewModel::ToolBlock { tool_name, .. } if tool_name == "AskUserQuestion")
+                    // 只读工具（Read/Grep/Glob/AskUserQuestion）结束后即时聚合尾部，
+                    // 使流式期间的 ToolCallGroup 布局与 RebuildAll 后一致
+                    if matches!(&*vm, MessageViewModel::ToolBlock { tool_name, .. }
+                        if ToolCategory::from_tool_name(tool_name).is_some())
                     {
                         let aggregate_from = idx.saturating_sub(1);
                         aggregate_tail_tool_groups(
@@ -461,15 +463,45 @@ impl App {
                     .messages
                     .view_messages
                     .extend(tail_vms.clone());
-                let _ = self.session_mgr.sessions[self.session_mgr.active]
-                    .messages
-                    .render_tx
-                    .send(RenderEvent::LoadHistory(
+                // 计算滚动锚点：找到当前可见区域对应的第一条消息索引
+                // 通过 wrap_map 将 scroll_offset（视觉行）映射到消息索引
+                let anchor_message_idx = {
+                    let cache = self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
+                        .render_cache
+                        .read();
+                    let scroll_row = self.session_mgr.sessions[self.session_mgr.active]
+                        .ui
+                        .scroll_offset as usize;
+                    // 在 wrap_map 中找到 scroll_row 所在的消息
+                    let msg_idx = cache
+                        .message_offsets
+                        .iter()
+                        .enumerate()
+                        .find(|(_, &offset)| {
+                            offset < cache.wrap_map.len()
+                                && cache.wrap_map[offset].visual_row_start as usize >= scroll_row
+                        })
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(prefix_len);
+                    // 锚点不能超出新 view_messages 的范围
+                    msg_idx.min(
                         self.session_mgr.sessions[self.session_mgr.active]
                             .messages
                             .view_messages
+                            .len(),
+                    )
+                };
+                let _ = self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
+                    .render_tx
+                    .send(RenderEvent::LoadHistoryWithAnchor {
+                        messages: self.session_mgr.sessions[self.session_mgr.active]
+                            .messages
+                            .view_messages
                             .clone(),
-                    ));
+                        anchor_message_idx,
+                    });
             }
         }
     }
@@ -949,7 +981,7 @@ impl App {
                 for action in actions {
                     self.apply_pipeline_action(action);
                 }
-                // reconcile 尾部重建：保留 SubAgentGroup 富状态，防止显示退化
+                // reconcile 尾部重建：使用 pipeline 内部冻结的 SubAgentGroup 富状态，防止显示退化
                 let (prefix_len, tail_vms) = self.session_mgr.sessions[self.session_mgr.active]
                     .messages
                     .pipeline
@@ -957,14 +989,29 @@ impl App {
                         self.session_mgr.sessions[self.session_mgr.active]
                             .messages
                             .round_start_vm_idx,
-                        &self.session_mgr.sessions[self.session_mgr.active]
-                            .messages
-                            .view_messages,
                     );
-                self.apply_pipeline_action(PipelineAction::RebuildAll {
-                    prefix_len,
-                    tail_vms,
-                });
+                // 智能条件 RebuildAll：对比 reconcile 结果与当前 view_messages，
+                // 如果一致则只发 StreamingDone，避免不必要的视觉跳动
+                let current_tail = &self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
+                    .view_messages[prefix_len..];
+                let needs_rebuild = current_tail.len() != tail_vms.len()
+                    || current_tail
+                        .iter()
+                        .zip(tail_vms.iter())
+                        .any(|(a, b)| a != b);
+                if needs_rebuild {
+                    self.apply_pipeline_action(PipelineAction::RebuildAll {
+                        prefix_len,
+                        tail_vms,
+                    });
+                } else {
+                    // 只清除 is_streaming 标志，不触发全量重建
+                    let _ = self.session_mgr.sessions[self.session_mgr.active]
+                        .messages
+                        .render_tx
+                        .send(RenderEvent::StreamingDone);
+                }
                 // 跨切面：Langfuse
                 let langfuse_tracer = self.session_mgr.sessions[self.session_mgr.active]
                     .langfuse
@@ -1152,9 +1199,6 @@ impl App {
                             self.session_mgr.sessions[self.session_mgr.active]
                                 .messages
                                 .round_start_vm_idx,
-                            &self.session_mgr.sessions[self.session_mgr.active]
-                                .messages
-                                .view_messages,
                         );
                     self.apply_pipeline_action(PipelineAction::RebuildAll {
                         prefix_len,

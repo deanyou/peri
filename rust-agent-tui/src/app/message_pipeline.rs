@@ -29,52 +29,21 @@ use crate::ui::message_view::{
 };
 use crate::ui::theme;
 
-/// 从旧 view_messages 中提取 SubAgentGroup 的富状态（recent_messages、total_steps 等），
-/// 合并到 reconcile 重建后的新 VMs 中，防止 Done 后 SubAgent 显示退化。
-fn merge_subagent_state(old_vms: &[MessageViewModel], new_vms: &mut [MessageViewModel]) {
-    // 按顺序收集旧 VMs 中的 SubAgentGroup（保留出现顺序用于位置匹配）
-    let mut old_subs: Vec<&MessageViewModel> = Vec::new();
-    for vm in old_vms {
-        if matches!(vm, MessageViewModel::SubAgentGroup { .. }) {
-            old_subs.push(vm);
-        }
-    }
-
-    if old_subs.is_empty() {
+/// 合并冻结的 SubAgentGroup VM 到 reconcile 重建后的新 VMs 中，防止 Done 后 SubAgent 显示退化。
+///
+/// `frozen_vms` 是 SubAgentEnd 时构建的完整 SubAgentGroup VM（含 recent_messages、final_result 等），
+/// 按出现顺序与新 VMs 中的 SubAgentGroup 占位符按位置匹配替换。
+fn merge_frozen_subagents(frozen_vms: &[MessageViewModel], new_vms: &mut [MessageViewModel]) {
+    if frozen_vms.is_empty() {
         return;
     }
 
-    // 按位置匹配：新 VMs 中第 N 个 SubAgentGroup 对应旧 VMs 中第 N 个
-    let mut old_idx = 0;
+    // 按位置匹配：新 VMs 中第 N 个 SubAgentGroup 对应 frozen_vms 中第 N 个
+    let mut frozen_idx = 0;
     for vm in new_vms.iter_mut() {
-        if let MessageViewModel::SubAgentGroup {
-            agent_id,
-            task_preview,
-            ..
-        } = vm
-        {
-            if old_idx < old_subs.len() {
-                if let MessageViewModel::SubAgentGroup {
-                    recent_messages,
-                    total_steps,
-                    final_result,
-                    is_error,
-                    ..
-                } = old_subs[old_idx]
-                {
-                    *vm = MessageViewModel::SubAgentGroup {
-                        agent_id: std::mem::take(agent_id),
-                        task_preview: std::mem::take(task_preview),
-                        total_steps: *total_steps,
-                        recent_messages: recent_messages.clone(),
-                        is_running: false,
-                        collapsed: false,
-                        final_result: final_result.clone(),
-                        is_error: *is_error,
-                    };
-                }
-                old_idx += 1;
-            }
+        if matches!(vm, MessageViewModel::SubAgentGroup { .. }) && frozen_idx < frozen_vms.len() {
+            *vm = frozen_vms[frozen_idx].clone();
+            frozen_idx += 1;
         }
     }
 }
@@ -128,6 +97,8 @@ struct SubAgentState {
     /// 流式期间的内部消息（不持久化）
     recent_messages: Vec<MessageViewModel>,
     is_running: bool,
+    /// SubAgentEnd 时固化的完整 VM（含 recent_messages、final_result 等）
+    finalized_vm: Option<MessageViewModel>,
 }
 
 // ─── MessagePipeline ─────────────────────────────────────────────────────────
@@ -152,6 +123,8 @@ pub struct MessagePipeline {
     pending_tools: HashMap<String, PendingTool>,
     /// SubAgent 栈
     subagent_stack: Vec<SubAgentState>,
+    /// 冻结的 SubAgentGroup VMs（SubAgentEnd 时构建，done() 时收集）
+    frozen_subagent_vms: Vec<MessageViewModel>,
 }
 
 impl MessagePipeline {
@@ -165,6 +138,7 @@ impl MessagePipeline {
             current_ai_finalized: false,
             pending_tools: HashMap::new(),
             subagent_stack: Vec::new(),
+            frozen_subagent_vms: Vec::new(),
         }
     }
 
@@ -353,6 +327,7 @@ impl MessagePipeline {
                 total_steps: 0,
                 recent_messages: Vec::new(),
                 is_running: true,
+                finalized_vm: None,
             });
             self.pending_tools.insert(
                 tool_call_id.to_string(),
@@ -410,6 +385,8 @@ impl MessagePipeline {
                     final_result: Some(output.to_string()),
                     is_error,
                 };
+                // 固化完整 VM，供 reconcile_tail_with_subagents 使用
+                sub.finalized_vm = Some(vm.clone());
                 return PipelineAction::UpdateLast(vm);
             }
             return PipelineAction::None;
@@ -524,8 +501,12 @@ impl MessagePipeline {
         // 清理残留的 pending_tools（普通工具的 ToolEnd 被 map_executor_event 过滤，
         // 不会到达 pipeline，所以 done 时必须清理以防止内存泄漏）
         self.pending_tools.clear();
-        // 清理所有 SubAgent（done 在 agent 级别调用，所有子代理都应清除）
-        self.subagent_stack.clear();
+        // 收集所有 SubAgent 的固化 VM（done 在 agent 级别调用，所有子代理都应结束）
+        for sub in self.subagent_stack.drain(..) {
+            if let Some(vm) = sub.finalized_vm {
+                self.frozen_subagent_vms.push(vm);
+            }
+        }
     }
 
     /// 中断：finalize 当前状态并清理残留
@@ -533,8 +514,12 @@ impl MessagePipeline {
         self.finalize_current_ai();
         self.current_ai_finalized = false;
         self.pending_tools.clear();
-        // 中断时所有 SubAgent 不再运行，必须清除以防残留 stack 捕获下一个任务的 UI
-        self.subagent_stack.clear();
+        // 中断时所有 SubAgent 不再运行，收集已固化的 VM，清除栈防止残留
+        for sub in self.subagent_stack.drain(..) {
+            if let Some(vm) = sub.finalized_vm {
+                self.frozen_subagent_vms.push(vm);
+            }
+        }
     }
 
     /// 清空所有状态
@@ -546,6 +531,7 @@ impl MessagePipeline {
         self.current_ai_finalized = false;
         self.pending_tools.clear();
         self.subagent_stack.clear();
+        self.frozen_subagent_vms.clear();
     }
 
     /// 当前 AI 消息是否有可见内容
@@ -680,17 +666,17 @@ impl MessagePipeline {
         (round_start_vm_idx, tail_vms)
     }
 
-    /// Reconcile 尾部，同时保留流式期间构建的 SubAgentGroup 富状态。
+    /// Reconcile 尾部，同时保留流式期间固化的 SubAgentGroup 富状态。
     ///
     /// 在 Done/Interrupted 时调用，避免 SubAgent 显示从「展开+滑动窗口」
-    /// 退化为「折叠+空内容」。
+    /// 退化为「折叠+空内容」。使用 pipeline 内部维护的 frozen_subagent_vms
+    /// 而非从旧 view_messages 中提取，确保数据源唯一且可靠。
     pub fn reconcile_tail_with_subagents(
         &self,
         round_start_vm_idx: usize,
-        old_view_messages: &[MessageViewModel],
     ) -> (usize, Vec<MessageViewModel>) {
         let (prefix_len, mut tail_vms) = self.reconcile_tail(round_start_vm_idx);
-        merge_subagent_state(old_view_messages, &mut tail_vms);
+        merge_frozen_subagents(&self.frozen_subagent_vms, &mut tail_vms);
         (prefix_len, tail_vms)
     }
 

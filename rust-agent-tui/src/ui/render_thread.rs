@@ -38,6 +38,8 @@ pub struct RenderCache {
     pub wrap_map: Vec<WrappedLineInfo>,
     /// 当前渲染使用的宽度（= text_area.width，已减去滚动条 1 列）
     pub width: u16,
+    /// RebuildAll 后的滚动锚点（视觉行号），UI 线程读取后清除
+    pub scroll_anchor: Option<usize>,
 }
 
 impl Default for RenderCache {
@@ -55,6 +57,7 @@ impl RenderCache {
             version: 0,
             wrap_map: Vec::new(),
             width: 0,
+            scroll_anchor: None,
         }
     }
 
@@ -85,6 +88,12 @@ pub enum RenderEvent {
     Clear,
     /// 加载历史消息（批量）
     LoadHistory(Vec<MessageViewModel>),
+    /// 加载历史消息并保持滚动位置（RebuildAll 后滚动锚点）
+    LoadHistoryWithAnchor {
+        messages: Vec<MessageViewModel>,
+        /// 锚点对应的消息在旧 view_messages 中的索引
+        anchor_message_idx: usize,
+    },
     /// 切换工具调用消息的显示状态
     ToggleToolMessages(bool),
     /// 替换最后一条消息并重新渲染（SubAgentGroup 更新专用）
@@ -324,6 +333,29 @@ impl RenderTask {
                 RenderEvent::LoadHistory(vms) => {
                     self.messages = vms;
                     self.rebuild_all();
+                }
+                RenderEvent::LoadHistoryWithAnchor {
+                    messages,
+                    anchor_message_idx,
+                } => {
+                    self.messages = messages;
+                    self.rebuild_all();
+                    // 计算锚点消息在新布局中的视觉行起始位置
+                    let anchor_visual_row =
+                        if anchor_message_idx < self.cache.read().message_offsets.len() {
+                            let cache = self.cache.read();
+                            let line_idx = cache.message_offsets[anchor_message_idx];
+                            if line_idx < cache.wrap_map.len() {
+                                Some(cache.wrap_map[line_idx].visual_row_start as usize)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                    if let Some(row) = anchor_visual_row {
+                        self.cache.write().scroll_anchor = Some(row);
+                    }
                 }
                 RenderEvent::ToggleToolMessages(show) => {
                     self.show_tool_messages = show;

@@ -82,6 +82,7 @@ use crate::thread::{SqliteThreadStore, ThreadBrowser, ThreadId, ThreadMeta, Thre
 use crate::command::agents::AgentItem;
 pub use crate::ui::message_view::{
     aggregate_tail_tool_groups, aggregate_tool_groups, ContentBlockView, MessageViewModel,
+    ToolCategory,
 };
 pub use agent_panel::AgentPanel;
 pub use hooks_panel::HooksPanel;
