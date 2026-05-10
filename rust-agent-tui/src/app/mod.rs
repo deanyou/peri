@@ -202,6 +202,9 @@ impl App {
             mcp_ready_shown_until: std::cell::Cell::new(None),
             quit_pending_since: None,
             mouse_available: None,
+            resource_monitor: parking_lot::Mutex::new(
+                service_registry::ProcessResourceMonitor::new(),
+            ),
         };
 
         Self {
@@ -523,20 +526,6 @@ impl App {
     /// 获取当前 Agent 的 ID
     pub fn get_agent_id(&self) -> Option<&String> {
         self.session_mgr.current().agent.agent_id.as_ref()
-    }
-
-    /// 获取当前任务运行时长（运行中）或上次任务时长（已完成）
-    pub fn get_current_task_duration(&self) -> Option<std::time::Duration> {
-        let s = self.session_mgr.current();
-        if let Some(start) = s.agent.task_start_time {
-            if s.ui.loading {
-                Some(start.elapsed())
-            } else {
-                s.agent.last_task_duration
-            }
-        } else {
-            s.agent.last_task_duration
-        }
     }
 
     /// 打开面板（统一处理跨作用域互斥）：关闭所有 manager 中的面板后，放入正确的 manager

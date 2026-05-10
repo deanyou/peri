@@ -13,6 +13,46 @@ use super::setup_wizard::SetupWizardPanel;
 use crate::config::PeriConfig;
 use crate::thread::ThreadStore;
 
+/// 进程资源采样器：每 2 秒采样一次当前进程的 CPU 和内存
+pub struct ProcessResourceMonitor {
+    sys: sysinfo::System,
+    pid: sysinfo::Pid,
+    /// 上次采样时间
+    last_sample: std::time::Instant,
+    /// 缓存的内存使用量（MB）
+    memory_mb: u64,
+}
+
+impl ProcessResourceMonitor {
+    pub fn new() -> Self {
+        let mut sys = sysinfo::System::new();
+        let pid = sysinfo::get_current_pid().expect("failed to get current PID");
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        Self {
+            sys,
+            pid,
+            last_sample: std::time::Instant::now() - std::time::Duration::from_secs(3), // 确保首次调用立即采样
+            memory_mb: 0,
+        }
+    }
+
+    /// 刷新缓存（仅当距上次采样 ≥ 2 秒时才执行系统调用）
+    pub fn refresh_if_needed(&mut self) {
+        if self.last_sample.elapsed() >= std::time::Duration::from_secs(2) {
+            self.sys
+                .refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.pid]), true);
+            if let Some(proc) = self.sys.process(self.pid) {
+                self.memory_mb = proc.memory() / 1024 / 1024;
+            }
+            self.last_sample = std::time::Instant::now();
+        }
+    }
+
+    pub fn memory_mb(&self) -> u64 {
+        self.memory_mb
+    }
+}
+
 /// 全局服务/状态聚合：跨 session 共享的服务字段。
 pub struct ServiceRegistry {
     pub peri_config: Option<PeriConfig>,
@@ -37,4 +77,6 @@ pub struct ServiceRegistry {
     pub quit_pending_since: Option<std::time::Instant>,
     /// 鼠标是否可用。`None` = 启动 probe 尚未完成，`Some(true/false)` = 已确定。
     pub mouse_available: Option<bool>,
+    /// 进程内存监控（2s 刷新）
+    pub resource_monitor: parking_lot::Mutex<ProcessResourceMonitor>,
 }

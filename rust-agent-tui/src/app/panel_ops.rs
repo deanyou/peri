@@ -1118,6 +1118,9 @@ impl App {
                 mcp_ready_shown_until: std::cell::Cell::new(None),
                 quit_pending_since: None,
                 mouse_available: None,
+                resource_monitor: parking_lot::Mutex::new(
+                    super::service_registry::ProcessResourceMonitor::new(),
+                ),
             },
             global_panels: PanelManager::new(),
         };

@@ -176,21 +176,26 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // 任务运行时长（仅在 loading 时显示）
-    if app.session_mgr.sessions[app.session_mgr.active].ui.loading {
-        if let Some(duration) = app.get_current_task_duration() {
-            let secs = duration.as_secs();
-            let time_str = if secs >= 60 {
-                format!("{}m{}s", secs / 60, secs % 60)
-            } else {
-                format!("{}s", secs)
-            };
-            spans.push(Span::styled(" │ ", Style::default().fg(theme::MUTED)));
-            spans.push(Span::styled(
-                format!(" ⏱ {}", time_str),
-                Style::default().fg(theme::MUTED),
-            ));
-        }
+    // 进程内存监控
+    {
+        let mut monitor = app.services.resource_monitor.lock();
+        monitor.refresh_if_needed();
+        let mem = monitor.memory_mb();
+        drop(monitor); // 释放锁后再渲染
+
+        let mem_color = if mem > 1024 {
+            theme::ERROR
+        } else if mem > 512 {
+            theme::WARNING
+        } else {
+            theme::SAGE
+        };
+
+        spans.push(Span::styled(" │ ", Style::default().fg(theme::MUTED)));
+        spans.push(Span::styled(
+            format!(" MEM {}MB", mem),
+            Style::default().fg(mem_color),
+        ));
     }
 
     render_truncated_line(f, spans, Vec::new(), area);
