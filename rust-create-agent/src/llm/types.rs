@@ -38,14 +38,15 @@ impl LlmRequest {
     }
 }
 
-/// Token 使用量（来自 LLM API 响应，用于 Langfuse Generation 追踪）
+/// Token 使用量（adapter 层规范化后的统一语义，所有 provider 一致）
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
+    /// 总输入 token（含缓存 token，adapter 层已规范化）
     pub input_tokens: u32,
     pub output_tokens: u32,
-    /// Anthropic Prompt Cache：写入缓存的 token 数（首次缓存）
+    /// 写入缓存的 token 数（仅 Anthropic 有意义，OpenAI 始终 None）
     pub cache_creation_input_tokens: Option<u32>,
-    /// Anthropic Prompt Cache：命中缓存读取的 token 数
+    /// 从缓存读取的 token 数（Anthropic/OpenAI 均有，某些模型为 None）
     pub cache_read_input_tokens: Option<u32>,
 }
 

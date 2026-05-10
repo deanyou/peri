@@ -569,24 +569,32 @@ impl BaseModel for ChatAnthropic {
         };
 
         let usage = {
-            let input = resp_json["usage"]["input_tokens"]
+            let raw_input = resp_json["usage"]["input_tokens"]
                 .as_u64()
-                .map(|v| v as u32);
+                .map(|v| v as u32)
+                .unwrap_or(0);
             let output = resp_json["usage"]["output_tokens"]
                 .as_u64()
                 .map(|v| v as u32);
+            // Anthropic API 缓存字段始终存在，但值可能为 null（无缓存活动时）。
+            // null 等价于 0，用 unwrap_or(0) 统一处理。
             let cache_creation = resp_json["usage"]["cache_creation_input_tokens"]
                 .as_u64()
-                .map(|v| v as u32);
+                .map(|v| v as u32)
+                .unwrap_or(0);
             let cache_read = resp_json["usage"]["cache_read_input_tokens"]
                 .as_u64()
-                .map(|v| v as u32);
-            match (input, output) {
-                (Some(i), Some(o)) => Some(crate::llm::types::TokenUsage {
-                    input_tokens: i,
+                .map(|v| v as u32)
+                .unwrap_or(0);
+            match (resp_json["usage"]["input_tokens"].as_u64(), output) {
+                (Some(_), Some(o)) => Some(crate::llm::types::TokenUsage {
+                    // 规范化：Anthropic 的 input_tokens 不含缓存 token，
+                    // 加上 cache_creation + cache_read 使其与 OpenAI 语义一致（总输入）。
+                    // 这样 estimated_context_tokens() 和 cache_hit_rate() 可用单一公式。
+                    input_tokens: raw_input + cache_creation + cache_read,
                     output_tokens: o,
-                    cache_creation_input_tokens: cache_creation,
-                    cache_read_input_tokens: cache_read,
+                    cache_creation_input_tokens: Some(cache_creation),
+                    cache_read_input_tokens: Some(cache_read),
                 }),
                 _ => None,
             }

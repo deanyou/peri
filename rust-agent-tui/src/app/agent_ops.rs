@@ -455,6 +455,10 @@ impl App {
                 prefix_len,
                 tail_vms,
             } => {
+                // RebuildAll 会截断尾部并替换为从 BaseMessage[] 重建的 VMs。
+                // CacheWarning 是合成 VM（不在 BaseMessage[] 中），重建时直接丢弃，
+                // 后续 LLM 调用会根据实际 cache hit rate 重新生成。
+
                 self.session_mgr.sessions[self.session_mgr.active]
                     .messages
                     .view_messages
@@ -815,34 +819,41 @@ impl App {
                     return (true, false, false);
                 }
 
-                // 缓存率检查：低于 80% 时显示黄色提示
-                {
-                    let cache_read = usage.cache_read_input_tokens.unwrap_or(0) as u64;
-                    let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0) as u64;
-                    let denominator = cache_read + cache_creation;
-                    if denominator > 0 {
-                        let rate = cache_read as f64 / denominator as f64;
-                        if rate < 0.8 {
-                            let percentage = (rate * 100.0) as u32;
-                            let msg = format!("Prompt cache 命中率 {}% < 80%", percentage);
-                            let vm = MessageViewModel::cache_warning(msg);
-                            self.session_mgr.sessions[self.session_mgr.active]
-                                .messages
-                                .view_messages
-                                .push(vm.clone());
-                            let _ = self.session_mgr.sessions[self.session_mgr.active]
-                                .messages
-                                .render_tx
-                                .send(RenderEvent::AddMessage(vm));
-                        }
-                    }
-                }
-
                 // 累积到会话追踪器
                 self.session_mgr.sessions[self.session_mgr.active]
                     .agent
                     .session_token_tracker
                     .accumulate(&usage);
+
+                // 缓存率检查：累计命中率低于 80% 时显示黄色提示
+                if let Some(rate) = self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .session_token_tracker
+                    .cache_hit_rate()
+                {
+                    if rate < 0.8 {
+                        let tracker = &self.session_mgr.sessions[self.session_mgr.active]
+                            .agent
+                            .session_token_tracker;
+                        tracing::warn!(
+                            input = tracker.total_input_tokens,
+                            cache_read = tracker.total_cache_read_tokens,
+                            rate_pct = rate * 100.0,
+                            "prompt cache hit rate below threshold"
+                        );
+                        let percentage = (rate * 100.0) as u32;
+                        let msg = format!("Prompt cache 累计命中率 {}% < 80%", percentage);
+                        let vm = MessageViewModel::cache_warning(msg);
+                        self.session_mgr.sessions[self.session_mgr.active]
+                            .messages
+                            .view_messages
+                            .push(vm.clone());
+                        let _ = self.session_mgr.sessions[self.session_mgr.active]
+                            .messages
+                            .render_tx
+                            .send(RenderEvent::AddMessage(vm));
+                    }
+                }
                 // 更新 spinner 的 token 显示（仅当次调用的 token，不累计）
                 let current_tokens = usage.input_tokens as usize + usage.output_tokens as usize;
                 self.session_mgr.sessions[self.session_mgr.active]
@@ -1042,9 +1053,15 @@ impl App {
                         .agent_rx = None;
                 }
                 // Auto-compact 两级策略
-                if self.session_mgr.sessions[self.session_mgr.active]
+                // 中断后不触发 compact（Interrupted 已清除 needs_auto_compact），
+                // agent_replied 为 false 时也跳过（上下文极小，无需压缩）
+                let should_check_compact = self.session_mgr.sessions[self.session_mgr.active]
                     .agent
-                    .needs_auto_compact
+                    .agent_replied;
+                if should_check_compact
+                    && self.session_mgr.sessions[self.session_mgr.active]
+                        .agent
+                        .needs_auto_compact
                 {
                     self.session_mgr.sessions[self.session_mgr.active]
                         .agent
@@ -1054,7 +1071,7 @@ impl App {
                     );
                     self.start_compact("auto".to_string());
                     return (true, false, true);
-                } else {
+                } else if should_check_compact {
                     let compact_config = self.get_compact_config();
                     let budget = rust_create_agent::agent::token::ContextBudget::new(
                         self.session_mgr.sessions[self.session_mgr.active]
@@ -1109,6 +1126,11 @@ impl App {
                 (true, false, true)
             }
             AgentEvent::Interrupted => {
+                // 中断后不应触发 auto-compact（上下文可能还很充裕），
+                // 清除标记，防止紧随其后的 Done 事件误触发
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .needs_auto_compact = false;
                 // Pipeline：finalize 当前状态
                 let actions = self.session_mgr.sessions[self.session_mgr.active]
                     .messages

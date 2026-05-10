@@ -79,7 +79,7 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(format!(" {}", app.services.model_name), style));
     }
 
-    // 上下文使用率
+    // 上下文使用率 + 缓存命中率
     {
         let tracker = &app.session_mgr.sessions[app.session_mgr.active]
             .agent
@@ -89,7 +89,6 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
                 .agent
                 .context_window,
         ) {
-            let used = tracker.estimated_context_tokens().unwrap_or(0);
             let total = app.session_mgr.sessions[app.session_mgr.active]
                 .agent
                 .context_window;
@@ -101,12 +100,17 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
                 theme::SAGE
             };
             spans.push(Span::styled(" │ ", Style::default().fg(theme::MUTED)));
+            // 缓存命中率（仅当有缓存数据时显示）
+            let cache_str = match tracker.last_cache_hit_rate() {
+                Some(rate) => format!(" {:.0}%", rate * 100.0),
+                None => String::new(),
+            };
             spans.push(Span::styled(
                 format!(
-                    "ctx: {:.0}% ({:.0}K/{:.0}K)",
+                    "ctx: {:.0}% [{:.0}k]{}",
                     pct,
-                    used as f64 / 1000.0,
-                    total as f64 / 1000.0
+                    total as f64 / 1000.0,
+                    cache_str
                 ),
                 Style::default().fg(color),
             ));

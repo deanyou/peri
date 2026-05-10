@@ -282,6 +282,7 @@ impl SubAgentTool {
     ) -> Vec<Box<dyn BaseTool>> {
         let allowed_list = allowed.to_vec();
         let disallowed_list = disallowed.to_vec();
+        let is_wildcard = allowed_list.len() == 1 && allowed_list[0] == "*";
 
         self.parent_tools
             .iter()
@@ -292,8 +293,9 @@ impl SubAgentTool {
                 if name == "Agent" {
                     return false;
                 }
-                // If allowed_list is non-empty, only keep tools in the list (case-insensitive)
-                if !allowed_list.is_empty()
+                // If allowed_list is non-empty and not wildcard "*", only keep tools in the list
+                if !is_wildcard
+                    && !allowed_list.is_empty()
                     && !allowed_list.iter().any(|n| n.to_lowercase() == name_lower)
                 {
                     return false;
@@ -1086,6 +1088,68 @@ mod tests {
         assert!(
             !names.contains(&"Edit"),
             "Edit in disallow list should be excluded"
+        );
+    }
+
+    #[test]
+    fn test_tool_filter_wildcard_star() {
+        // tools: "*" -> inherit all parent tools (same as Empty), but still exclude Agent
+        let parent_tools = vec![
+            make_tool("Read"),
+            make_tool("Write"),
+            make_tool("Bash"),
+            make_tool("Agent"), // should still be excluded
+        ];
+        let t = make_subagent_tool(parent_tools);
+
+        let allowed = ToolsValue::List(vec!["*".to_string()]);
+        let disallowed = ToolsValue::Empty;
+        let filtered = t.filter_tools(&allowed, &disallowed);
+        let names: Vec<&str> = filtered.iter().map(|t| t.name()).collect();
+
+        assert!(
+            names.contains(&"Read"),
+            "Read should be inherited with tools: *"
+        );
+        assert!(
+            names.contains(&"Write"),
+            "Write should be inherited with tools: *"
+        );
+        assert!(
+            names.contains(&"Bash"),
+            "Bash should be inherited with tools: *"
+        );
+        assert!(
+            !names.contains(&"Agent"),
+            "Agent should still be excluded even with tools: *"
+        );
+    }
+
+    #[test]
+    fn test_tool_filter_wildcard_star_with_disallowed() {
+        // tools: "*" + disallowedTools -> inherit all except disallowed
+        let parent_tools = vec![
+            make_tool("Read"),
+            make_tool("Write"),
+            make_tool("Edit"),
+            make_tool("Bash"),
+        ];
+        let t = make_subagent_tool(parent_tools);
+
+        let allowed = ToolsValue::List(vec!["*".to_string()]);
+        let disallowed = ToolsValue::List(vec!["Write".to_string(), "Edit".to_string()]);
+        let filtered = t.filter_tools(&allowed, &disallowed);
+        let names: Vec<&str> = filtered.iter().map(|t| t.name()).collect();
+
+        assert!(names.contains(&"Read"), "Read should be inherited");
+        assert!(names.contains(&"Bash"), "Bash should be inherited");
+        assert!(
+            !names.contains(&"Write"),
+            "Write in disallow list should be excluded even with tools: *"
+        );
+        assert!(
+            !names.contains(&"Edit"),
+            "Edit in disallow list should be excluded even with tools: *"
         );
     }
 
