@@ -696,8 +696,9 @@ impl BaseTool for SubAgentTool {
         }
         // No registry configured: fall through to normal execution
 
-        // Fork detection branch
-        let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false);
+        // Fork detection branch: explicit fork:true OR subagent_type="fork" (common LLM mistake)
+        let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
+            || subagent_type.as_deref() == Some("fork");
         if is_fork {
             return self.invoke_fork(&prompt, &cwd).await;
         }
@@ -707,7 +708,7 @@ impl BaseTool for SubAgentTool {
             Some(id) => id.clone(),
             None => {
                 return Ok(
-                    "Error: please provide subagent_type parameter to specify the agent type"
+                    "Error: please provide subagent_type parameter to specify the agent type, or use fork: true for fork mode"
                         .to_string(),
                 )
             }
@@ -963,7 +964,7 @@ mod tests {
         );
     }
 
-    /// Verify error returned when subagent_type parameter is missing
+    /// Verify error returned when subagent_type parameter is missing and fork is not set
     #[tokio::test]
     async fn test_agent_subagent_type_missing_returns_error() {
         let t = make_subagent_tool(vec![]);
@@ -974,8 +975,37 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            result.contains("subagent_type"),
-            "Should return missing subagent_type error: {}",
+            result.contains("subagent_type") || result.contains("fork"),
+            "Should return missing subagent_type error with fork hint: {}",
+            result
+        );
+    }
+
+    /// Verify subagent_type="fork" is treated as fork:true (common LLM mistake)
+    #[tokio::test]
+    async fn test_subagent_type_fork_treated_as_fork_mode() {
+        let parent_messages: Arc<RwLock<Vec<BaseMessage>>> = Arc::new(RwLock::new(Vec::new()));
+        parent_messages.write().push(BaseMessage::human("Hello"));
+
+        let t = SubAgentTool::new(
+            Arc::new(vec![]),
+            None,
+            Arc::new(|_: Option<&str>| Box::new(EchoLLM) as Box<dyn ReactLLM + Send + Sync>),
+            "/tmp".to_string(),
+        )
+        .with_parent_messages(parent_messages);
+
+        // subagent_type: "fork" should trigger fork mode, NOT try to load an agent named "fork"
+        let result = t
+            .invoke(serde_json::json!({
+                "subagent_type": "fork",
+                "prompt": "do something"
+            }))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("echo") || result.contains("Fork") || result.contains("fork-done"),
+            "subagent_type='fork' should trigger fork mode: {}",
             result
         );
     }

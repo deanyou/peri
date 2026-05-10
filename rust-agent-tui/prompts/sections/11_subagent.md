@@ -27,10 +27,12 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 - Inherits full conversation history, system prompt, and tool set from parent
 - The `prompt` is a directive within existing context, not a standalone briefing
 - Output format: **Scope**, **Result**, **Key files**, **Files changed**
-- Mutually exclusive with `subagent_type`
+- Do NOT set `subagent_type` when using fork mode — they are mutually exclusive
+- Usage: `Agent(fork: true, prompt: "...")` — fork is a boolean parameter, NOT an agent type name
 
 ## Usage notes
 
 - Always include a short `description` (3-5 words) for UI display and logging
 - Summarize sub-agent results for the user — they are not directly visible
 - Launch multiple sub-agents in parallel by including multiple `tool_use` blocks in a single message
+- **Common mistake**: `subagent_type: "fork"` is WRONG. Use `fork: true` instead. `fork` is a separate boolean parameter, not a subagent_type value.
