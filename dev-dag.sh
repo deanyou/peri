@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 
 # Defaults
-export PORT="${PORT:-3000}"
+export PORT="${PORT:-3210}"
 export DATABASE_URL="${DATABASE_URL:-sqlite:acpx-g.db?mode=rwc}"
 export RUST_LOG="${RUST_LOG:-acpx_g=debug,info}"
 
