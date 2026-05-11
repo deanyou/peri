@@ -96,8 +96,8 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
     let cwd_for_handler = cwd.clone();
     let langfuse_for_handler = langfuse_tracer.clone();
     let provider_name_for_handler = provider_name.clone();
-    let handler: Arc<dyn rust_create_agent::agent::events::AgentEventHandler> =
-        Arc::new(FnEventHandler(move |event: ExecutorEvent| {
+    let handler: Arc<dyn rust_create_agent::agent::events::AgentEventHandler> = Arc::new(
+        FnEventHandler(move |event: ExecutorEvent| {
             // Langfuse hook（在 TUI 事件映射前执行，使用原始 ExecutorEvent）
             if let Some(ref tracer) = langfuse_for_handler {
                 let mut t = tracer.lock();
@@ -140,12 +140,20 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
             // 映射为 TUI AgentEvent
             if let Some(msg) = map_executor_event(event, &cwd_for_handler) {
                 if let Err(e) = tx_event.try_send(msg) {
-                    if matches!(e, tokio::sync::mpsc::error::TrySendError::Full(_)) {
-                        tracing::warn!("AgentEvent channel full, dropping event");
+                    match e {
+                        tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                            tracing::warn!("AgentEvent channel full, dropping event");
+                        }
+                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                            tracing::warn!(
+                                "AgentEvent channel closed, dropping event (receiver already dropped)"
+                            );
+                        }
                     }
                 }
             }
-        }));
+        }),
+    );
 
     // 不使用 .with_system()，改由 with_system_prompt() 注入到 state，使 Langfuse 可见
     let model = rust_create_agent::llm::RetryableLLM::new(
