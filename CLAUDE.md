@@ -77,6 +77,22 @@ peri-cli (Node.js 包管理 CLI，独立)
 
 ## 消息渲染管线
 
+### agent_ops 模块结构
+
+`rust-agent-tui/src/app/agent_ops*.rs` 按职责拆分为 7 个文件，所有函数均为 `impl App` 方法（Rust 允许跨文件分片），零签名改动：
+
+| 模块 | 行数 | 职责 |
+|------|------|------|
+| `agent_ops.rs` | ~1170 | 骨架：`handle_agent_event` match dispatch + `poll_agent`/`poll_background_events`/`poll_cron_triggers` + Done/Interrupted/Error/InteractionRequest 核心分支 |
+| `agent_render.rs` | ~90 | Render bridge：`render_rebuild`、`render_rebuild_with_anchor`、`request_rebuild`、`apply_pipeline_action` |
+| `agent_submit.rs` | ~380 | Agent 启动：`submit_message`、`flush_pending_messages`、`extract_skill_tokens` |
+| `agent_compact.rs` | ~240 | 上下文压缩：`handle_compact_done`、`handle_compact_error`、`start_micro_compact` |
+| `agent_events_oauth.rs` | ~90 | OAuth/MCP 事件：`handle_oauth_needed/completed/failed`、`handle_mcp_action_completed` |
+| `agent_events_plugin.rs` | ~115 | 插件事件：`handle_plugin_action_completed` |
+| `agent_events_bg.rs` | ~140 | 后台任务：`handle_background_task_completed` |
+
+`handle_agent_event` 中被提取的分支通过 `pub(crate)` 委托方法调用（如 `self.handle_compact_done(summary)`），保留在骨架中的分支（Done/Interrupted/Error/InteractionRequest）因与 `reconcile_already_done`、`pending_bg_continuation` 等核心状态强耦合而不宜再拆。
+
 ### 全局架构：统一 RebuildAll
 
 ```

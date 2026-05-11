@@ -33,7 +33,13 @@ pub use command_system::CommandSystem;
 pub use session_metadata::SessionMetadata;
 
 mod agent_comm;
+mod agent_compact;
+mod agent_events_bg;
+mod agent_events_oauth;
+mod agent_events_plugin;
 mod agent_ops;
+mod agent_render;
+mod agent_submit;
 mod ask_user_ops;
 mod ask_user_prompt;
 mod cron_ops;
