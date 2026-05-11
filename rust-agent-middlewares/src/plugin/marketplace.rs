@@ -974,6 +974,7 @@ mod tests {
                 category: None,
                 homepage: None,
                 tags: None,
+                extra: serde_json::Value::Object(Default::default()),
             }],
             allow_cross_marketplace: None,
         };
@@ -1029,6 +1030,7 @@ mod tests {
                     category: None,
                     homepage: None,
                     tags: None,
+                    extra: serde_json::Value::Object(Default::default()),
                 },
                 MarketplacePlugin {
                     name: "p2".into(),
@@ -1040,6 +1042,7 @@ mod tests {
                     category: None,
                     homepage: None,
                     tags: None,
+                    extra: serde_json::Value::Object(Default::default()),
                 },
             ],
             allow_cross_marketplace: None,

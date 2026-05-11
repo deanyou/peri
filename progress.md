@@ -1,5 +1,9 @@
 # Design Review Progress
 
+## 2026-05-11 第47轮：修复 marketplace LSP 插件安装失败
+
+修复 Claude Code 官方 marketplace 中所有 LSP 插件（rust-analyzer-lsp、pyright-lsp、typescript-lsp 等 13 个）在 Perihelion 中安装失败的问题。根因：这些纯 LSP 插件没有 plugin.json，配置直接定义在 marketplace.json 条目中（lspServers 字段），而 Perihelion 安装时强制要求 plugin.json 存在。修复方案：(1) MarketplacePlugin 添加 `#[serde(flatten)] extra` 保留 lspServers 等未声明字段；(2) PluginLspServer 添加 extension_to_language 字段；(3) 安装时检测 plugin.json 不存在则从 marketplace 条目生成合成 manifest（HashMap 格式转 Vec 格式）；(4) PluginLoadResult 新增 all_lsp_servers 聚合字段，loader 从 manifest.lsp_servers 提取并转为 LspServerConfig；(5) TUI agent 启动时合并全局+插件 LSP 配置（全局同名覆盖插件）。补充 3 个合成 manifest 测试。708 测试全通过，clippy 零警告。
+
 ## 2026-05-11 第46轮：LSP clippy 警告清除
 
 消除 6 个 clippy 警告：shutdown 中 parking_lot guard 跨 await 改为提前 clone Arc 列表释放锁；transport.rs 和 diagnostics.rs 复杂类型提取 type alias（NotificationHandler、ErrorHandler、DiagnosticCallback）；DiagnosticsRegistry 补充 Default impl；try_restart 中 parking_lot Mutex guard 的 await_holding_lock 为误报（drop 在 await 前）添加 allow 注解；移除未使用的 NoServer 变体。perihelion-lsp 和 rust-agent-middlewares clippy 零警告（仅剩 lsp-types 外部 deprecated）。

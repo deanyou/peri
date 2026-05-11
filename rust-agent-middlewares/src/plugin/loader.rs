@@ -5,6 +5,8 @@ use crate::mcp::McpServerConfig;
 use crate::plugin::config::{load_claude_settings, load_installed_plugins, load_plugin_manifest};
 use crate::plugin::types::{InstalledPlugins, McpServerEntry, PluginManifest};
 use gray_matter::{engine::YAML, Matter};
+use perihelion_lsp::config::LspConfigSource;
+use perihelion_lsp::config::LspServerConfig;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -381,6 +383,8 @@ pub struct PluginLoadResult {
     pub all_agent_dirs: Vec<PathBuf>,
     pub all_commands: Vec<CommandEntry>,
     pub all_hooks: Vec<RegisteredHook>,
+    /// 聚合所有插件的 LSP 服务器配置
+    pub all_lsp_servers: Vec<LspServerConfig>,
 }
 
 /// 加载所有已启用插件，返回聚合结果（skills 路径、MCP 服务器、agent 路径、命令列表）
@@ -396,6 +400,7 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path) -> PluginLoadResult {
                 all_agent_dirs: vec![],
                 all_commands: vec![],
                 all_hooks: vec![],
+                all_lsp_servers: vec![],
             };
         }
     };
@@ -446,6 +451,36 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path) -> PluginLoadResult {
         .flatten()
         .collect();
 
+    let all_lsp_servers: Vec<LspServerConfig> = plugins
+        .iter()
+        .filter_map(|plugin| {
+            let servers = plugin.manifest.lsp_servers.as_ref()?;
+            if servers.is_empty() {
+                return None;
+            }
+            Some(
+                servers
+                    .iter()
+                    .map(|s| LspServerConfig {
+                        name: s.name.clone(),
+                        command: s.command.clone(),
+                        args: s.args.clone(),
+                        env: None,
+                        extension_to_language: s.extension_to_language.clone(),
+                        initialization_options: None,
+                        disabled: None,
+                        max_restarts: None,
+                        startup_timeout: None,
+                        source: Some(LspConfigSource::Plugin {
+                            plugin_name: plugin.name.clone(),
+                        }),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .flatten()
+        .collect();
+
     PluginLoadResult {
         plugins,
         all_skill_dirs,
@@ -453,6 +488,7 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path) -> PluginLoadResult {
         all_agent_dirs,
         all_commands,
         all_hooks,
+        all_lsp_servers,
     }
 }
 

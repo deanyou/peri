@@ -246,6 +246,12 @@ impl App {
             .as_ref()
             .map(|pd| pd.all_agent_dirs.clone())
             .unwrap_or_default();
+        let plugin_lsp_servers = self
+            .services
+            .plugin_data
+            .as_ref()
+            .map(|pd| pd.all_lsp_servers.clone())
+            .unwrap_or_default();
         let mut plugin_hooks = self
             .services
             .plugin_data
@@ -303,6 +309,7 @@ impl App {
                     plugin_skill_dirs,
                     plugin_agent_dirs,
                     plugin_hooks: all_hooks,
+                    plugin_lsp_servers,
                     hook_groups,
                     hook_session_start,
                 })

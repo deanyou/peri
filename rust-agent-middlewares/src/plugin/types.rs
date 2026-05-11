@@ -70,6 +70,9 @@ pub struct PluginLspServer {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// 文件扩展名到语言 ID 的映射（如 {".rs": "rust"}）
+    #[serde(default, rename = "extensionToLanguage")]
+    pub extension_to_language: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +134,9 @@ pub struct MarketplacePlugin {
     pub homepage: Option<String>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// 保留 marketplace.json 中未声明的字段（lspServers、mcpServers、strict 等）
+    #[serde(flatten)]
+    pub extra: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

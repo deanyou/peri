@@ -39,6 +39,8 @@ pub struct AgentRunConfig {
     pub plugin_agent_dirs: Vec<std::path::PathBuf>,
     /// 插件 hooks（从 PluginLoadResult.all_hooks 传入）
     pub plugin_hooks: Vec<rust_agent_middlewares::hooks::RegisteredHook>,
+    /// 插件 LSP 服务器配置（从 PluginLoadResult.all_lsp_servers 传入）
+    pub plugin_lsp_servers: Vec<perihelion_lsp::config::LspServerConfig>,
     /// Hook 分组：每组对应一个独立的 HookMiddleware 实例，灵活控制执行顺序和生命周期
     pub hook_groups: Vec<Vec<rust_agent_middlewares::hooks::RegisteredHook>>,
     /// Whether this is the first message of a new session (triggers SessionStart hook)
@@ -65,6 +67,7 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
         plugin_skill_dirs,
         plugin_agent_dirs,
         plugin_hooks,
+        plugin_lsp_servers,
         hook_groups,
         hook_session_start,
     } = cfg;
@@ -360,25 +363,32 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
             Arc::clone(&shared_tools),
         )));
 
-    // LSP 中间件：加载全局 LSP 配置，惰性初始化
+    // LSP 中间件：合并全局 LSP 配置和插件 LSP 配置，惰性初始化
     let lsp_settings_path = dirs_next::home_dir().map(|h| h.join(".peri").join("settings.json"));
-    let executor = if let Some(ref settings_path) = lsp_settings_path {
-        let lsp_config = perihelion_lsp::config::load_global_lsp_config(settings_path);
-        if lsp_config.lsp_servers.is_empty() {
-            executor
-        } else {
-            tracing::info!(
-                target: "lsp",
-                servers = lsp_config.lsp_servers.len(),
-                "加载 LSP 配置"
-            );
-            executor.add_middleware(Box::new(rust_agent_middlewares::LspMiddleware::new(
-                cwd.to_string(),
-                lsp_config,
-            )))
-        }
+    let mut lsp_config = if let Some(ref settings_path) = lsp_settings_path {
+        perihelion_lsp::config::load_global_lsp_config(settings_path)
     } else {
+        perihelion_lsp::config::LspConfigFile::default()
+    };
+    // 插件 LSP 配置（全局同名覆盖插件）
+    for server in plugin_lsp_servers {
+        lsp_config
+            .lsp_servers
+            .entry(server.name.clone())
+            .or_insert(server);
+    }
+    let executor = if lsp_config.lsp_servers.is_empty() {
         executor
+    } else {
+        tracing::info!(
+            target: "lsp",
+            servers = lsp_config.lsp_servers.len(),
+            "加载 LSP 配置"
+        );
+        executor.add_middleware(Box::new(rust_agent_middlewares::LspMiddleware::new(
+            cwd.to_string(),
+            lsp_config,
+        )))
     };
 
     let executor = executor

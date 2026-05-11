@@ -58,6 +58,67 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 从 marketplace 条目生成合成 plugin.json（用于无原生 manifest 的 LSP/MCP 插件）
+fn generate_synthetic_manifest(
+    target_dir: &Path,
+    marketplace_plugin: &crate::plugin::types::MarketplacePlugin,
+) -> Result<(), InstallerError> {
+    let mut manifest = serde_json::Map::new();
+    manifest.insert("name".into(), serde_json::json!(marketplace_plugin.name));
+    if !marketplace_plugin.version.is_empty() {
+        manifest.insert(
+            "version".into(),
+            serde_json::json!(marketplace_plugin.version),
+        );
+    }
+    if !marketplace_plugin.description.is_empty() {
+        manifest.insert(
+            "description".into(),
+            serde_json::json!(marketplace_plugin.description),
+        );
+    }
+    if let Some(ref author) = marketplace_plugin.author {
+        manifest.insert(
+            "author".into(),
+            serde_json::to_value(author)
+                .map_err(|e| InstallerError::SettingsError(e.to_string()))?,
+        );
+    }
+
+    // 转换 lspServers: HashMap -> Vec（marketplace 用 {name: config}，plugin.json 用 [{name, ...}]）
+    if let Some(lsp_servers) = marketplace_plugin.extra.get("lspServers") {
+        if let Some(map) = lsp_servers.as_object() {
+            let entries: Vec<serde_json::Value> = map
+                .iter()
+                .map(|(server_name, config)| {
+                    let mut entry = config.clone();
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("name".into(), serde_json::json!(server_name));
+                    }
+                    entry
+                })
+                .collect();
+            if !entries.is_empty() {
+                manifest.insert("lspServers".into(), serde_json::json!(entries));
+            }
+        }
+    }
+
+    // 转换 mcpServers
+    if let Some(mcp_servers) = marketplace_plugin.extra.get("mcpServers") {
+        manifest.insert("mcpServers".into(), mcp_servers.clone());
+    }
+
+    let claude_plugin_dir = target_dir.join(".claude-plugin");
+    std::fs::create_dir_all(&claude_plugin_dir)?;
+    let manifest_path = claude_plugin_dir.join("plugin.json");
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| InstallerError::SettingsError(e.to_string()))?;
+    std::fs::write(&manifest_path, json)?;
+
+    Ok(())
+}
+
 fn get_marketplace_manifest(
     marketplace: &str,
     marketplace_cache_dir: &Path,
@@ -203,7 +264,7 @@ pub async fn install_plugin(
 
     let marketplace_plugin = manifest
         .plugins
-        .iter()
+        .into_iter()
         .find(|p| p.name == name)
         .ok_or_else(|| InstallerError::PluginNotFound {
             name: name.into(),
@@ -270,7 +331,14 @@ pub async fn install_plugin(
             marketplace: marketplace.into(),
         });
     }
-    let _plugin_manifest = load_plugin_manifest(&source_dir)?;
+    let manifest_path = source_dir.join(".claude-plugin").join("plugin.json");
+    let has_native_manifest = if manifest_path.exists() {
+        // 文件存在时仍然验证其内容
+        load_plugin_manifest(&source_dir)?;
+        true
+    } else {
+        false
+    };
 
     let version = marketplace_plugin
         .sha
@@ -296,16 +364,25 @@ pub async fn install_plugin(
     tokio::task::spawn_blocking({
         let source_dir = source_dir.clone();
         let target_dir = target_dir.clone();
-        move || {
+        move || -> Result<(), InstallerError> {
             if target_dir.exists() {
                 let _ = std::fs::remove_dir_all(&target_dir);
             }
             std::fs::create_dir_all(&target_dir)?;
-            copy_dir_recursive(&source_dir, &target_dir).map_err(|e| InstallerError::CopyFailed {
-                src: source_dir,
-                dst: target_dir,
-                source: e,
-            })
+            copy_dir_recursive(&source_dir, &target_dir).map_err(|e| {
+                InstallerError::CopyFailed {
+                    src: source_dir.clone(),
+                    dst: target_dir.clone(),
+                    source: e,
+                }
+            })?;
+
+            // 如果插件没有原生 plugin.json，从 marketplace 条目生成合成的 manifest
+            if !has_native_manifest {
+                generate_synthetic_manifest(&target_dir, &marketplace_plugin)?;
+            }
+
+            Ok(())
         }
     })
     .await
@@ -1449,5 +1526,100 @@ mod tests {
             version_dir.exists(),
             "version dir without marker should still exist"
         );
+    }
+
+    #[test]
+    fn test_generate_synthetic_manifest_lsp() {
+        let dir = tempdir().unwrap();
+        let plugin = crate::plugin::types::MarketplacePlugin {
+            name: "rust-analyzer-lsp".into(),
+            description: "Rust language server".into(),
+            source: serde_json::json!("./plugins/rust-analyzer-lsp"),
+            version: "1.0.0".into(),
+            sha: None,
+            author: None,
+            category: None,
+            homepage: None,
+            tags: None,
+            extra: serde_json::json!({
+                "lspServers": {
+                    "rust-analyzer": {
+                        "command": "rust-analyzer",
+                        "extensionToLanguage": { ".rs": "rust" }
+                    }
+                }
+            }),
+        };
+
+        generate_synthetic_manifest(dir.path(), &plugin).unwrap();
+
+        let manifest_path = dir.path().join(".claude-plugin").join("plugin.json");
+        assert!(manifest_path.exists());
+
+        let content = std::fs::read_to_string(&manifest_path).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(manifest["name"], "rust-analyzer-lsp");
+        assert_eq!(manifest["version"], "1.0.0");
+        assert_eq!(manifest["description"], "Rust language server");
+
+        let lsp_servers = manifest["lspServers"].as_array().unwrap();
+        assert_eq!(lsp_servers.len(), 1);
+        assert_eq!(lsp_servers[0]["name"], "rust-analyzer");
+        assert_eq!(lsp_servers[0]["command"], "rust-analyzer");
+        assert_eq!(lsp_servers[0]["extensionToLanguage"][".rs"], "rust");
+    }
+
+    #[test]
+    fn test_generate_synthetic_manifest_with_author() {
+        let dir = tempdir().unwrap();
+        let plugin = crate::plugin::types::MarketplacePlugin {
+            name: "test-plugin".into(),
+            description: String::new(),
+            source: serde_json::json!("."),
+            version: "2.0.0".into(),
+            sha: None,
+            author: Some(crate::plugin::types::PluginAuthor {
+                name: "Test".into(),
+                url: None,
+            }),
+            category: None,
+            homepage: None,
+            tags: None,
+            extra: serde_json::Value::Object(Default::default()),
+        };
+
+        generate_synthetic_manifest(dir.path(), &plugin).unwrap();
+
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude-plugin").join("plugin.json")).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(manifest["author"]["name"], "Test");
+        assert!(manifest.get("lspServers").is_none());
+    }
+
+    #[test]
+    fn test_generate_synthetic_manifest_no_version() {
+        let dir = tempdir().unwrap();
+        let plugin = crate::plugin::types::MarketplacePlugin {
+            name: "minimal".into(),
+            description: "desc".into(),
+            source: serde_json::json!("."),
+            version: String::new(),
+            sha: None,
+            author: None,
+            category: None,
+            homepage: None,
+            tags: None,
+            extra: serde_json::Value::Object(Default::default()),
+        };
+
+        generate_synthetic_manifest(dir.path(), &plugin).unwrap();
+
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude-plugin").join("plugin.json")).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(manifest["name"], "minimal");
+        assert!(manifest.get("version").is_none());
     }
 }
