@@ -28,6 +28,7 @@ pub mod ask_user;
 pub mod cron;
 pub mod hitl;
 pub mod hooks;
+pub mod lsp;
 pub mod mcp;
 pub mod middleware;
 pub mod plugin;
@@ -55,6 +56,7 @@ pub use hitl::{
     Classification, HitlDecision, HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode,
     SharedPermissionMode,
 };
+pub use lsp::{LspMiddleware, LspTool};
 pub use skills::{
     list_skills, load_global_skills_dir, load_skill_metadata, SkillMetadata, SkillsMiddleware,
 };

@@ -80,6 +80,12 @@ pub enum AgentEvent {
     CompactStarted,
     /// 上下文压缩完成
     CompactCompleted,
+    /// LSP 诊断更新
+    LspDiagnostics {
+        errors: usize,
+        warnings: usize,
+        files_with_errors: usize,
+    },
 }
 
 /// 事件回调 trait（应用层实现）

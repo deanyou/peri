@@ -1,0 +1,20 @@
+[package]
+name = "perihelion-lsp"
+version = "0.1.0"
+edition = "2021"
+description = "LSP client library for perihelion agent framework"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+lsp-types = { workspace = true }
+lru = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }

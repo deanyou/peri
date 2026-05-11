@@ -27,6 +27,7 @@ pub fn format_tool_name(tool: &str) -> String {
         "TodoWrite" => "Todo",
         "AskUserQuestion" => "Ask",
         "Agent" => "Agent",
+        "LSP" => "LSP",
         other => return to_pascal(other),
     }
     .to_string()
@@ -56,6 +57,7 @@ pub fn format_tool_args(
         "WebFetch" => input["url"].as_str().map(|s| truncate(s, 60)),
         "ExecuteExtraTool" => input["tool_name"].as_str().map(|s| truncate(s, 40)),
         "SearchExtraTools" => input["query"].as_str().map(|s| truncate(s, 40)),
+        "LSP" => input["operation"].as_str().map(|s| truncate(s, 40)),
         _ => None,
     }
 }

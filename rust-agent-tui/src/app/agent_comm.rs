@@ -70,6 +70,10 @@ pub struct AgentComm {
     /// 标记 Interrupted/Error 处理器已完成 reconcile，Done 到达时应跳过重复 reconcile
     /// （防止 Done 的 RebuildAll 覆盖 Interrupted/Error 添加的通知消息）
     pub reconcile_already_done: bool,
+    /// LSP 诊断计数（由 LspDiagnostics 事件更新）
+    pub lsp_errors: usize,
+    pub lsp_warnings: usize,
+    pub lsp_files_with_errors: usize,
 }
 
 impl Default for AgentComm {
@@ -98,6 +102,9 @@ impl Default for AgentComm {
             agent_done_pending_bg: false,
             agent_replied: false,
             reconcile_already_done: false,
+            lsp_errors: 0,
+            lsp_warnings: 0,
+            lsp_files_with_errors: 0,
         }
     }
 }

@@ -112,4 +112,10 @@ pub enum AgentEvent {
         success: bool,
         message: String,
     },
+    /// LSP 诊断更新（被动推送）
+    LspDiagnostics {
+        errors: usize,
+        warnings: usize,
+        files_with_errors: usize,
+    },
 }

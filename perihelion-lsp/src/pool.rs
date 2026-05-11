@@ -1,0 +1,299 @@
+use crate::client::{LspClient, ServerState};
+use crate::config::{LspConfigFile, LspConfigSource};
+use crate::diagnostics::DiagnosticsRegistry;
+use crate::error::LspError;
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+/// LSP 服务器池：管理多个 LSP 服务器实例，按文件扩展名路由
+pub struct LspServerPool {
+    servers: RwLock<HashMap<String, Arc<LspClient>>>,
+    /// 扩展名 -> 服务器名 映射
+    extension_map: RwLock<HashMap<String, String>>,
+    /// 工作目录
+    root_uri: String,
+    /// 诊断注册表
+    diagnostics: Arc<DiagnosticsRegistry>,
+    /// 初始化状态
+    initialized: RwLock<bool>,
+}
+
+pub struct LspServerInfo {
+    pub name: String,
+    pub state: ServerState,
+    pub source: Option<LspConfigSource>,
+}
+
+impl LspServerPool {
+    /// 创建池（惰性初始化，此时不启动任何服务器）
+    pub fn new(cwd: &str, config: LspConfigFile) -> Self {
+        let diagnostics = Arc::new(DiagnosticsRegistry::new());
+
+        let mut extension_map = HashMap::new();
+        let mut servers = HashMap::new();
+
+        for (name, server_config) in &config.lsp_servers {
+            if server_config.disabled == Some(true) {
+                continue;
+            }
+
+            let client = Arc::new(LspClient::new(
+                server_config.name.clone(),
+                server_config.command.clone(),
+                server_config.args.clone(),
+                server_config.env.clone().unwrap_or_default(),
+                server_config.initialization_options.clone(),
+                server_config.max_restarts.unwrap_or(3),
+                Arc::clone(&diagnostics),
+            ));
+
+            // 注册扩展名路由
+            for ext in server_config.extension_to_language.keys() {
+                let ext_key = if ext.starts_with('.') {
+                    ext.to_lowercase()
+                } else {
+                    format!(".{}", ext).to_lowercase()
+                };
+                extension_map.insert(ext_key, name.clone());
+            }
+
+            servers.insert(name.clone(), client);
+        }
+
+        Self {
+            servers: RwLock::new(servers),
+            extension_map: RwLock::new(extension_map),
+            root_uri: format!("file://{}", cwd),
+            diagnostics,
+            initialized: RwLock::new(false),
+        }
+    }
+
+    /// 按需初始化：首次请求时调用，启动所有非禁用服务器
+    pub async fn ensure_initialized(&self) -> Result<(), LspError> {
+        {
+            let init = self.initialized.read();
+            if *init {
+                return Ok(());
+            }
+        }
+
+        // 克隆 Arc 列表，在 await 前释放锁
+        let servers: Vec<(String, Arc<LspClient>)> = {
+            let guard = self.servers.read();
+            guard
+                .iter()
+                .map(|(n, c)| (n.clone(), Arc::clone(c)))
+                .collect()
+        };
+
+        let mut failed = Vec::new();
+        let total_count = servers.len();
+
+        for (name, client) in &servers {
+            match client.start(&self.root_uri).await {
+                Ok(()) => {
+                    tracing::info!(target: "lsp", server = %name, "LSP 服务器启动成功");
+                }
+                Err(e) => {
+                    tracing::warn!(target: "lsp", server = %name, error = %e, "LSP 服务器启动失败");
+                    failed.push(name.clone());
+                }
+            }
+        }
+
+        if failed.len() == total_count && total_count > 0 {
+            return Err(LspError::InitFailed {
+                server: "all".to_string(),
+                reason: format!("所有 LSP 服务器启动失败: {}", failed.join(", ")),
+            });
+        }
+
+        *self.initialized.write() = true;
+        Ok(())
+    }
+
+    /// 根据文件路径查找对应的 LSP 服务器（按扩展名路由）
+    pub fn server_for_file(&self, file_path: &str) -> Option<Arc<LspClient>> {
+        let ext = Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{}", e.to_lowercase()))
+            .unwrap_or_default();
+
+        let extension_map = self.extension_map.read();
+        let server_name = extension_map.get(&ext)?;
+        let servers = self.servers.read();
+        servers.get(server_name).cloned()
+    }
+
+    /// 获取所有已就绪的服务器列表
+    pub fn server_info(&self) -> Vec<LspServerInfo> {
+        let servers = self.servers.read();
+        servers
+            .values()
+            .map(|c| LspServerInfo {
+                name: c.name().to_string(),
+                state: c.state(),
+                source: None,
+            })
+            .collect()
+    }
+
+    /// 获取诊断注册表
+    pub fn diagnostics(&self) -> Arc<DiagnosticsRegistry> {
+        Arc::clone(&self.diagnostics)
+    }
+
+    /// 检查是否有任何可用的 LSP 服务器
+    pub fn has_servers(&self) -> bool {
+        !self.servers.read().is_empty()
+    }
+
+    /// 优雅关闭所有服务器
+    pub async fn shutdown(&self) {
+        let servers = self.servers.read();
+        for (name, client) in servers.iter() {
+            tracing::info!(target: "lsp", server = %name, "正在关闭 LSP 服务器");
+            client.shutdown().await;
+        }
+        *self.initialized.write() = false;
+    }
+
+    /// 动态添加一个 LSP 服务器（如果池已初始化，自动启动新服务器）
+    pub async fn add_server(&self, config: crate::config::LspServerConfig) {
+        if config.disabled == Some(true) {
+            return;
+        }
+
+        let name = config.name.clone();
+        let client = Arc::new(LspClient::new(
+            config.name,
+            config.command,
+            config.args,
+            config.env.unwrap_or_default(),
+            config.initialization_options,
+            config.max_restarts.unwrap_or(3),
+            Arc::clone(&self.diagnostics),
+        ));
+
+        for ext in config.extension_to_language.keys() {
+            let ext_key = if ext.starts_with('.') {
+                ext.to_lowercase()
+            } else {
+                format!(".{}", ext).to_lowercase()
+            };
+            self.extension_map.write().insert(ext_key, name.clone());
+        }
+
+        self.servers.write().insert(name.clone(), client.clone());
+
+        // 如果池已初始化，立即启动新服务器
+        if *self.initialized.read() {
+            match client.start(&self.root_uri).await {
+                Ok(()) => {
+                    tracing::info!(target: "lsp", server = %name, "动态添加的 LSP 服务器启动成功")
+                }
+                Err(e) => {
+                    tracing::warn!(target: "lsp", server = %name, error = %e, "动态添加的 LSP 服务器启动失败")
+                }
+            }
+        }
+    }
+
+    /// 获取任意一个已就绪的服务器（用于 workspaceSymbol 等全局操作）
+    pub fn any_server(&self) -> Option<Arc<LspClient>> {
+        let servers = self.servers.read();
+        servers.values().find(|c| c.is_ready()).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LspServerConfig;
+
+    fn make_config() -> LspConfigFile {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "rust-analyzer".to_string(),
+            LspServerConfig {
+                name: "rust-analyzer".to_string(),
+                command: "rust-analyzer".to_string(),
+                args: vec!["--stdio".to_string()],
+                env: None,
+                extension_to_language: HashMap::from([(".rs".to_string(), "rust".to_string())]),
+                initialization_options: None,
+                disabled: None,
+                max_restarts: None,
+                startup_timeout: None,
+                source: None,
+            },
+        );
+        servers.insert(
+            "typescript".to_string(),
+            LspServerConfig {
+                name: "typescript-language-server".to_string(),
+                command: "typescript-language-server".to_string(),
+                args: vec!["--stdio".to_string()],
+                env: None,
+                extension_to_language: HashMap::from([
+                    (".ts".to_string(), "typescript".to_string()),
+                    (".tsx".to_string(), "typescriptreact".to_string()),
+                ]),
+                initialization_options: None,
+                disabled: None,
+                max_restarts: None,
+                startup_timeout: None,
+                source: None,
+            },
+        );
+        LspConfigFile {
+            lsp_servers: servers,
+        }
+    }
+
+    #[test]
+    fn test_extension_routing() {
+        let pool = LspServerPool::new("/tmp", make_config());
+        assert!(pool.server_for_file("/test/main.rs").is_some());
+        assert!(pool.server_for_file("/test/index.ts").is_some());
+        assert!(pool.server_for_file("/test/App.tsx").is_some());
+        assert!(pool.server_for_file("/test/readme.md").is_none());
+        assert!(pool.server_for_file("/test/no_ext").is_none());
+    }
+
+    #[test]
+    fn test_case_insensitive_extension() {
+        let pool = LspServerPool::new("/tmp", make_config());
+        assert!(pool.server_for_file("/test/main.RS").is_some());
+        assert!(pool.server_for_file("/test/main.TS").is_some());
+    }
+
+    #[test]
+    fn test_disabled_server() {
+        let mut config = make_config();
+        config
+            .lsp_servers
+            .get_mut("rust-analyzer")
+            .unwrap()
+            .disabled = Some(true);
+        let pool = LspServerPool::new("/tmp", config);
+        assert!(pool.server_for_file("/test/main.rs").is_none());
+    }
+
+    #[test]
+    fn test_has_servers() {
+        let pool = LspServerPool::new("/tmp", make_config());
+        assert!(pool.has_servers());
+    }
+
+    #[test]
+    fn test_empty_config() {
+        let pool = LspServerPool::new("/tmp", LspConfigFile::default());
+        assert!(!pool.has_servers());
+        assert!(pool.server_for_file("/test/main.rs").is_none());
+    }
+}

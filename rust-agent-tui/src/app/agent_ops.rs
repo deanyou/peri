@@ -124,6 +124,16 @@ impl App {
         self.session_mgr.sessions[self.session_mgr.active]
             .agent
             .pending_bg_continuation = None;
+        // 重置 LSP 诊断计数
+        self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .lsp_errors = 0;
+        self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .lsp_warnings = 0;
+        self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .lsp_files_with_errors = 0;
 
         let (tx, rx) = mpsc::channel(256);
         self.session_mgr.sessions[self.session_mgr.active]
@@ -1791,6 +1801,22 @@ impl App {
                     return (true, false, true);
                 }
 
+                (true, false, false)
+            }
+            AgentEvent::LspDiagnostics {
+                errors,
+                warnings,
+                files_with_errors,
+            } => {
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .lsp_errors = errors;
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .lsp_warnings = warnings;
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .lsp_files_with_errors = files_with_errors;
                 (true, false, false)
             }
         }

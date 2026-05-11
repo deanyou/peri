@@ -360,6 +360,27 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
             Arc::clone(&shared_tools),
         )));
 
+    // LSP 中间件：加载全局 LSP 配置，惰性初始化
+    let lsp_settings_path = dirs_next::home_dir().map(|h| h.join(".peri").join("settings.json"));
+    let executor = if let Some(ref settings_path) = lsp_settings_path {
+        let lsp_config = perihelion_lsp::config::load_global_lsp_config(settings_path);
+        if lsp_config.lsp_servers.is_empty() {
+            executor
+        } else {
+            tracing::info!(
+                target: "lsp",
+                servers = lsp_config.lsp_servers.len(),
+                "加载 LSP 配置"
+            );
+            executor.add_middleware(Box::new(rust_agent_middlewares::LspMiddleware::new(
+                cwd.to_string(),
+                lsp_config,
+            )))
+        }
+    } else {
+        executor
+    };
+
     let executor = executor
         .with_event_handler(Arc::clone(&handler))
         .register_tool(Box::new(ask_user_tool));
@@ -543,6 +564,15 @@ fn map_executor_event(event: ExecutorEvent, cwd: &str) -> Option<AgentEvent> {
             output: result.output,
             tool_calls_count: result.tool_calls_count,
             duration_ms: result.duration_ms,
+        },
+        ExecutorEvent::LspDiagnostics {
+            errors,
+            warnings,
+            files_with_errors,
+        } => AgentEvent::LspDiagnostics {
+            errors,
+            warnings,
+            files_with_errors,
         },
         // Hook lifecycle events — not yet handled in TUI, ignore
         ExecutorEvent::SubagentStarted { .. }

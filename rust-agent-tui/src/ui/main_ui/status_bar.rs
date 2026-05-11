@@ -202,6 +202,14 @@ fn render_first_row(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
+    // LSP 诊断计数
+    let agent = &app.session_mgr.sessions[app.session_mgr.active].agent;
+    if agent.lsp_errors > 0 || agent.lsp_warnings > 0 {
+        spans.push(Span::styled(" │ ", Style::default().fg(theme::MUTED)));
+        let diag = format!("diag: {}E/{}W", agent.lsp_errors, agent.lsp_warnings);
+        spans.push(Span::styled(diag, Style::default().fg(theme::MUTED)));
+    }
+
     render_truncated_line(f, spans, Vec::new(), area);
 }
 
