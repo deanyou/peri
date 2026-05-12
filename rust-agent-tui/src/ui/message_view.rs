@@ -7,6 +7,17 @@ use rust_create_agent::messages::{BaseMessage, ContentBlock};
 
 use super::markdown::parse_markdown_default;
 
+/// 从后台任务结果字符串中解析 task_id 短格式（前 8 位）。
+///
+/// 输入格式: `"Background task bg-{uuid} started..."`
+/// 输出: `Some("{前8位}")` 或 `None`（解析失败时优雅降级）
+fn parse_bg_hash(result: &str) -> Option<String> {
+    result
+        .strip_prefix("Background task bg-")
+        .and_then(|rest| rest.split(' ').next())
+        .map(|uuid| uuid.chars().take(8).collect())
+}
+
 /// 只读工具分类，用于折叠聚合
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ToolCategory {
@@ -234,6 +245,10 @@ pub enum MessageViewModel {
         final_result: Option<String>,
         /// SubAgent 执行是否以错误结束
         is_error: bool,
+        /// 是否为后台 agent
+        is_background: bool,
+        /// 后台任务的短 ID（task_id 前 8 位）
+        bg_hash: Option<String>,
     },
 }
 
@@ -304,6 +319,8 @@ impl PartialEq for MessageViewModel {
                     recent_messages: a_msgs,
                     final_result: a_result,
                     is_error: a_err,
+                    is_background: a_bg,
+                    bg_hash: a_hash,
                     ..
                 },
                 MessageViewModel::SubAgentGroup {
@@ -313,6 +330,8 @@ impl PartialEq for MessageViewModel {
                     recent_messages: b_msgs,
                     final_result: b_result,
                     is_error: b_err,
+                    is_background: b_bg,
+                    bg_hash: b_hash,
                     ..
                 },
             ) => {
@@ -322,6 +341,8 @@ impl PartialEq for MessageViewModel {
                     && a_msgs == b_msgs
                     && a_result == b_result
                     && a_err == b_err
+                    && a_bg == b_bg
+                    && a_hash == b_hash
             }
             _ => false,
         }
@@ -394,6 +415,8 @@ impl Hash for MessageViewModel {
                 collapsed,
                 final_result,
                 is_error,
+                is_background,
+                bg_hash,
             } => {
                 6u8.hash(state);
                 agent_id.hash(state);
@@ -404,6 +427,8 @@ impl Hash for MessageViewModel {
                 collapsed.hash(state);
                 final_result.hash(state);
                 is_error.hash(state);
+                is_background.hash(state);
+                bg_hash.hash(state);
             }
         }
     }
@@ -607,6 +632,14 @@ impl MessageViewModel {
                         .chars()
                         .take(40)
                         .collect::<String>();
+                    // 检测是否为后台 agent（从 result 字符串检测 "Background task" 前缀）
+                    let is_background = raw_content.starts_with("Background task");
+                    // 解析 bg_hash（如果是后台任务）
+                    let bg_hash = if is_background {
+                        parse_bg_hash(&raw_content)
+                    } else {
+                        None
+                    };
                     return MessageViewModel::SubAgentGroup {
                         agent_id,
                         task_preview,
@@ -616,6 +649,8 @@ impl MessageViewModel {
                         collapsed: false, // 展开显示 final_result
                         final_result: Some(raw_content),
                         is_error: *is_error,
+                        is_background,
+                        bg_hash,
                     };
                 }
                 // 使用统一格式化函数生成 display_name 和 args_display
@@ -777,6 +812,8 @@ impl MessageViewModel {
             collapsed: false,
             final_result: None,
             is_error: false,
+            is_background: false,
+            bg_hash: None,
         }
     }
 

@@ -87,6 +87,17 @@ struct CompletedTool {
     is_error: bool,
 }
 
+/// 从后台任务结果字符串中解析 task_id 短格式（前 8 位）。
+///
+/// 输入格式: `"Background task bg-{uuid} started..."`
+/// 输出: `Some("{前8位}")` 或 `None`（解析失败时优雅降级）
+fn parse_bg_hash(result: &str) -> Option<String> {
+    result
+        .strip_prefix("Background task bg-")
+        .and_then(|rest| rest.split(' ').next())
+        .map(|uuid| uuid.chars().take(8).collect())
+}
+
 /// 活跃 SubAgent 执行状态
 struct SubAgentState {
     agent_id: String,
@@ -97,6 +108,10 @@ struct SubAgentState {
     is_running: bool,
     /// SubAgentEnd 时固化的完整 VM（含 recent_messages、final_result 等）
     finalized_vm: Option<MessageViewModel>,
+    /// 是否为后台 agent
+    is_background: bool,
+    /// 后台任务的短 ID（task_id 前 8 位）
+    bg_hash: Option<String>,
 }
 
 // ─── MessagePipeline ─────────────────────────────────────────────────────────
@@ -207,7 +222,7 @@ impl MessagePipeline {
                 if self.in_subagent() {
                     self.subagent_tool_start(&tool_call_id, &name, input);
                 } else {
-                    self.tool_start_internal(&tool_call_id, &name, input);
+                    self.tool_start_internal(&tool_call_id, &name, input, false);
                 }
 
                 vec![PipelineAction::None]
@@ -246,12 +261,12 @@ impl MessagePipeline {
             AgentEvent::SubAgentStart {
                 agent_id,
                 task_preview,
-                is_background: _,
+                is_background,
             } => {
                 let input =
                     serde_json::json!({"subagent_type": &agent_id, "prompt": &task_preview});
                 let tc_id = format!("subagent_{}", agent_id);
-                self.tool_start_internal(&tc_id, "Agent", input);
+                self.tool_start_internal(&tc_id, "Agent", input, is_background);
                 vec![PipelineAction::None]
             }
             AgentEvent::SubAgentEnd { result, is_error } => {
@@ -321,7 +336,13 @@ impl MessagePipeline {
     }
 
     /// 工具调用开始（内部版本，只更新状态，不返回 PipelineAction）
-    fn tool_start_internal(&mut self, tool_call_id: &str, name: &str, input: serde_json::Value) {
+    fn tool_start_internal(
+        &mut self,
+        tool_call_id: &str,
+        name: &str,
+        input: serde_json::Value,
+        is_background: bool,
+    ) {
         self.finalize_current_ai();
         self.current_ai_tool_calls
             .push(ToolCallRequest::new(tool_call_id, name, input.clone()));
@@ -344,6 +365,8 @@ impl MessagePipeline {
                 recent_messages: Vec::new(),
                 is_running: true,
                 finalized_vm: None,
+                is_background,
+                bg_hash: None,
             });
         }
 
@@ -367,20 +390,31 @@ impl MessagePipeline {
 
         if name == "Agent" {
             if let Some(sub) = self.subagent_stack.last_mut() {
-                sub.is_running = false;
-                let vm = MessageViewModel::SubAgentGroup {
-                    agent_id: sub.agent_id.clone(),
-                    task_preview: sub.task_preview.clone(),
-                    total_steps: sub.total_steps,
-                    recent_messages: std::mem::take(&mut sub.recent_messages),
-                    is_running: false,
-                    collapsed: false,
-                    final_result: Some(output.to_string()),
-                    is_error,
-                };
-                sub.finalized_vm = Some(vm.clone());
-                // 立即冻结：RebuildAll 可能在下一个 StateSnapshot 前触发
-                self.frozen_subagent_vms.push(vm);
+                if sub.is_background {
+                    // 后台 agent 路径：不冻结，保持 is_running=true，解析 bg_hash
+                    sub.bg_hash = parse_bg_hash(output);
+                    // 保持 is_running=true，等待 BackgroundTaskCompleted 到达
+                    // 显式确保 is_running=true（防止其他逻辑意外修改）
+                    sub.is_running = true;
+                } else {
+                    // 前台 agent 路径：冻结 SubAgentGroup
+                    sub.is_running = false;
+                    let vm = MessageViewModel::SubAgentGroup {
+                        agent_id: sub.agent_id.clone(),
+                        task_preview: sub.task_preview.clone(),
+                        total_steps: sub.total_steps,
+                        recent_messages: std::mem::take(&mut sub.recent_messages),
+                        is_running: false,
+                        collapsed: false,
+                        final_result: Some(output.to_string()),
+                        is_error,
+                        is_background: false,
+                        bg_hash: None,
+                    };
+                    sub.finalized_vm = Some(vm.clone());
+                    // 立即冻结：RebuildAll 可能在下一个 StateSnapshot 前触发
+                    self.frozen_subagent_vms.push(vm);
+                }
             }
         } else {
             // 非 SubAgent 工具：保存到 completed_tools，在 StateSnapshot 到达前显示
@@ -478,6 +512,8 @@ impl MessagePipeline {
                         collapsed: false,
                         final_result: None,
                         is_error: false,
+                        is_background: sub.is_background,
+                        bg_hash: sub.bg_hash,
                     });
             }
             // 已 finalized（finalized_vm.is_some()）的不推入——tool_end_internal 已处理
@@ -510,7 +546,10 @@ impl MessagePipeline {
 
     /// 是否在 SubAgent 执行中
     pub fn in_subagent(&self) -> bool {
-        self.subagent_stack.last().is_some_and(|s| s.is_running)
+        // 后台 agent 不会阻塞父 agent 的 Done 事件
+        self.subagent_stack
+            .last()
+            .is_some_and(|s| s.is_running && !s.is_background)
     }
 
     /// 诊断用：返回 frozen_subagent_vms 的数量
@@ -678,6 +717,8 @@ impl MessagePipeline {
                         collapsed: false,
                         final_result: None,
                         is_error: false,
+                        is_background: sub.is_background,
+                        bg_hash: sub.bg_hash.clone(),
                     }
                 };
                 tail_vms.push(vm);

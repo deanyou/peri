@@ -2437,12 +2437,14 @@ fn test_subagent_group_error_red_title_and_summary() {
         collapsed: true,
         final_result: Some("Agent failed: permission denied".to_string()),
         is_error: true,
+        is_background: false,
+        bg_hash: None,
     };
     let lines = render_view_model(&vm, Some(1), 80);
-    // 标题行应为红色
+    // 标题行 "Agent" 文字应为红色（第二个 span，第一个是 ❯ 符号）
     let title_color = lines
         .first()
-        .and_then(|l| l.spans.first().and_then(|s| s.style.fg));
+        .and_then(|l| l.spans.get(1).and_then(|s| s.style.fg));
     assert_eq!(
         title_color,
         Some(crate::ui::theme::ERROR),

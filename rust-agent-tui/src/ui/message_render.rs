@@ -292,24 +292,43 @@ pub fn render_view_model(
             recent_messages,
             collapsed,
             is_error,
+            is_running,
+            is_background,
+            bg_hash,
             final_result,
             ..
         } => {
             let agent_color = if *is_error {
                 theme::ERROR
+            } else if *is_running && *is_background {
+                theme::WARNING
             } else {
-                theme::SUB_AGENT
+                theme::SAGE
             };
             let mut lines: Vec<Line<'static>> = Vec::new();
 
             if *collapsed {
                 // 折叠状态：两行显示
-                lines.push(Line::from(vec![Span::styled(
-                    format!("● {}", agent_id),
-                    Style::default()
-                        .fg(agent_color)
-                        .add_modifier(Modifier::BOLD),
-                )]));
+                // Header: ❯ Agent(type) #hash
+                let arrow_color = Color::Rgb(147, 197, 253); // 淡蓝紫色 #93C1FD
+                let mut header_spans = vec![
+                    Span::styled("❯ ".to_string(), Style::default().fg(arrow_color)),
+                    Span::styled(
+                        "Agent".to_string(),
+                        Style::default()
+                            .fg(agent_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("({})", agent_id), Style::default().fg(theme::MUTED)),
+                ];
+                if let Some(ref hash) = bg_hash {
+                    header_spans.push(Span::styled(
+                        format!(" #{}", hash),
+                        Style::default().fg(theme::MUTED),
+                    ));
+                }
+                lines.push(Line::from(header_spans));
+
                 let task_label: String = task_preview.chars().take(50).collect();
                 let suffix = if task_preview.chars().count() > 50 {
                     "…"
@@ -329,18 +348,32 @@ pub fn render_view_model(
                 }
             } else {
                 // 展开状态：名称 + 任务描述
+                // Header: ❯ Agent(type) #hash
+                let arrow_color = Color::Rgb(147, 197, 253); // 淡蓝紫色 #93C1FD
+                let mut header_spans = vec![
+                    Span::styled("❯ ".to_string(), Style::default().fg(arrow_color)),
+                    Span::styled(
+                        "Agent".to_string(),
+                        Style::default()
+                            .fg(agent_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("({})", agent_id), Style::default().fg(theme::MUTED)),
+                ];
+                if let Some(ref hash) = bg_hash {
+                    header_spans.push(Span::styled(
+                        format!(" #{}", hash),
+                        Style::default().fg(theme::MUTED),
+                    ));
+                }
+                lines.push(Line::from(header_spans));
+
                 let task_label: String = task_preview.chars().take(50).collect();
                 let suffix = if task_preview.chars().count() > 50 {
                     "…"
                 } else {
                     ""
                 };
-                lines.push(Line::from(vec![Span::styled(
-                    format!("● {}", agent_id),
-                    Style::default()
-                        .fg(agent_color)
-                        .add_modifier(Modifier::BOLD),
-                )]));
                 lines.push(Line::from(vec![Span::styled(
                     format!("  {}{}", task_label, suffix),
                     Style::default().fg(theme::MUTED),
