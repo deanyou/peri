@@ -197,26 +197,12 @@ impl MessagePipeline {
                 args: _,
                 input,
             } => {
-                // Fire pending throttle before disarming to ensure text streamed before
-                // tool call is displayed. This fixes the bug where AI text disappears
-                // when tool calls arrive.
-                //
-                // Note: We use prefix_len=0 here because MessagePipeline doesn't have
-                // access to round_start_vm_idx (the correct VM index). Using 0 means
-                // "rebuild all messages" which is safe - just slightly less optimal.
-                // The alternative would require MessagePipeline to track VM count or
-                // receive prefix_len as a parameter, which would complicate the API.
-                let action = if self.throttle_armed {
-                    self.throttle_armed = false;
-                    // Return RebuildAll with the current streaming content
-                    Some(PipelineAction::RebuildAll {
-                        prefix_len: 0, // Safe fallback: rebuild all messages
-                        tail_vms: self.build_tail_vms(),
-                    })
-                } else {
-                    self.throttle_armed = false;
-                    None
-                };
+                // 仅解除 throttle，不在此处触发 RebuildAll。
+                // agent_ops 中的 request_rebuild() 会以正确的 prefix_len
+                // (= round_start_vm_idx) 触发重建，同时包含流式文本和工具调用。
+                // 之前此处使用 prefix_len: 0 会导致 view_messages 被全部替换，
+                // 随后 request_rebuild() 用旧的 round_start_vm_idx 做 drain 时 panic。
+                self.throttle_armed = false;
 
                 if self.in_subagent() {
                     self.subagent_tool_start(&tool_call_id, &name, input);
@@ -224,11 +210,7 @@ impl MessagePipeline {
                     self.tool_start_internal(&tool_call_id, &name, input);
                 }
 
-                if let Some(a) = action {
-                    vec![a]
-                } else {
-                    vec![PipelineAction::None]
-                }
+                vec![PipelineAction::None]
             }
             AgentEvent::ToolEnd {
                 tool_call_id,

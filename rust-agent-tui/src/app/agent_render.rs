@@ -51,8 +51,23 @@ impl App {
                 prefix_len,
                 mut tail_vms,
             } => {
-                // 保存即将被截断的 ephemeral SystemNote（通过 AddMessage 添加的系统通知）
                 let session = &mut self.session_mgr.sessions[self.session_mgr.active];
+                // 防御性边界检查：prefix_len 可能因 pipeline 内部 RebuildAll
+                // (如 ToolStart 的 throttle flush) 导致 view_messages 缩短后仍然
+                // 保持旧值，此时 drain 会 panic。
+                let view_len = session.messages.view_messages.len();
+                let prefix_len = if prefix_len > view_len {
+                    tracing::error!(
+                        prefix_len,
+                        view_len,
+                        round_start_vm_idx = session.messages.round_start_vm_idx,
+                        "RebuildAll prefix_len 越界，已钳位到 view_messages.len()"
+                    );
+                    view_len
+                } else {
+                    prefix_len
+                };
+                // 保存即将被截断的 ephemeral SystemNote（通过 AddMessage 添加的系统通知）
                 let saved_notes: Vec<MessageViewModel> = session
                     .messages
                     .view_messages

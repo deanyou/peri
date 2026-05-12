@@ -619,11 +619,129 @@ ReActAgent::new(llm)
 - Rust 2021 edition，tokio async/await + async-trait
 - 库 crate 用 `thiserror`，应用层用 `anyhow::Result`
 - 日志用 `tracing` 宏，禁止 `println!`/`eprintln!`
-- 单元测试 `#[cfg(test)] mod tests`，bin crate 集成测试在 `src/` 内（不支持 `tests/` 目录）
+- 单元测试：测试代码与源码分离为同目录 `_test.rs` 文件（见「测试规范」）
+- bin crate 集成测试在 `src/` 内（不支持 `tests/` 目录）
 - 文件组织：每模块一目录，`mod.rs` 入口
 - Workspace resolver = "2"，禁止下层 crate 依赖上层
 - 禁止使用 `ℹ`（U+2139）符号和 `[i]` 前缀，系统消息无需额外前缀标记
 - **字符串截断必须用字符级操作**：`&s[..N]` 按字节切片，CJK 字符占 3 字节，N 值落在多字节字符内部会 panic。应使用 `s.chars().take(N).collect::<String>()` 或 `s.char_indices().nth(N)` 做字符边界安全的截断。`s.len()` 返回字节数，`s.chars().count()` 返回字符数，截断长度判断也必须用字符数。
+
+## 测试规范
+
+### 文件分离
+
+**规则**：测试代码独立为同目录 `{source}_test.rs` 文件，源文件末尾保留最小引用声明。
+
+**命名**：`foo.rs` → `foo_test.rs`，`mod.rs` → `mod_test.rs`。
+
+**源文件末尾声明**（3 行固定格式）：
+```rust
+#[cfg(test)]
+#[path = "foo_test.rs"]
+mod tests;
+```
+
+**测试文件开头**（固定导入）：
+```rust
+use super::*;
+```
+
+**阈值**：测试代码 ≥ 30 行时必须分离。少于 30 行允许 inline `mod tests {}`。
+
+### 现有已分离文件（无需迁移）
+
+| 源文件 | 测试文件 |
+|--------|----------|
+| `rust-create-agent/src/llm/openai.rs` | `openai_test.rs` |
+| `rust-create-agent/src/agent/executor/mod.rs` | `mod_test.rs` |
+| `rust-agent-middlewares/src/subagent/fork.rs` | `fork_test.rs` |
+| `rust-agent-middlewares/src/subagent/tool.rs` | `tool_test.rs` |
+| `rust-agent-middlewares/src/plugin/marketplace.rs` | `marketplace_test.rs` |
+| `rust-agent-middlewares/src/plugin/loader.rs` | `loader_test.rs` |
+| `rust-agent-middlewares/src/plugin/installer.rs` | `installer_test.rs` |
+| `rust-agent-middlewares/src/mcp/config.rs` | `config_test.rs` |
+| `rust-agent-middlewares/src/hooks/middleware.rs` | `middleware_test.rs` |
+| `rust-agent-tui/src/app/message_pipeline.rs` | `message_pipeline_test.rs` |
+| `rust-agent-tui/src/app/setup_wizard.rs` | `setup_wizard_test.rs` |
+| `langfuse-client/src/types.rs` | `types_test.rs` |
+| `acpx-g/src/schema.rs` | `schema_test.rs` |
+| `rust-agent-tui/src/ui/headless.rs` | `headless_test.rs` |
+
+### 待迁移文件（测试 ≥ 100 行，按优先级排序）
+
+| 测试行数 | 源文件 | 目标文件 |
+|----------|--------|----------|
+| 713 | `acpx-g/src/runner/mod.rs` | `runner/mod_test.rs` |
+| 441 | `acpx-g/src/runner/executor.rs` | `runner/executor_test.rs` |
+| 400 | `rust-agent-tui/src/config/types.rs` | `config/types_test.rs` |
+| 398 | `rust-create-agent/src/agent/compact/full.rs` | `compact/full_test.rs` |
+| 388 | `rust-create-agent/src/agent/token.rs` | `token_test.rs` |
+| 375 | `rust-agent-middlewares/src/hitl/mod.rs` | `hitl/mod_test.rs` |
+| 357 | `rust-create-agent/src/agent/compact/re_inject.rs` | `compact/re_inject_test.rs` |
+| 333 | `rust-create-agent/src/llm/anthropic.rs` | `llm/anthropic_test.rs` |
+| 327 | `rust-agent-middlewares/src/hooks/executor.rs` | `hooks/executor_test.rs` |
+| 319 | `rust-create-agent/src/middleware/chain.rs` | `middleware/chain_test.rs` |
+| 313 | `rust-create-agent/src/agent/compact/micro.rs` | `compact/micro_test.rs` |
+| 310 | `langfuse-client/src/batcher.rs` | `batcher_test.rs` |
+| 304 | `perihelion-widgets/src/markdown/mod.rs` | `markdown/mod_test.rs` |
+| 298 | `rust-agent-middlewares/src/plugin/types.rs` | `plugin/types_test.rs` |
+| 286 | `rust-agent-tui/src/command/mod.rs` | `command/mod_test.rs` |
+| 276 | `rust-create-agent/src/agent/compact/invariant.rs` | `compact/invariant_test.rs` |
+| 268 | `rust-agent-middlewares/src/subagent/mod.rs` | `subagent/mod_test.rs` |
+| 263 | `rust-agent-middlewares/src/plugin/config.rs` | `plugin/config_test.rs` |
+| 255 | `rust-create-agent/src/messages/content.rs` | `messages/content_test.rs` |
+
+### 测试编写风格
+
+**语言**：注释、文档注释、断言消息统一使用中文。
+
+**命名**：`test_<被测对象>_<场景>`，snake_case。
+```rust
+#[test]
+fn test_content_block_text_序列化往返() { ... }
+
+#[tokio::test]
+async fn test_tool_search_超时返回空结果() { ... }
+```
+
+**结构**：Arrange-Act-Assert，无空行分隔三段。
+```rust
+#[test]
+fn test_parse_config_缺少必要字段返回错误() {
+    // Arrange
+    let input = r#"{"command": "ls"}"#;
+
+    // Act
+    let result = parse_config(input);
+
+    // Assert
+    assert!(result.is_err(), "缺少 args 字段应返回错误");
+}
+```
+
+**断言**：
+- 优先 `assert_eq!` / `assert!`
+- 模式匹配用 `assert!(matches!(value, Pattern))`
+- 错误消息用 `assert!` 的第二个参数（中文描述），不用 `.expect()`
+- `.unwrap()` 用于构造测试数据（测试前置条件），不用于被测代码的结果断言
+
+**Mock/构造器**：测试文件内定义私有的 helper 函数和 Mock struct，不跨文件共享。命名以 `make_` 或 `mock_` 前缀。
+```rust
+fn make_tool_call(id: &str, name: &str) -> ToolCallRequest {
+    ToolCallRequest::new(id, name, json!({}))
+}
+```
+
+**异步测试**：使用 `#[tokio::test]`，单线程足够时用 `#[tokio::test(flavor = "multi_thread")]` 显式标注。
+
+**测试隔离**：
+- 文件系统操作用 `tempfile::NamedTempFile`
+- 环境变量用唯一名称（加测试名前缀）避免并行冲突
+- 不使用 `serial_test`——通过命名空间隔离
+
+**最小依赖**：仅使用 `assert!`/`assert_eq!`/`matches!` + `tempfile` + `tokio-test`，不引入 `insta`/`rstest`/`pretty_assertions`/`proptest` 等额外测试库。
+
+**集成测试**：`tests/` 目录仅用于跨 crate 的端到端测试，单个 crate 内部测试用 `_test.rs`。
 
 ## 开发注意事项
 
@@ -633,7 +751,9 @@ ReActAgent::new(llm)
     - `prefix_len` 应使用 `SessionMessages.round_start_vm_idx`（VM 维度）
     - `MessagePipeline` 内部切片前必须用 `.min(self.completed.len())` 保护
     - `MessagePipeline` 无法访问 `round_start_vm_idx` 时，使用 `prefix_len=0` 作为安全回退
-  - **历史教训**：此问题已出现两次——第一次在 `build_tail_vms()` 切片越界，第二次在 `ToolStart` 事件处理器传递错误的 `prefix_len`
+    - `apply_pipeline_action` 的 `drain(prefix_len..)` 必须用 `prefix_len.min(view_messages.len())` 钳位，越界时记录 `tracing::error!` 而非 panic
+  - **禁止从 Pipeline 内部返回 `RebuildAll`**：`MessagePipeline.handle_event()` 不得返回 `PipelineAction::RebuildAll`——Pipeline 不拥有 `round_start_vm_idx`，无法生成正确的 `prefix_len`。之前 `ToolStart` 在 `throttle_armed` 时返回 `RebuildAll { prefix_len: 0 }`，导致 `view_messages` 被全部替换后，`agent_ops` 的 `request_rebuild()` 用旧的 `round_start_vm_idx` 做 `drain` 时越界 panic。正确的做法是仅解除 `throttle_armed`，由 `request_rebuild()` 以正确的 `prefix_len` 触发重建。
+  - **历史教训**：此问题已出现三次——第一次在 `build_tail_vms()` 切片越界，第二次在 `ToolStart` 事件处理器返回 `RebuildAll { prefix_len: 0 }` 导致 `apply_pipeline_action` 的 `drain` 越界 panic，第三次同样是 `prefix_len` 越界但已通过钳位+error 日志降级处理。
 
 - **新增弹窗面板**：`Event::Paste` 独立于 key event 链，必须在该分支单独拦截；`Ctrl+V` 需在 `handle_xxx_panel` 内单独处理。
 - **EditField 导航**：`next()/prev()` 链必须与表单实际渲染字段一致。
