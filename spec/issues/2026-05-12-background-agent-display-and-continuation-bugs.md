@@ -1,6 +1,6 @@
 # Background Agent 三个 Bug：显示消失、subagent_type 限制、continuation 不触发
 
-**状态**：Fixed
+**状态**：Fixed + Verify
 **优先级**：高
 **创建日期**：2026-05-12
 
@@ -22,6 +22,7 @@
 跨多轮后 `merge_frozen_subagents` 按位置匹配错位——用旧轮次的 frozen vm 覆盖新轮次的 SubAgentGroup，导致显示内容被覆盖。
 
 日志证据：
+
 ```
 round1 done: frozen_count=1→2（重复推入）
 round2 done: frozen_count=3→4（累积膨胀）

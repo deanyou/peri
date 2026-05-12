@@ -47,7 +47,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
         app.session_mgr.session_areas = cols.iter().copied().collect();
 
-        // 先渲染非 active session，再渲染 active session（确保光标位置正确）
+        // 先渲染非 active session（不设置光标位置），再渲染 active session
         for (i, col_area) in cols.iter().enumerate() {
             if i == app.session_mgr.active {
                 continue;
@@ -257,11 +257,19 @@ fn render_session_column(
         }
     }
 
-    // 输入框（直接渲染，不 clone/set_block，避免 tui_textarea 内部状态丢失）
-    f.render_widget(
-        &app.session_mgr.sessions[session_idx].ui.textarea,
-        chunks[5],
-    );
+    // 输入框：非聚焦 session 或应用失焦时隐藏光标（移除 REVERSED 修饰符）
+    let textarea_ref = &app.session_mgr.sessions[session_idx].ui.textarea;
+    // 应用失焦 或 当前 session 未激活 → 隐藏光标
+    let should_hide_cursor = !app.focused || !is_active;
+    if should_hide_cursor {
+        // 克隆并移除光标的 REVERSED 样式，使光标不可见
+        let mut ta = textarea_ref.clone();
+        // 将光标样式设置为与普通文本相同（无 REVERSED），光标字符将融入背景
+        ta.set_cursor_style(Style::default().fg(theme::DIM));
+        f.render_widget(&ta, chunks[5]);
+    } else {
+        f.render_widget(textarea_ref, chunks[5]);
+    }
     app.session_mgr.sessions[session_idx].ui.textarea_area = Some(chunks[5]);
 
     // ❯ 前缀

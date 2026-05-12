@@ -214,6 +214,14 @@ pub async fn next_event(app: &mut App) -> Result<Option<Action>> {
 /// 实际的事件处理逻辑（从 next_event 中提取，避免 probe 和正常路径重复）
 async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
     match ev {
+        Event::FocusGained => {
+            app.focused = true;
+            return Ok(Some(Action::Redraw));
+        }
+        Event::FocusLost => {
+            app.focused = false;
+            return Ok(Some(Action::Redraw));
+        }
         Event::Resize(_, _) => {
             // 宽度同步改由 render_messages 渲染驱动（比较 cache.width 与 text_area.width）
             app.session_mgr.sessions[app.session_mgr.active]
@@ -1353,7 +1361,6 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
             }
             _ => {}
         },
-        _ => {}
     }
 
     Ok(Some(Action::Redraw))

@@ -1125,6 +1125,7 @@ impl App {
                 ),
             },
             global_panels: PanelManager::new(),
+            focused: true,
         };
 
         let handle = crate::ui::headless::HeadlessHandle {

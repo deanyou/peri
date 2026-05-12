@@ -117,6 +117,8 @@ pub struct App {
     /// 全局服务/状态聚合（跨 session 共享）
     pub services: ServiceRegistry,
     pub global_panels: panel_manager::PanelManager,
+    /// 应用焦点状态（true=聚焦，false=失焦）
+    pub focused: bool,
 }
 
 impl App {
@@ -217,6 +219,7 @@ impl App {
             session_mgr,
             services,
             global_panels: panel_manager::PanelManager::new(),
+            focused: true,
         }
     }
 

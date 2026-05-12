@@ -3,7 +3,8 @@ use clap::{Parser, Subcommand};
 use ratatui::{
     crossterm::{
         event::{
-            DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+            DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+            EnableFocusChange, EnableMouseCapture,
         },
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -131,7 +132,8 @@ fn run_tui(approve: bool) -> Result<()> {
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
-            EnableBracketedPaste
+            EnableBracketedPaste,
+            EnableFocusChange
         )?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
@@ -145,7 +147,8 @@ fn run_tui(approve: bool) -> Result<()> {
             terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableMouseCapture,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            DisableFocusChange
         )?;
         terminal.show_cursor()?;
 

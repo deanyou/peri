@@ -1,6 +1,6 @@
 # OpenAI 兼容第三方 Provider 上下文用量计算不准确
 
-**状态**：待修复
+**状态**：Fixed + Verify
 **优先级**：高
 **创建日期**：2026-05-11
 **上次修复 commit**：`1497d5b` fix(context): sync context_window from model to TUI layer
