@@ -135,6 +135,10 @@ impl App {
         self.session_mgr.sessions[self.session_mgr.active]
             .agent
             .pending_bg_continuation = None;
+        self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .pre_done_bg_completions
+            .clear();
         // 保存原始用户输入（compact 后自动 re-submit 用）并重置 re-submit 计数器
         self.session_mgr.sessions[self.session_mgr.active]
             .agent

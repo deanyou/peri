@@ -2,6 +2,45 @@ use super::message_pipeline::PipelineAction;
 use super::*;
 use crate::ui::message_view::MessageViewModel;
 
+/// 构建后台任务完成的显示通知文本（截断版，供 UI 展示）
+fn build_bg_display_notification(
+    task_id: &str,
+    agent_name: &str,
+    success: bool,
+    output: &str,
+    tool_calls_count: usize,
+    duration_ms: u64,
+) -> String {
+    let short_id = &task_id[..8.min(task_id.len())];
+    if success {
+        let output_preview: String = output
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        format!(
+            "[后台任务 {} 已完成] Agent: {} | 工具调用: {} | 耗时: {}ms\n{}",
+            short_id,
+            agent_name,
+            tool_calls_count,
+            duration_ms,
+            if output.chars().count() > 80 || output.lines().count() > 1 {
+                format!("{}...", output_preview)
+            } else {
+                output_preview
+            },
+        )
+    } else {
+        let err_preview: String = output.chars().take(80).collect();
+        format!(
+            "[后台任务 {} 执行失败] Agent: {} | {}",
+            short_id, agent_name, err_preview,
+        )
+    }
+}
+
 impl App {
     pub(crate) fn handle_background_task_completed(
         &mut self,
@@ -140,36 +179,14 @@ impl App {
             self.session_mgr.sessions[self.session_mgr.active]
                 .agent
                 .agent_rx = None;
-            // 截断显示文本（完整数据已在 agent_state_messages 中供 LLM 使用）
-            let display_notification = if success {
-                let output_preview: String = output
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(80)
-                    .collect();
-                format!(
-                    "[后台任务 {} 已完成] Agent: {} | 工具调用: {} | 耗时: {}ms\n{}",
-                    &task_id[..8.min(task_id.len())],
-                    agent_name,
-                    tool_calls_count,
-                    duration_ms,
-                    if output.chars().count() > 80 || output.lines().count() > 1 {
-                        format!("{}...", output_preview)
-                    } else {
-                        output_preview
-                    },
-                )
-            } else {
-                let err_preview: String = output.chars().take(80).collect();
-                format!(
-                    "[后台任务 {} 执行失败] Agent: {} | {}",
-                    &task_id[..8.min(task_id.len())],
-                    agent_name,
-                    err_preview,
-                )
-            };
+            let display_notification = build_bg_display_notification(
+                &task_id,
+                &agent_name,
+                success,
+                &output,
+                tool_calls_count,
+                duration_ms,
+            );
             self.session_mgr.sessions[self.session_mgr.active]
                 .agent
                 .pending_bg_continuation = Some(display_notification);
@@ -195,6 +212,28 @@ impl App {
                 return (true, false, true);
             }
             return (true, false, true);
+        } else if !self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .agent_done_pending_bg
+            && self.session_mgr.sessions[self.session_mgr.active].background_task_count == 0
+        {
+            // 竞态修复：agent 尚未 Done，但所有后台任务已完成。
+            // 暂存通知，待 Done 处理时检查此字段并设置 pending_bg_continuation。
+            tracing::info!(
+                "background task completed before Done, buffering notification for deferred continuation"
+            );
+            let display_notification = build_bg_display_notification(
+                &task_id,
+                &agent_name,
+                success,
+                &output,
+                tool_calls_count,
+                duration_ms,
+            );
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .pre_done_bg_completions
+                .push(display_notification);
         }
 
         (true, false, false)

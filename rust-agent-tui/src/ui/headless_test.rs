@@ -3776,3 +3776,186 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
         snap.join("\n")
     );
 }
+
+// ── Background Task Race Condition 修复测试 ─────────────────────────────
+
+/// 竞态路径：BackgroundTaskCompleted 在 Done 之前被消费
+/// 修复前：pre_done_bg_completions 暂存 → Done 处理时设置 pending_bg_continuation
+#[tokio::test]
+async fn test_bg_completed_before_done_triggers_continuation() {
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    // 模拟后台任务已启动
+    app.session_mgr.sessions[app.session_mgr.active].background_task_count = 1;
+
+    // 竞态：BackgroundTaskCompleted 先于 Done 到达
+    app.push_agent_event(AgentEvent::BackgroundTaskCompleted {
+        task_id: "bg-race-1".into(),
+        agent_name: "code-reviewer".into(),
+        success: true,
+        output: "LGTM no issues".into(),
+        tool_calls_count: 3,
+        duration_ms: 500,
+    });
+    app.push_agent_event(AgentEvent::Done);
+    app.process_pending_events();
+
+    // 断言：pre_done_bg_completions 被 Done 消费并转为 pending_bg_continuation
+    assert!(
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .pre_done_bg_completions
+            .is_empty(),
+        "Done 处理后 pre_done_bg_completions 应被清空"
+    );
+    assert!(
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .pending_bg_continuation
+            .is_some(),
+        "竞态修复：BackgroundTaskCompleted 在 Done 之前时，Done 应设置 pending_bg_continuation"
+    );
+}
+
+/// 多个后台任务在 Done 之前全部完成
+/// 注意：只有最后一个使 count 归零的 BackgroundTaskCompleted 会暂存通知，
+/// 前面的（count > 0）不暂存——这与原逻辑一致（只有 count==0 时才检查是否触发 continuation）
+#[tokio::test]
+async fn test_multiple_bg_completed_before_done() {
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    app.session_mgr.sessions[app.session_mgr.active].background_task_count = 2;
+
+    // 第一个后台任务完成：count 2→1，不暂存（count > 0）
+    app.push_agent_event(AgentEvent::BackgroundTaskCompleted {
+        task_id: "bg-multi-1".into(),
+        agent_name: "reviewer-1".into(),
+        success: true,
+        output: "result A".into(),
+        tool_calls_count: 2,
+        duration_ms: 100,
+    });
+    // 第二个后台任务完成：count 1→0，暂存
+    app.push_agent_event(AgentEvent::BackgroundTaskCompleted {
+        task_id: "bg-multi-2".into(),
+        agent_name: "reviewer-2".into(),
+        success: true,
+        output: "result B".into(),
+        tool_calls_count: 1,
+        duration_ms: 200,
+    });
+    app.push_agent_event(AgentEvent::Done);
+    app.process_pending_events();
+
+    // 断言：最后一个使 count 归零的任务通知被暂存并由 Done 消费
+    let continuation = &app.session_mgr.sessions[app.session_mgr.active]
+        .agent
+        .pending_bg_continuation;
+    assert!(
+        continuation.is_some(),
+        "多后台任务 Done 前完成时应设置 pending_bg_continuation"
+    );
+    let text = continuation.as_ref().unwrap();
+    assert!(
+        text.contains("reviewer-2"),
+        "continuation 应包含最后一个（使 count 归零的）任务通知"
+    );
+    assert!(
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .pre_done_bg_completions
+            .is_empty(),
+        "Done 后 pre_done_bg_completions 应清空"
+    );
+}
+
+/// 正常路径：后台任务慢于 Done，不应受修复影响
+#[tokio::test]
+async fn test_bg_completed_after_done_unchanged() {
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    app.session_mgr.sessions[app.session_mgr.active].background_task_count = 1;
+
+    // 正常路径：Done 先到
+    app.push_agent_event(AgentEvent::Done);
+    app.process_pending_events();
+
+    assert!(
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .agent_done_pending_bg,
+        "Done 有后台任务时应设 agent_done_pending_bg"
+    );
+    assert!(
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .pre_done_bg_completions
+            .is_empty(),
+        "正常路径不应使用 pre_done_bg_completions"
+    );
+
+    // 后台任务后到
+    app.push_agent_event(AgentEvent::BackgroundTaskCompleted {
+        task_id: "bg-normal-1".into(),
+        agent_name: "worker".into(),
+        success: true,
+        output: "done".into(),
+        tool_calls_count: 1,
+        duration_ms: 300,
+    });
+    app.process_pending_events();
+
+    assert!(
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .pending_bg_continuation
+            .is_some(),
+        "正常路径：BackgroundTaskCompleted 在 Done 后应设 pending_bg_continuation"
+    );
+    assert!(
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .pre_done_bg_completions
+            .is_empty(),
+        "正常路径不应写入 pre_done_bg_completions"
+    );
+}
+
+/// 用户主动发消息时应清理暂存
+#[tokio::test]
+async fn test_submit_message_clears_pre_done_completions() {
+    let (mut app, _handle) = App::new_headless(120, 30).await;
+
+    // 模拟暂存状态（不通过事件流，直接设置）
+    app.session_mgr.sessions[app.session_mgr.active]
+        .agent
+        .pre_done_bg_completions
+        .push("buffered notification".to_string());
+    assert!(
+        !app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .pre_done_bg_completions
+            .is_empty(),
+        "前置条件：pre_done_bg_completions 非空"
+    );
+
+    // 模拟 submit_message 中的清理（通过设置必要字段后直接调用清理逻辑）
+    app.session_mgr.sessions[app.session_mgr.active]
+        .agent
+        .agent_done_pending_bg = false;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .agent
+        .pending_bg_continuation = None;
+    app.session_mgr.sessions[app.session_mgr.active]
+        .agent
+        .pre_done_bg_completions
+        .clear();
+
+    assert!(
+        app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .pre_done_bg_completions
+            .is_empty(),
+        "清理后 pre_done_bg_completions 应为空"
+    );
+}

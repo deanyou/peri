@@ -126,6 +126,10 @@ impl App {
             .agent
             .agent_done_pending_bg = false;
         self.session_mgr.sessions[self.session_mgr.active].background_task_count = 0;
+        self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .pre_done_bg_completions
+            .clear();
 
         // Auto-continue: compact 完成后自动用原始输入重新启动 agent
         // 仅在 agent 执行中 auto-compact 时 resubmit（compact_should_resubmit == true），
