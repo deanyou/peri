@@ -321,6 +321,21 @@ impl App {
 
         let hook_session_start = history.is_empty();
 
+        // 初始化或复用会话级 ToolSearch 索引和共享工具注册表
+        let agent = &mut self.session_mgr.sessions[self.session_mgr.active].agent;
+        if agent.tool_search_index.is_none() {
+            agent.tool_search_index = Some(std::sync::Arc::new(
+                rust_agent_middlewares::tool_search::ToolSearchIndex::new(),
+            ));
+        }
+        if agent.shared_tools.is_none() {
+            agent.shared_tools = Some(std::sync::Arc::new(parking_lot::RwLock::new(
+                std::collections::HashMap::new(),
+            )));
+        }
+        let tool_search_index = agent.tool_search_index.clone().unwrap();
+        let shared_tools = agent.shared_tools.clone().unwrap();
+
         tokio::spawn(
             async move {
                 agent::run_universal_agent(agent::AgentRunConfig {
@@ -345,6 +360,8 @@ impl App {
                     plugin_lsp_servers,
                     hook_groups,
                     hook_session_start,
+                    tool_search_index,
+                    shared_tools,
                 })
                 .await;
             }

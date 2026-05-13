@@ -83,6 +83,20 @@ pub struct AgentComm {
     pub lsp_errors: usize,
     pub lsp_warnings: usize,
     pub lsp_files_with_errors: usize,
+    /// 会话级 ToolSearch 索引（跨 submit 复用，缓存 deferred tools 提示词）
+    pub tool_search_index:
+        Option<std::sync::Arc<rust_agent_middlewares::tool_search::ToolSearchIndex>>,
+    /// 会话级共享工具注册表（跨 submit 复用）
+    pub shared_tools: Option<
+        std::sync::Arc<
+            parking_lot::RwLock<
+                std::collections::HashMap<
+                    String,
+                    std::sync::Arc<dyn rust_create_agent::tools::BaseTool>,
+                >,
+            >,
+        >,
+    >,
 }
 
 impl Default for AgentComm {
@@ -118,6 +132,8 @@ impl Default for AgentComm {
             lsp_errors: 0,
             lsp_warnings: 0,
             lsp_files_with_errors: 0,
+            tool_search_index: None,
+            shared_tools: None,
         }
     }
 }

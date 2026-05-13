@@ -45,6 +45,17 @@ pub struct AgentRunConfig {
     pub hook_groups: Vec<Vec<rust_agent_middlewares::hooks::RegisteredHook>>,
     /// Whether this is the first message of a new session (triggers SessionStart hook)
     pub hook_session_start: bool,
+    /// 会话级 ToolSearch 索引（跨 submit 复用，缓存 deferred tools 提示词）
+    pub tool_search_index: std::sync::Arc<rust_agent_middlewares::tool_search::ToolSearchIndex>,
+    /// 会话级共享工具注册表（跨 submit 复用）
+    pub shared_tools: std::sync::Arc<
+        parking_lot::RwLock<
+            std::collections::HashMap<
+                String,
+                std::sync::Arc<dyn rust_create_agent::tools::BaseTool>,
+            >,
+        >,
+    >,
 }
 
 pub async fn run_universal_agent(cfg: AgentRunConfig) {
@@ -70,6 +81,8 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
         plugin_lsp_servers,
         hook_groups,
         hook_session_start,
+        tool_search_index,
+        shared_tools,
     } = cfg;
     // 如果设置了 agent_id，提前解析 agent.md 获取可覆盖部分（persona / tone / proactiveness），
     // 替换 system prompt 中对应占位符；安全策略、代码规范等硬约束始终保留。
@@ -285,13 +298,8 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
     // 构建 ReActAgent
     // FilesystemMiddleware 和 TerminalMiddleware 通过 collect_tools 自动提供工具
 
-    // Tool Search: 创建共享工具注册表和搜索索引
-    let tool_search_index = Arc::new(rust_agent_middlewares::tool_search::ToolSearchIndex::new());
-    let shared_tools: Arc<
-        parking_lot::RwLock<
-            std::collections::HashMap<String, Arc<dyn rust_create_agent::tools::BaseTool>>,
-        >,
-    > = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+    // Tool Search: 使用会话级共享的搜索索引和工具注册表（跨 submit 复用，缓存提示词）
+    // （从 AgentRunConfig 传入，已在 session 层初始化）
 
     // 设置 context_budget 以启用核心层的 token 用量监控和 micro_compact
     let context_window = model.context_window();

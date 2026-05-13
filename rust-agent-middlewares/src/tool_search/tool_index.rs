@@ -151,6 +151,8 @@ fn cosine_similarity(vec1: &HashMap<String, f64>, vec2: &HashMap<String, f64>) -
 pub struct ToolSearchIndex {
     tools: RwLock<HashMap<String, Arc<dyn BaseTool>>>,
     tfidf_index: RwLock<TfIdfIndex>,
+    /// 缓存首次生成的 deferred tools 提示词，后续不再重新生成
+    cached_prompt: RwLock<Option<String>>,
 }
 
 impl ToolSearchIndex {
@@ -162,6 +164,7 @@ impl ToolSearchIndex {
                 doc_freqs: HashMap::new(),
                 doc_vectors: HashMap::new(),
             }),
+            cached_prompt: RwLock::new(None),
         }
     }
 
@@ -276,16 +279,19 @@ impl ToolSearchIndex {
             .collect()
     }
 
-    /// 返回 Markdown 格式的延迟工具列表
+    /// 返回 Markdown 格式的延迟工具列表（按名称排序，保证跨进程稳定）
     pub fn format_deferred_list(&self) -> String {
         let tools = self.tools.read();
         if tools.is_empty() {
             return String::new();
         }
 
+        let mut entries: Vec<_> = tools.iter().collect();
+        entries.sort_by_key(|(name, _)| *name);
+
         let mut lines = String::from("## Deferred Tools\n\n");
         lines.push_str("The following tools are not in your direct tool list. Use `SearchExtraTools` to search for them, then `ExecuteExtraTool` to invoke.\n\n");
-        for (name, tool) in tools.iter() {
+        for (name, tool) in entries {
             lines.push_str(&format!("- {}: {}\n", name, tool.description()));
             let params = tool.parameters();
             let props = params.get("properties");
@@ -315,6 +321,16 @@ impl ToolSearchIndex {
     /// 返回索引中的工具总数
     pub fn total_count(&self) -> usize {
         self.tools.read().len()
+    }
+
+    /// 获取缓存的提示词
+    pub fn cached_prompt(&self) -> Option<String> {
+        self.cached_prompt.read().clone()
+    }
+
+    /// 缓存提示词（首次生成后调用）
+    pub fn set_cached_prompt(&self, prompt: String) {
+        *self.cached_prompt.write() = Some(prompt);
     }
 }
 

@@ -51,26 +51,32 @@ impl<S: State> Middleware<S> for ToolSearchMiddleware {
     }
 
     async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
-        // 首次调用时，从 shared_tools 构建 deferred 工具索引
-        // executor 在 before_agent 之前已将所有工具写入 shared_tools
-        if self.tool_search_index.total_count() == 0 {
-            let tools = self.shared_tools.read();
-            let deferred_arcs: Vec<Arc<dyn BaseTool>> = tools
-                .iter()
-                .filter(|(name, _)| {
-                    !super::core_tools::CORE_TOOLS.contains(name.as_str())
-                        && !super::core_tools::META_TOOLS.contains(name.as_str())
-                })
-                .map(|(_, tool)| Arc::clone(tool))
-                .collect();
-            if !deferred_arcs.is_empty() {
-                self.tool_search_index.build(deferred_arcs);
+        // 首次：从 shared_tools 构建索引并缓存提示词
+        if self.tool_search_index.cached_prompt().is_none() {
+            if self.tool_search_index.total_count() == 0 {
+                let tools = self.shared_tools.read();
+                let deferred_arcs: Vec<Arc<dyn BaseTool>> = tools
+                    .iter()
+                    .filter(|(name, _)| {
+                        !super::core_tools::CORE_TOOLS.contains(name.as_str())
+                            && !super::core_tools::META_TOOLS.contains(name.as_str())
+                    })
+                    .map(|(_, tool)| Arc::clone(tool))
+                    .collect();
+                if !deferred_arcs.is_empty() {
+                    self.tool_search_index.build(deferred_arcs);
+                }
+            }
+            let list = self.tool_search_index.format_deferred_list();
+            if !list.is_empty() {
+                self.tool_search_index.set_cached_prompt(list);
             }
         }
 
-        let list = self.tool_search_index.format_deferred_list();
-        if !list.is_empty() {
-            state.prepend_message(BaseMessage::system(list));
+        // 每轮都注入缓存的提示词（System 消息在 agent 完成后被过滤，
+        // 不写入 agent_state_messages，所以每轮需重新注入以保证前缀一致）
+        if let Some(cached) = self.tool_search_index.cached_prompt() {
+            state.prepend_message(BaseMessage::system(cached));
         }
         Ok(())
     }
@@ -168,6 +174,29 @@ mod tests {
         assert!(
             first.content().contains("CronRegister"),
             "system 消息应包含延迟工具列表"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_second_before_agent_injects_same_cached_prompt() {
+        let (index, shared) = build_test_components();
+        let mw = ToolSearchMiddleware::new(index, shared);
+
+        let mut state1 = rust_create_agent::agent::state::AgentState::new("/tmp");
+        mw.before_agent(&mut state1).await.unwrap();
+        let first_content = state1.messages()[0].content().to_string();
+
+        let mut state2 = rust_create_agent::agent::state::AgentState::new("/tmp");
+        mw.before_agent(&mut state2).await.unwrap();
+        assert_eq!(
+            state2.messages().len(),
+            1,
+            "每轮都应注入 system 消息（System 消息被过滤后需重新注入）"
+        );
+        assert_eq!(
+            state2.messages()[0].content(),
+            first_content,
+            "第二轮注入的内容应与首轮完全一致（缓存）"
         );
     }
 }
