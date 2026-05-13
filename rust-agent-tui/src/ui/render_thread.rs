@@ -8,7 +8,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use tokio::sync::{mpsc, Notify};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::markdown::ensure_rendered;
+use super::markdown::ensure_rendered_incremental;
 use super::message_render::render_view_model;
 use super::message_view::MessageViewModel;
 
@@ -156,10 +156,10 @@ impl RenderTask {
 
     /// 渲染单条消息为 lines（含前后空行分隔）
     fn render_one(vm: &mut MessageViewModel, index: usize, width: usize) -> Vec<Line<'static>> {
-        // 处理 dirty blocks
+        // 处理 dirty blocks（使用增量解析）
         if let MessageViewModel::AssistantBubble { blocks, .. } = vm {
             for block in blocks.iter_mut() {
-                ensure_rendered(block, width);
+                ensure_rendered_incremental(block, width);
             }
         }
         // 用实际终端宽度重新解析用户消息的 markdown（初始创建时用默认宽度 80）
@@ -183,24 +183,120 @@ impl RenderTask {
         hasher.finish()
     }
 
-    /// 全量重建：接收完整消息列表，通过 hash diff 只重新渲染变化的消息
+    /// 判断两个消息是否仅存在"外观"差异（不影响渲染输出）。
+    ///
+    /// cosmetic change 的消息可以安全复用旧的渲染缓存，避免不必要的重渲染。
+    fn is_cosmetic_change(old: &MessageViewModel, new: &MessageViewModel) -> bool {
+        match (old, new) {
+            // AssistantBubble: blocks 内容相同，仅 is_streaming 变化
+            (
+                MessageViewModel::AssistantBubble {
+                    blocks: old_blocks,
+                    collapsed: old_collapsed,
+                    ..
+                },
+                MessageViewModel::AssistantBubble {
+                    blocks: new_blocks,
+                    collapsed: new_collapsed,
+                    ..
+                },
+            ) => old_blocks == new_blocks && old_collapsed == new_collapsed,
+
+            // SubAgentGroup: recent_messages + final_result 相同，仅 is_running 变化
+            (
+                MessageViewModel::SubAgentGroup {
+                    agent_id: old_id,
+                    task_preview: old_preview,
+                    total_steps: old_steps,
+                    recent_messages: old_msgs,
+                    final_result: old_result,
+                    is_error: old_err,
+                    is_background: old_bg,
+                    bg_hash: old_hash,
+                    collapsed: old_collapsed,
+                    ..
+                },
+                MessageViewModel::SubAgentGroup {
+                    agent_id: new_id,
+                    task_preview: new_preview,
+                    total_steps: new_steps,
+                    recent_messages: new_msgs,
+                    final_result: new_result,
+                    is_error: new_err,
+                    is_background: new_bg,
+                    bg_hash: new_hash,
+                    collapsed: new_collapsed,
+                    ..
+                },
+            ) => {
+                old_id == new_id
+                    && old_preview == new_preview
+                    && old_steps == new_steps
+                    && old_msgs == new_msgs
+                    && old_result == new_result
+                    && old_err == new_err
+                    && old_bg == new_bg
+                    && old_hash == new_hash
+                    && old_collapsed == new_collapsed
+            }
+
+            // 其他类型变化都不是 cosmetic
+            _ => false,
+        }
+    }
+
+    /// 全量重建：接收完整消息列表，通过 prefix_stable_len 优化渲染
+    ///
+    /// 优化策略：
+    /// 1. 计算前缀稳定长度（连续 hash 未变的消息数量）
+    /// 2. 前缀消息直接复用 message_lines 缓存，跳过渲染
+    /// 3. 只从变化点开始重新渲染后续消息
+    /// 4. 对 hash 不同但属于 cosmetic change 的消息也复用缓存
     fn rebuild(&mut self, messages: Vec<MessageViewModel>) {
         let width = self.width as usize;
         let new_len = messages.len();
 
         // 保留一份用于 Resize（Resize 时没有新的 Rebuild 事件）
-        self.last_messages = messages.clone();
+        let old_messages = std::mem::replace(&mut self.last_messages, messages.clone());
 
         // 在渲染前计算 hash（render_one 会修改 dirty 等字段）
         let new_hashes: Vec<u64> = messages.iter().map(Self::compute_hash).collect();
 
+        // 计算 prefix_stable_len：前缀中连续 hash 未变的消息数量
+        let old_len = self.message_hashes.len();
+        let prefix_stable_len = new_hashes
+            .iter()
+            .zip(self.message_hashes.iter())
+            .position(|(new_h, old_h)| new_h != old_h)
+            .unwrap_or_else(|| old_len.min(new_len));
+
+        // 保存旧的 message_lines（用于 cosmetic change 复用）
+        let mut old_message_lines = std::mem::take(&mut self.message_lines);
+
         // 调整 message_lines 容量
         self.message_lines.resize(new_len, Vec::new());
 
-        // 只重新渲染 hash 变化的消息
+        // 复用前缀的缓存行
+        for i in 0..prefix_stable_len {
+            if i < old_message_lines.len() {
+                self.message_lines[i] = std::mem::take(&mut old_message_lines[i]);
+            }
+        }
+        // 复用 prefix_stable_len 之前、未被复用的旧行（这些 hash 未变但之前渲染过）
+        // 这些已经通过上面的循环处理了
+
+        // 从 prefix_stable_len 开始渲染变化的消息
         for (i, mut vm) in messages.into_iter().enumerate() {
-            if i < self.message_hashes.len() && new_hashes[i] == self.message_hashes[i] {
-                // hash 未变，跳过渲染
+            if i < prefix_stable_len {
+                // 前缀稳定区，已复用缓存
+                continue;
+            }
+            // 对 hash 不同但属于 cosmetic change 的消息复用旧缓存
+            if i < old_message_lines.len()
+                && i < old_len
+                && Self::is_cosmetic_change(&old_messages[i], &vm)
+            {
+                self.message_lines[i] = std::mem::take(&mut old_message_lines[i]);
                 continue;
             }
             self.message_lines[i] = Self::render_one(&mut vm, i + 1, width);

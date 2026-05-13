@@ -76,10 +76,17 @@ impl ToolCategory {
     /// 根据 tools 列表生成摘要，支持混合类别（如 search + read）
     pub fn summary_for_tools(tools: &[ToolEntry]) -> String {
         let count = tools.len();
-        let has_search = tools.iter().any(|t| t.tool_name == "Grep");
-        let has_read = tools.iter().any(|t| t.tool_name == "Read");
-        let has_glob = tools.iter().any(|t| t.tool_name == "Glob");
-        let has_ask = tools.iter().any(|t| t.tool_name == "AskUserQuestion");
+        let search_count = tools.iter().filter(|t| t.tool_name == "Grep").count();
+        let read_count = tools.iter().filter(|t| t.tool_name == "Read").count();
+        let glob_count = tools.iter().filter(|t| t.tool_name == "Glob").count();
+        let ask_count = tools
+            .iter()
+            .filter(|t| t.tool_name == "AskUserQuestion")
+            .count();
+        let has_search = search_count > 0;
+        let has_read = read_count > 0;
+        let has_glob = glob_count > 0;
+        let has_ask = ask_count > 0;
         let mixed = [has_search, has_read, has_glob, has_ask]
             .iter()
             .filter(|&&b| b)
@@ -87,11 +94,20 @@ impl ToolCategory {
             > 1;
 
         if mixed {
-            if count == 1 {
-                "1 operation".to_string()
-            } else {
-                format!("{} operations", count)
+            let mut parts: Vec<String> = Vec::new();
+            if search_count > 0 {
+                parts.push(ToolCategory::Search.summary(search_count));
             }
+            if read_count > 0 {
+                parts.push(ToolCategory::Read.summary(read_count));
+            }
+            if glob_count > 0 {
+                parts.push(ToolCategory::Glob.summary(glob_count));
+            }
+            if ask_count > 0 {
+                parts.push(ToolCategory::AskUser.summary(ask_count));
+            }
+            parts.join(", ")
         } else if has_ask {
             ToolCategory::AskUser.summary(count)
         } else if has_search {
@@ -442,6 +458,10 @@ pub enum ContentBlockView {
         raw: String,
         rendered: Text<'static>,
         dirty: bool,
+        /// 已渲染到 `raw` 的字节偏移（增量解析用）
+        rendered_prefix_len: usize,
+        /// `rendered` 中对应前缀的行数（避免重解析计数）
+        rendered_prefix_lines: usize,
     },
     /// 推理/思考过程（仅显示字数摘要）
     Reasoning { char_count: usize },
@@ -538,11 +558,17 @@ impl MessageViewModel {
                     .content_blocks()
                     .into_iter()
                     .map(|block| match block {
-                        ContentBlock::Text { text } => ContentBlockView::Text {
-                            raw: text.clone(),
-                            rendered: parse_markdown_default(&text),
-                            dirty: false,
-                        },
+                        ContentBlock::Text { text } => {
+                            let rendered = parse_markdown_default(&text);
+                            let rendered_prefix_lines = rendered.lines.len();
+                            ContentBlockView::Text {
+                                raw: text.clone(),
+                                rendered,
+                                dirty: false,
+                                rendered_prefix_len: text.len(),
+                                rendered_prefix_lines,
+                            }
+                        }
                         ContentBlock::Reasoning { text, .. } => ContentBlockView::Reasoning {
                             char_count: text.chars().count(),
                         },
@@ -551,22 +577,32 @@ impl MessageViewModel {
                             raw: "[Image]".to_string(),
                             rendered: Text::raw("[Image]"),
                             dirty: false,
+                            rendered_prefix_len: 7,
+                            rendered_prefix_lines: 1,
                         },
                         ContentBlock::Document { title, .. } => {
                             let label = title.as_deref().unwrap_or("Document");
+                            let raw = format!("[Document: {}]", label);
+                            let len = raw.len();
                             ContentBlockView::Text {
-                                raw: format!("[Document: {}]", label),
+                                raw,
                                 rendered: Text::raw(format!("[Document: {}]", label)),
                                 dirty: false,
+                                rendered_prefix_len: len,
+                                rendered_prefix_lines: 1,
                             }
                         }
                         ContentBlock::Unknown(v) => {
                             let type_name =
                                 v.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+                            let raw = format!("[{}]", type_name);
+                            let len = raw.len();
                             ContentBlockView::Text {
-                                raw: format!("[{}]", type_name),
+                                raw,
                                 rendered: Text::raw(format!("[{}]", type_name)),
                                 dirty: false,
+                                rendered_prefix_len: len,
+                                rendered_prefix_lines: 1,
                             }
                         }
                         // ToolResult 在 Ai 消息中不常见，静默跳过
@@ -574,6 +610,8 @@ impl MessageViewModel {
                             raw: String::new(),
                             rendered: Text::raw(""),
                             dirty: false,
+                            rendered_prefix_len: 0,
+                            rendered_prefix_lines: 0,
                         },
                     })
                     .collect();
@@ -702,6 +740,8 @@ impl MessageViewModel {
                 raw,
                 rendered: Text::raw(""),
                 dirty: true,
+                rendered_prefix_len: 0,
+                rendered_prefix_lines: 0,
             });
         }
     }

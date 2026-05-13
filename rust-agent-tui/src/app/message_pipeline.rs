@@ -566,10 +566,14 @@ impl MessagePipeline {
             });
         }
         if !self.current_ai_text.trim().is_empty() {
+            let rendered = parse_markdown_default(&self.current_ai_text);
+            let rendered_prefix_lines = rendered.lines.len();
             blocks.push(ContentBlockView::Text {
                 raw: self.current_ai_text.clone(),
-                rendered: parse_markdown_default(&self.current_ai_text),
+                rendered,
                 dirty: false,
+                rendered_prefix_len: self.current_ai_text.len(),
+                rendered_prefix_lines,
             });
         }
         // 追加当前 AI 消息中已完成的 tool_use blocks（不含 pending tools）
