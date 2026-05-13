@@ -318,6 +318,58 @@ impl PanelComponent for ThreadBrowser {
         EventResult::Consumed
     }
 
+    fn handle_scroll(&mut self, lines: i16, _ctx: &mut PanelContext<'_>) -> EventResult {
+        let total = self.total();
+        if total == 0 {
+            return EventResult::Consumed;
+        }
+        let delta: i16 = if lines > 0 { 1 } else { -1 };
+        let new = (self.cursor as isize + delta as isize).clamp(0, (total - 1) as isize) as usize;
+        self.cursor = new;
+        // 同步 scroll_offset，让光标行始终可见（每个 thread 3 行）
+        let cursor_line = self.cursor as u16 * 3;
+        if cursor_line < self.scroll_offset {
+            self.scroll_offset = cursor_line;
+        } else {
+            // 需要知道可见高度，但这里没有。用保守策略：直接把 scroll_offset 对齐到光标
+            // 渲染时 ScrollableArea 会做最终 clamp
+            if cursor_line >= self.scroll_offset {
+                self.scroll_offset = cursor_line;
+            }
+        }
+        EventResult::Consumed
+    }
+
+    fn handle_mouse(
+        &mut self,
+        mouse: ratatui::crossterm::event::MouseEvent,
+        area: Rect,
+        _ctx: &mut PanelContext<'_>,
+    ) -> EventResult {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return EventResult::NotConsumed;
+        }
+
+        // area 就是 list_area（panel_area 存的是 list_area），无需额外偏移
+        let relative_y = mouse.row.saturating_sub(area.y);
+        if relative_y >= area.height {
+            return EventResult::NotConsumed;
+        }
+
+        // 每个 thread 占 3 行（标题 + meta + 空行），加上 scroll_offset
+        let row_with_scroll = relative_y as usize + self.scroll_offset as usize;
+        let clicked_idx = row_with_scroll / 3;
+
+        if clicked_idx < self.total() {
+            self.cursor = clicked_idx;
+            return EventResult::Consumed;
+        }
+
+        EventResult::NotConsumed
+    }
+
     fn desired_height(&self, screen_height: u16, _screen_width: u16) -> u16 {
         (screen_height * 3 / 5).max(16)
     }

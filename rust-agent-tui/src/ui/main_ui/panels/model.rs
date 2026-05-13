@@ -12,7 +12,7 @@ use crate::app::model_panel::{AliasTab, ModelPanel, ROW_HAIKU, ROW_OPUS, ROW_SON
 use crate::app::App;
 use crate::ui::theme;
 
-pub(crate) fn render_model_panel(f: &mut Frame, panel: &ModelPanel, app: &App, area: Rect) {
+pub(crate) fn render_model_panel(f: &mut Frame, panel: &ModelPanel, app: &mut App, area: Rect) {
     let inner = BorderedPanel::new(Span::styled(
         " Select model ",
         Style::default()
@@ -21,6 +21,10 @@ pub(crate) fn render_model_panel(f: &mut Frame, panel: &ModelPanel, app: &App, a
     ))
     .border_style(Style::default().fg(theme::BORDER))
     .render(f, area);
+
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(inner);
 
     let active_alias = app
         .services

@@ -13,7 +13,7 @@ use crate::app::App;
 use crate::ui::theme;
 
 /// /login 面板渲染（底部展开区）
-pub(crate) fn render_login_panel(f: &mut Frame, panel: &LoginPanel, app: &App, area: Rect) {
+pub(crate) fn render_login_panel(f: &mut Frame, panel: &LoginPanel, app: &mut App, area: Rect) {
     let border_color = match panel.mode {
         LoginPanelMode::Browse => theme::BORDER,
         LoginPanelMode::Edit => theme::WARNING,
@@ -36,6 +36,10 @@ pub(crate) fn render_login_panel(f: &mut Frame, panel: &LoginPanel, app: &App, a
     ))
     .border_style(Style::default().fg(border_color))
     .render(f, area);
+
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(inner);
 
     let active_provider_id = app
         .services

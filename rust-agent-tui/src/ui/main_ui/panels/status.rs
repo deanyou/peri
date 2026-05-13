@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-pub(crate) fn render_status_panel(f: &mut Frame, panel: &StatusPanel, app: &App, area: Rect) {
+pub(crate) fn render_status_panel(f: &mut Frame, panel: &StatusPanel, app: &mut App, area: Rect) {
     let inner = BorderedPanel::new(Span::styled(
         " Status ",
         Style::default()
@@ -19,6 +19,10 @@ pub(crate) fn render_status_panel(f: &mut Frame, panel: &StatusPanel, app: &App,
     ))
     .border_style(Style::default().fg(theme::BORDER))
     .render(f, area);
+
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_area = Some(inner);
 
     // Tab 栏（1 行）
     let tab_height = 1u16;
