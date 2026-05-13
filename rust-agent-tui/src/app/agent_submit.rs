@@ -1,6 +1,24 @@
 use super::message_pipeline::PipelineAction;
 use super::*;
 
+/// 从用户输入中提取 /skill-name 模式的 skill 名称
+///
+/// 支持格式：
+/// - `/skill-name` — 单个 skill
+/// - `/skill-a /skill-b` — 多个 skill（空格分隔）
+/// - 消息中任意位置出现即可（不限于行首）
+fn parse_skill_names_from_input(input: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for word in input.split_whitespace() {
+        if let Some(name) = word.strip_prefix('/') {
+            if !name.is_empty() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
 impl App {
     pub fn submit_message(&mut self, input: String) {
         if input.trim().is_empty() {
@@ -322,6 +340,9 @@ impl App {
         let tool_search_index = agent.tool_search_index.clone().unwrap();
         let shared_tools = agent.shared_tools.clone().unwrap();
 
+        // 从用户输入中提取 /skill-name 模式，传给 SkillPreloadMiddleware
+        let preload_skills = parse_skill_names_from_input(&input);
+
         tokio::spawn(
             async move {
                 agent::run_universal_agent(agent::AgentRunConfig {
@@ -347,6 +368,7 @@ impl App {
                     hook_session_start,
                     tool_search_index,
                     shared_tools,
+                    preload_skills,
                 })
                 .await;
             }
@@ -369,5 +391,47 @@ impl App {
                 .remove(0);
             self.submit_message(msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_single_skill() {
+        let names = parse_skill_names_from_input("/diagnose");
+        assert_eq!(names, vec!["diagnose"]);
+    }
+
+    #[test]
+    fn test_parse_multiple_skills() {
+        let names = parse_skill_names_from_input("/diagnose /fix-issue /caveman");
+        assert_eq!(names, vec!["diagnose", "fix-issue", "caveman"]);
+    }
+
+    #[test]
+    fn test_parse_skill_in_sentence() {
+        let names = parse_skill_names_from_input("帮我用 /diagnose 调试一下这个问题");
+        assert_eq!(names, vec!["diagnose"]);
+    }
+
+    #[test]
+    fn test_parse_no_skill() {
+        let names = parse_skill_names_from_input("普通消息没有 skill");
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn test_parse_slash_only() {
+        let names = parse_skill_names_from_input("/");
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hash_not_matched() {
+        // # 前缀不匹配，仅 / 前缀触发
+        let names = parse_skill_names_from_input("#skill-name");
+        assert!(names.is_empty());
     }
 }

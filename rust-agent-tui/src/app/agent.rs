@@ -55,6 +55,8 @@ pub struct AgentRunConfig {
             >,
         >,
     >,
+    /// 需要预加载全文的 skill 名称列表（从用户消息中 /skill-name 模式提取）
+    pub preload_skills: Vec<String>,
 }
 
 pub async fn run_universal_agent(cfg: AgentRunConfig) {
@@ -81,6 +83,7 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
         hook_session_start,
         tool_search_index,
         shared_tools,
+        preload_skills,
     } = cfg;
     // 如果设置了 agent_id，提前解析 agent.md 获取可覆盖部分（persona / tone / proactiveness），
     // 替换 system prompt 中对应占位符；安全策略、代码规范等硬约束始终保留。
@@ -320,6 +323,7 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
         .add_middleware(Box::new(
             SkillsMiddleware::new().with_extra_dirs(plugin_skill_dirs),
         ))
+        .add_middleware(Box::new(SkillPreloadMiddleware::new(preload_skills, &cwd)))
         .add_middleware(Box::new(FilesystemMiddleware::new()))
         .add_middleware(Box::new(TerminalMiddleware::new()))
         .add_middleware(Box::new(WebMiddleware::new()))

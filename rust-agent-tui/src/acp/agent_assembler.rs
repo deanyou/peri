@@ -28,6 +28,8 @@ pub struct AgentAssembleConfig {
         Option<Arc<parking_lot::Mutex<rust_agent_middlewares::cron::CronScheduler>>>,
     /// Agent overrides from CLI --agent (persona, tone, proactiveness)
     pub agent_overrides: Option<AgentOverrides>,
+    /// 需要预加载全文的 skill 名称列表（从用户消息中 /skill-name 模式提取）
+    pub preload_skills: Vec<String>,
 }
 
 pub fn assemble_agent(
@@ -44,6 +46,7 @@ pub fn assemble_agent(
         cancel,
         cron_scheduler,
         agent_overrides,
+        preload_skills,
     } = config;
 
     // Apply agent overrides to system prompt
@@ -143,6 +146,7 @@ pub fn assemble_agent(
         .add_middleware(Box::new(AgentsMdMiddleware::new()))
         .add_middleware(Box::new(AgentDefineMiddleware::new()))
         .add_middleware(Box::new(SkillsMiddleware::new()))
+        .add_middleware(Box::new(SkillPreloadMiddleware::new(preload_skills, &cwd)))
         .add_middleware(Box::new(FilesystemMiddleware::new()))
         .add_middleware(Box::new(TerminalMiddleware::new()))
         .add_middleware(Box::new(TodoMiddleware::new(todo_tx)))
