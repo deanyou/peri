@@ -12,6 +12,10 @@ impl Command for HistoryCommand {
         "打开历史对话浏览面板"
     }
 
+    fn aliases(&self) -> Vec<&str> {
+        vec!["resume"]
+    }
+
     fn execute(&self, app: &mut App, _args: &str) {
         if app.session_mgr.sessions[app.session_mgr.active].ui.loading {
             app.session_mgr.sessions[app.session_mgr.active]

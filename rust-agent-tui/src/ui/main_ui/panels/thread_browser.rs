@@ -142,9 +142,7 @@ pub(crate) fn render_thread_browser(
 
     let inner = BorderedPanel::new(Span::styled(
         title_text,
-        Style::default()
-            .fg(theme::TEXT)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(SELECTED).add_modifier(Modifier::BOLD),
     ))
     .border_style(Style::default().fg(theme::MUTED))
     .render(f, popup_area);
@@ -197,7 +195,7 @@ pub(crate) fn render_thread_browser(
         // 第一行：cursor indicator + 标题
         let cursor_span = Span::styled(
             if is_cursor { "❯ " } else { "  " },
-            Style::default().fg(if is_cursor { SELECTED } else { theme::ACCENT }),
+            Style::default().fg(if is_cursor { SELECTED } else { theme::MUTED }),
         );
 
         let current_tag = if is_current { "✓ " } else { "" };
@@ -205,7 +203,7 @@ pub(crate) fn render_thread_browser(
         let title_style = if is_cursor {
             Style::default().fg(SELECTED).add_modifier(Modifier::BOLD)
         } else if is_current {
-            Style::default().fg(theme::ACCENT)
+            Style::default().fg(SELECTED).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme::TEXT)
         };
