@@ -426,6 +426,45 @@ impl ChatAnthropic {
         }
     }
 
+    /// 为不含 thinking 的 assistant 消息注入占位 thinking block。
+    ///
+    /// DeepSeek Anthropic 兼容端口在 thinking 模式下要求所有 assistant 消息都包含 thinking block。
+    /// 中间件（如 SkillPreloadMiddleware）注入的伪 assistant 消息不含 thinking，会导致 400 错误。
+    /// 注入带占位文本和空 signature 的 thinking block 以通过 API 验证。
+    fn ensure_thinking_blocks(messages: &mut [Value]) {
+        for msg in messages.iter_mut() {
+            if msg["role"] != "assistant" {
+                continue;
+            }
+            let has_thinking = match msg.get("content") {
+                Some(Value::Array(blocks)) => blocks.iter().any(|b| {
+                    let btype = b["type"].as_str().unwrap_or("");
+                    btype == "thinking" || btype == "redacted_thinking"
+                }),
+                _ => false,
+            };
+            if !has_thinking {
+                let placeholder = json!({
+                    "type": "thinking",
+                    "thinking": "",
+                    "signature": ""
+                });
+                match msg.get_mut("content") {
+                    Some(Value::Array(blocks)) => {
+                        blocks.insert(0, placeholder);
+                    }
+                    Some(content) => {
+                        let old = content.clone();
+                        *content = Value::Array(vec![placeholder, old]);
+                    }
+                    None => {
+                        msg["content"] = Value::Array(vec![placeholder]);
+                    }
+                }
+            }
+        }
+    }
+
     // ─── 响应 content blocks → BaseMessage ───────────────────────────────────
 
     fn parse_content_blocks(raw_blocks: &[Value]) -> (Vec<ContentBlock>, Vec<ToolCallRequest>) {
@@ -499,11 +538,14 @@ impl BaseModel for ChatAnthropic {
 
         let (mut messages, system_from_msgs) = Self::messages_to_anthropic(&request.messages);
 
-        // 注意：不需要注入占位 thinking block。
-        // Anthropic API 要求保留已有的 thinking blocks（含 signature），
-        // 但不要求凭空注入。伪造的 thinking block 无合法 signature 会导致验证失败。
-        // 之前轮次的 thinking blocks 会被 API 自动剥离，不影响上下文。
-        // 已有的 thinking blocks 通过 ContentBlock::Reasoning → json 序列化正确回传。
+        // Extended Thinking 模式下，为缺少 thinking 的 assistant 消息注入 redacted_thinking 占位。
+        // DeepSeek Anthropic 兼容端口要求所有 assistant 消息都包含 thinking block，
+        // 但中间件（如 SkillPreloadMiddleware）注入的伪 assistant 消息不含 thinking。
+        // Anthropic 原生 API 不要求凭空注入（已有 thinking 通过 Reasoning 序列化回传），
+        // 但兼容端口需要 redacted_thinking 占位以通过 API 验证。
+        if self.extended_thinking {
+            Self::ensure_thinking_blocks(&mut messages);
+        }
 
         // 合并 system blocks：消息列表中的 System（中间件注入）+ request.system
         let mut system_blocks = system_from_msgs;
@@ -1357,6 +1399,143 @@ mod tests {
         assert_eq!(content[0]["type"], "redacted_thinking");
         assert_eq!(content[0]["data"], "abc123");
         assert_eq!(content[1]["type"], "tool_use");
+    }
+
+    // ── ensure_thinking_blocks tests ──
+
+    #[test]
+    fn test_ensure_thinking_blocks_injects_for_missing() {
+        // 模拟 SkillPreloadMiddleware 注入的伪 assistant 消息（仅有 tool_use，无 thinking）
+        let mut messages = vec![
+            json!({"role": "user", "content": "do something"}),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call_1", "name": "Read", "input": {"path": "/tmp/skill.md"}}
+                ]
+            }),
+            json!({
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "skill content"}]
+            }),
+        ];
+
+        ChatAnthropic::ensure_thinking_blocks(&mut messages);
+
+        // assistant 消息（index 1）应被注入 thinking
+        let assistant = &messages[1];
+        let content = assistant["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "应有 2 个 blocks（thinking + tool_use）");
+        assert_eq!(content[0]["type"], "thinking", "第一个 block 应为 thinking");
+        assert_eq!(content[0]["thinking"], "", "占位 thinking 文本为空");
+        assert_eq!(content[1]["type"], "tool_use", "第二个 block 应为 tool_use");
+    }
+
+    #[test]
+    fn test_ensure_thinking_blocks_skips_when_thinking_present() {
+        let mut messages = vec![json!({
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "I'm thinking", "signature": "sig_123"},
+                {"type": "tool_use", "id": "call_1", "name": "Read", "input": {}}
+            ]
+        })];
+
+        ChatAnthropic::ensure_thinking_blocks(&mut messages);
+
+        let content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "已有 thinking，不应注入额外的占位 block");
+        assert_eq!(content[0]["type"], "thinking");
+    }
+
+    #[test]
+    fn test_ensure_thinking_blocks_skips_when_redacted_thinking_present() {
+        let mut messages = vec![json!({
+            "role": "assistant",
+            "content": [
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "text", "text": "done"}
+            ]
+        })];
+
+        ChatAnthropic::ensure_thinking_blocks(&mut messages);
+
+        let content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "已有 redacted_thinking，不应再注入");
+    }
+
+    #[test]
+    fn test_ensure_thinking_blocks_ignores_non_assistant() {
+        let mut messages = vec![
+            json!({"role": "user", "content": "hello"}),
+            json!({"role": "assistant", "content": [{"type": "text", "text": "no thinking"}]}),
+        ];
+
+        ChatAnthropic::ensure_thinking_blocks(&mut messages);
+
+        // user 消息不应被修改
+        assert_eq!(messages[0]["role"], "user");
+        assert!(
+            messages[0]["content"].is_string(),
+            "user content 应保持为字符串"
+        );
+
+        // assistant 消息应被注入 thinking
+        let content = messages[1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+    }
+
+    #[test]
+    fn test_ensure_thinking_blocks_string_content() {
+        // assistant 消息 content 为字符串（非数组）的情况
+        let mut messages = vec![json!({
+            "role": "assistant",
+            "content": "plain text response"
+        })];
+
+        ChatAnthropic::ensure_thinking_blocks(&mut messages);
+
+        let content = messages[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[1], "plain text response");
+    }
+
+    #[test]
+    fn test_ensure_thinking_blocks_mixed_messages() {
+        // 混合场景：有 thinking 的和没有 thinking 的 assistant 消息
+        let mut messages = vec![
+            json!({"role": "user", "content": "q1"}),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "thought", "signature": "sig"},
+                    {"type": "text", "text": "a1"}
+                ]
+            }),
+            json!({"role": "user", "content": "q2"}),
+            // 伪 assistant 消息（无 thinking）
+            json!({
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "c1", "name": "Read", "input": {}}]
+            }),
+            json!({
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "data"}]
+            }),
+        ];
+
+        ChatAnthropic::ensure_thinking_blocks(&mut messages);
+
+        // msg[1]: 已有 thinking，不应被修改
+        let content1 = messages[1]["content"].as_array().unwrap();
+        assert_eq!(content1.len(), 2, "已有 thinking 的消息不应增加 block");
+        assert_eq!(content1[0]["type"], "thinking");
+
+        // msg[3]: 无 thinking，应被注入
+        let content3 = messages[3]["content"].as_array().unwrap();
+        assert_eq!(content3.len(), 2, "应注入 thinking");
+        assert_eq!(content3[0]["type"], "thinking");
+        assert_eq!(content3[1]["type"], "tool_use");
     }
 
     /// 端到端验证：模拟 Anthropic API 响应 → parse_content_blocks → message 构造 → 序列化回传
