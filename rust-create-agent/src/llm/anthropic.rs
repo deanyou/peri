@@ -1007,14 +1007,22 @@ impl BaseModel for ChatAnthropic {
                 match event {
                     "message_start" => {
                         stream_request_id = parsed["message"]["id"].as_str().map(|s| s.to_string());
-                        let usage_obj = &parsed["message"]["usage"];
+                        // 先尝试标准路径 message.usage（Anthropic 规范），
+                        // 部分代理把 usage 放在顶层
+                        let usage_obj = if parsed["message"]["usage"].is_object() {
+                            &parsed["message"]["usage"]
+                        } else if parsed["usage"].is_object() {
+                            &parsed["usage"]
+                        } else {
+                            &serde_json::Value::Null
+                        };
                         input_tokens = usage_obj["input_tokens"].as_u64().unwrap_or(0) as u32;
                         cache_creation_input_tokens = usage_obj["cache_creation_input_tokens"]
                             .as_u64()
-                            .unwrap_or(0) as u32;
-                        cache_read_input_tokens = usage_obj["cache_read_input_tokens"]
-                            .as_u64()
-                            .unwrap_or(0) as u32;
+                            .unwrap_or(0)
+                            as u32;
+                        cache_read_input_tokens =
+                            usage_obj["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32;
                     }
                     "content_block_start" => {
                         let cb = &parsed["content_block"];
@@ -1107,9 +1115,35 @@ impl BaseModel for ChatAnthropic {
                             .to_string();
                         output_tokens =
                             parsed["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+                        // 部分代理不发送 message_start 事件，将 input_tokens 放在此处
+                        if input_tokens == 0 {
+                            input_tokens =
+                                parsed["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+                            cache_creation_input_tokens =
+                                parsed["usage"]["cache_creation_input_tokens"]
+                                    .as_u64()
+                                    .unwrap_or(0) as u32;
+                            cache_read_input_tokens = parsed["usage"]["cache_read_input_tokens"]
+                                .as_u64()
+                                .unwrap_or(0)
+                                as u32;
+                        }
                     }
                     "message_stop" => {
                         // stream naturally ends
+                        // 最后兜底：部分代理仅在 message_stop 返回 input_tokens
+                        if input_tokens == 0 {
+                            input_tokens =
+                                parsed["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+                            cache_creation_input_tokens =
+                                parsed["usage"]["cache_creation_input_tokens"]
+                                    .as_u64()
+                                    .unwrap_or(0) as u32;
+                            cache_read_input_tokens = parsed["usage"]["cache_read_input_tokens"]
+                                .as_u64()
+                                .unwrap_or(0)
+                                as u32;
+                        }
                     }
                     _ => {}
                 }

@@ -81,6 +81,7 @@ impl ReactLLM for BaseModelReactLLM {
             e
         })?;
 
+        let usage = response.usage.clone();
         tracing::debug!(
             provider = provider,
             model = %model_name,
@@ -88,6 +89,10 @@ impl ReactLLM for BaseModelReactLLM {
             msg_count,
             streamed,
             stop_reason = ?response.stop_reason,
+            input_tokens = usage.as_ref().map(|u| u.input_tokens),
+            output_tokens = usage.as_ref().map(|u| u.output_tokens),
+            cache_creation = usage.as_ref().and_then(|u| u.cache_creation_input_tokens),
+            cache_read = usage.as_ref().and_then(|u| u.cache_read_input_tokens),
             "generate_reasoning 完成"
         );
 
