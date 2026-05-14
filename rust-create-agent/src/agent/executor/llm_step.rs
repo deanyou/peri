@@ -1,9 +1,12 @@
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::events::AgentEvent;
 use crate::agent::react::{ReactLLM, Reasoning};
 use crate::agent::state::State;
 use crate::error::{AgentError, AgentResult};
+use crate::llm::types::StreamingContext;
+use crate::messages::MessageId;
 use crate::tools::BaseTool;
 
 use super::ReActAgent;
@@ -22,12 +25,20 @@ pub(crate) async fn call_llm<L: ReactLLM, S: State>(
         messages: state.messages().to_vec(),
         tools: tool_refs.iter().map(|t| t.definition()).collect(),
     });
+
+    // 构建 StreamingContext：若 agent 有 event_handler 则启用流式
+    let message_id = MessageId::new();
+    let streaming = agent.event_handler.as_ref().map(|h| StreamingContext {
+        event_handler: Arc::clone(h),
+        message_id,
+    });
+
     let reasoning = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
             return Err(AgentError::Interrupted);
         }
-        result = agent.llm.generate_reasoning(state.messages(), tool_refs) => {
+        result = agent.llm.generate_reasoning(state.messages(), tool_refs, streaming) => {
             match result {
                 Ok(r) => r,
                 Err(e) => {

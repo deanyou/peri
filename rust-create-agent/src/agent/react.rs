@@ -131,6 +131,8 @@ pub struct Reasoning {
     pub usage: Option<crate::llm::types::TokenUsage>,
     /// 生成此推理的模型名称
     pub model: String,
+    /// 标记是否已通过事件流式发射过文本（由流式 LLM 适配器设为 true）
+    pub streamed: bool,
 }
 
 impl Reasoning {
@@ -142,6 +144,7 @@ impl Reasoning {
             source_message: None,
             usage: None,
             model: String::new(),
+            streamed: false,
         }
     }
 
@@ -153,6 +156,7 @@ impl Reasoning {
             source_message: None,
             usage: None,
             model: String::new(),
+            streamed: false,
         }
     }
 
@@ -168,6 +172,7 @@ pub trait ReactLLM: Send + Sync {
         &self,
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
+        streaming: Option<crate::llm::types::StreamingContext>,
     ) -> crate::error::AgentResult<Reasoning>;
 
     /// 返回当前模型名称（用于 Langfuse Generation 追踪）
@@ -188,8 +193,11 @@ impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
         &self,
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
+        streaming: Option<crate::llm::types::StreamingContext>,
     ) -> crate::error::AgentResult<Reasoning> {
-        (**self).generate_reasoning(messages, tools).await
+        (**self)
+            .generate_reasoning(messages, tools, streaming)
+            .await
     }
 
     fn model_name(&self) -> String {

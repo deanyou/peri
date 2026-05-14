@@ -11,6 +11,7 @@ impl ReactLLM for EchoLLM {
         &self,
         messages: &[BaseMessage],
         _tools: &[&dyn BaseTool],
+        _streaming: Option<rust_create_agent::llm::types::StreamingContext>,
     ) -> rust_create_agent::error::AgentResult<Reasoning> {
         let last = messages.last().map(|m| m.content()).unwrap_or_default();
         Ok(Reasoning::with_answer("", format!("echo: {}", last)))
@@ -448,6 +449,7 @@ async fn test_system_builder_injects_system_message() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<rust_create_agent::llm::types::StreamingContext>,
         ) -> rust_create_agent::error::AgentResult<Reasoning> {
             // Find system message and return its content
             let system_content = messages
@@ -517,6 +519,7 @@ async fn test_skill_preload_registered() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<rust_create_agent::llm::types::StreamingContext>,
         ) -> rust_create_agent::error::AgentResult<Reasoning> {
             let found = messages.iter().any(|m| m.content().contains("Test Skill"));
             Ok(Reasoning::with_answer(
@@ -630,6 +633,7 @@ async fn test_cancel_token_interrupts_subagent() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<rust_create_agent::llm::types::StreamingContext>,
         ) -> rust_create_agent::error::AgentResult<Reasoning> {
             if messages
                 .iter()
@@ -703,6 +707,7 @@ impl ReactLLM for CaptureLLM {
         &self,
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
+        _streaming: Option<rust_create_agent::llm::types::StreamingContext>,
     ) -> rust_create_agent::error::AgentResult<Reasoning> {
         *self.messages.lock().unwrap() = vec![messages.len()];
         *self.tools.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
@@ -731,6 +736,7 @@ async fn test_fork_inherits_parent_messages() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<rust_create_agent::llm::types::StreamingContext>,
         ) -> rust_create_agent::error::AgentResult<Reasoning> {
             *self.msg_count.lock().unwrap() = messages.len();
             Ok(Reasoning::with_answer("", "fork-done"))
@@ -789,6 +795,7 @@ async fn test_fork_registers_all_tools_including_agent() {
             &self,
             _messages: &[BaseMessage],
             tools: &[&dyn BaseTool],
+            _streaming: Option<rust_create_agent::llm::types::StreamingContext>,
         ) -> rust_create_agent::error::AgentResult<Reasoning> {
             *self.captured.lock().unwrap() = tools.iter().map(|t| t.name().to_string()).collect();
             Ok(Reasoning::with_answer("", "tools-check"))
@@ -866,6 +873,7 @@ async fn test_fork_system_prompt_consistent() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<rust_create_agent::llm::types::StreamingContext>,
         ) -> rust_create_agent::error::AgentResult<Reasoning> {
             let sys = messages
                 .iter()
@@ -923,6 +931,7 @@ async fn test_fork_directive_includes_rules() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<rust_create_agent::llm::types::StreamingContext>,
         ) -> rust_create_agent::error::AgentResult<Reasoning> {
             let last = messages.last().map(|m| m.content()).unwrap_or_default();
             *self.last.lock().unwrap() = last;

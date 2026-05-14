@@ -2,9 +2,20 @@ use crate::agent::events::AgentEvent;
 use crate::agent::react::{AgentOutput, ReactLLM, Reasoning, ToolCall, ToolResult};
 use crate::agent::state::State;
 use crate::error::AgentResult;
+use crate::messages::message::MessageId;
 use crate::messages::BaseMessage;
 
 use super::ReActAgent;
+
+/// 在消息列表中查找给定 ID 消息的索引，返回其后一个位置（即下一条新消息的起始位置）。
+/// 如果未找到（不应发生），fallback 到 0。
+pub(super) fn index_after_id(messages: &[BaseMessage], anchor: MessageId) -> usize {
+    messages
+        .iter()
+        .position(|m| m.id() == anchor)
+        .map(|i| i + 1)
+        .unwrap_or(0)
+}
 
 /// 消费后台任务完成通知，注入到 state 中供 LLM 下一轮迭代可见。
 ///
@@ -38,18 +49,16 @@ async fn drain_notifications<L: ReactLLM, S: State>(agent: &ReActAgent<L, S>, st
     }
 }
 
-/// 工具调用步骤后：发出 StateSnapshot + 消费后台通知 + 更新 last_message_count
+/// 工具调用步骤后：发出 StateSnapshot + 消费后台通知 + 更新快照锚点
 pub(crate) async fn emit_snapshot_and_drain_notifications<L: ReactLLM, S: State>(
     agent: &ReActAgent<L, S>,
     state: &mut S,
-    last_message_count: &mut usize,
+    snapshot_anchor: &mut MessageId,
 ) {
-    // 发送状态快照（从用户消息开始的所有消息），便于增量持久化
-    // 过滤 System 消息：prepend_message 的 insert(0) 会右移所有元素，
-    // 导致 messages[last_message_count..] 包含被右移到该范围内的 System 消息。
-    // System 消息不应泄露到 agent_state_messages，否则下一轮执行时
-    // OpenAI adapter 会将新旧 System 消息合并导致重复，破坏 prompt cache。
-    let msgs_since_human: Vec<BaseMessage> = state.messages()[*last_message_count..]
+    // 使用 MessageId 锚点截取本轮新增消息，不受 prepend_message 的 insert(0) 影响。
+    // .filter(!is_system()) 保留作为防御层。
+    let start = index_after_id(state.messages(), *snapshot_anchor);
+    let msgs_since_human: Vec<BaseMessage> = state.messages()[start..]
         .iter()
         .filter(|m| !m.is_system())
         .cloned()
@@ -60,7 +69,7 @@ pub(crate) async fn emit_snapshot_and_drain_notifications<L: ReactLLM, S: State>
 
     drain_notifications(agent, state).await;
 
-    *last_message_count = state.messages().len();
+    *snapshot_anchor = state.messages().last().expect("messages non-empty").id();
 }
 
 /// 处理最终回答路径，返回 AgentOutput
@@ -69,7 +78,7 @@ pub(crate) async fn handle_final_answer<L: ReactLLM, S: State>(
     state: &mut S,
     reasoning: &Reasoning,
     all_tool_calls: Vec<(ToolCall, ToolResult)>,
-    last_message_count: &mut usize,
+    snapshot_anchor: &mut MessageId,
     step: usize,
 ) -> AgentResult<AgentOutput> {
     let answer = reasoning
@@ -94,31 +103,35 @@ pub(crate) async fn handle_final_answer<L: ReactLLM, S: State>(
     state.add_message(ai_msg);
     agent.emit(AgentEvent::MessageAdded(ai_msg_clone));
 
-    agent.emit(AgentEvent::TextChunk {
-        message_id: ai_msg_id,
-        chunk: answer.clone(),
-    });
+    if !reasoning.streamed {
+        agent.emit(AgentEvent::TextChunk {
+            message_id: ai_msg_id,
+            chunk: answer.clone(),
+        });
+    }
 
-    let msgs_since_last: Vec<BaseMessage> = state.messages()[*last_message_count..]
+    let start = index_after_id(state.messages(), *snapshot_anchor);
+    let msgs_since_last: Vec<BaseMessage> = state.messages()[start..]
         .iter()
         .filter(|m| !m.is_system())
         .cloned()
         .collect();
     if !msgs_since_last.is_empty() {
         agent.emit(AgentEvent::StateSnapshot(msgs_since_last));
-        *last_message_count = state.messages().len();
+        *snapshot_anchor = state.messages().last().expect("messages non-empty").id();
     }
 
     drain_notifications(agent, state).await;
 
-    let msgs_after_drain: Vec<BaseMessage> = state.messages()[*last_message_count..]
+    let start = index_after_id(state.messages(), *snapshot_anchor);
+    let msgs_after_drain: Vec<BaseMessage> = state.messages()[start..]
         .iter()
         .filter(|m| !m.is_system())
         .cloned()
         .collect();
     if !msgs_after_drain.is_empty() {
         agent.emit(AgentEvent::StateSnapshot(msgs_after_drain));
-        *last_message_count = state.messages().len();
+        *snapshot_anchor = state.messages().last().expect("messages non-empty").id();
     }
 
     let output = AgentOutput {
@@ -136,7 +149,8 @@ pub(crate) async fn handle_final_answer<L: ReactLLM, S: State>(
 
     match agent.chain.run_after_agent(state, output).await {
         Ok(o) => {
-            let msgs_after: Vec<BaseMessage> = state.messages()[*last_message_count..]
+            let start = index_after_id(state.messages(), *snapshot_anchor);
+            let msgs_after: Vec<BaseMessage> = state.messages()[start..]
                 .iter()
                 .filter(|m| !m.is_system())
                 .cloned()

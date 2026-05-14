@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use super::BaseModel;
 use crate::agent::react::{ReactLLM, Reasoning, ToolCall};
 use crate::error::AgentResult;
-use crate::llm::types::{LlmRequest, StopReason};
+use crate::llm::types::{LlmRequest, StopReason, StreamingContext};
 use crate::messages::{BaseMessage, ContentBlock};
 use crate::tools::BaseTool;
 
@@ -41,6 +41,7 @@ impl ReactLLM for BaseModelReactLLM {
         &self,
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
+        streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
         let tool_defs = tools.iter().map(|t| t.definition()).collect();
 
@@ -60,13 +61,20 @@ impl ReactLLM for BaseModelReactLLM {
         let tool_count = tools.len();
         let start = std::time::Instant::now();
 
-        let response = self.model.invoke(request).await.map_err(|e| {
+        let streamed = streaming.is_some();
+        let response = if let Some(ctx) = streaming {
+            self.model.invoke_streaming(request, ctx).await
+        } else {
+            self.model.invoke(request).await
+        }
+        .map_err(|e| {
             tracing::error!(
                 provider = provider,
                 model = %model_name,
                 elapsed_ms = start.elapsed().as_millis() as u64,
                 msg_count,
                 tool_count,
+                streamed,
                 error = %e,
                 "generate_reasoning 失败"
             );
@@ -78,6 +86,7 @@ impl ReactLLM for BaseModelReactLLM {
             model = %model_name,
             elapsed_ms = start.elapsed().as_millis() as u64,
             msg_count,
+            streamed,
             stop_reason = ?response.stop_reason,
             "generate_reasoning 完成"
         );
@@ -109,6 +118,7 @@ impl ReactLLM for BaseModelReactLLM {
                 r.source_message = Some(response.message);
                 r.usage = usage;
                 r.model = model_name;
+                r.streamed = streamed;
                 return Ok(r);
             }
 
@@ -130,12 +140,14 @@ impl ReactLLM for BaseModelReactLLM {
                 r.source_message = Some(response.message);
                 r.usage = usage;
                 r.model = model_name;
+                r.streamed = streamed;
                 return Ok(r);
             }
             let mut r = Reasoning::with_tools(thought, calls);
             r.source_message = Some(response.message);
             r.usage = usage;
             r.model = model_name;
+            r.streamed = streamed;
             Ok(r)
         } else {
             // 最终答案：text_content() 提取所有文字（跳过 reasoning block）
@@ -148,6 +160,7 @@ impl ReactLLM for BaseModelReactLLM {
             r.source_message = Some(response.message);
             r.usage = usage;
             r.model = model_name;
+            r.streamed = streamed;
             Ok(r)
         }
     }

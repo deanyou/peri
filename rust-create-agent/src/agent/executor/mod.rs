@@ -12,6 +12,7 @@ use crate::agent::events::{AgentEvent, AgentEventHandler, BackgroundTaskResult};
 use crate::agent::react::{AgentInput, AgentOutput, ReactLLM, ToolCall, ToolResult};
 use crate::agent::state::State;
 use crate::error::{AgentError, AgentResult};
+use crate::messages::message::MessageId;
 use crate::messages::BaseMessage;
 use crate::middleware::chain::MiddlewareChain;
 use crate::middleware::r#trait::Middleware;
@@ -179,11 +180,9 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
         let cancel = cancel.unwrap_or_default();
 
         let human_msg = BaseMessage::human(input.content);
+        let mut snapshot_anchor: MessageId = human_msg.id();
         state.add_message(human_msg.clone());
         self.emit(AgentEvent::MessageAdded(human_msg));
-
-        // 消息计数：从用户消息之后开始跟踪（局部变量，避免并发 execute 时的竞态）
-        let mut last_message_count: usize = state.messages().len();
 
         // 从中间件收集工具，手动注册的同名工具优先级最高
         let middleware_tools = self.chain.collect_tools(state.cwd());
@@ -260,7 +259,7 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
                 self::final_answer::emit_snapshot_and_drain_notifications(
                     self,
                     state,
-                    &mut last_message_count,
+                    &mut snapshot_anchor,
                 )
                 .await;
 
@@ -273,7 +272,7 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
                     state,
                     &reasoning,
                     all_tool_calls,
-                    &mut last_message_count,
+                    &mut snapshot_anchor,
                     step,
                 )
                 .await?;
@@ -286,7 +285,8 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
         // 注意：call_llm/dispatch_tools 的 ? 传播会跳过此处，但这些路径中
         // call_llm 不向 state 添加消息，dispatch_tools 的 Interrupted 路径
         // 产生的工具结果会被 TUI 的 Interrupted handler 截断丢弃，无需额外快照。
-        let safety_msgs: Vec<BaseMessage> = state.messages()[last_message_count..]
+        let safety_start = self::final_answer::index_after_id(state.messages(), snapshot_anchor);
+        let safety_msgs: Vec<BaseMessage> = state.messages()[safety_start..]
             .iter()
             .filter(|m| !m.is_system())
             .cloned()

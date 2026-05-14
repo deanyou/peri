@@ -48,6 +48,7 @@ impl ReactLLM for MockLLM {
         &self,
         _messages: &[BaseMessage],
         _tools: &[&dyn BaseTool],
+        _streaming: Option<crate::llm::types::StreamingContext>,
     ) -> AgentResult<Reasoning> {
         let idx = self.index.fetch_add(1, Ordering::Relaxed);
         let reasoning = self
@@ -68,7 +69,7 @@ mod tests {
     #[tokio::test]
     async fn test_mockllm_empty_script_returns_default() {
         let mock = MockLLM::new(vec![]);
-        let r = mock.generate_reasoning(&[], &[]).await.unwrap();
+        let r = mock.generate_reasoning(&[], &[], None).await.unwrap();
         assert!(r.final_answer.is_some(), "空脚本应返回最终答案");
         assert_eq!(r.final_answer.unwrap(), "Done");
         assert!(r.tool_calls.is_empty());
@@ -82,11 +83,11 @@ mod tests {
             Reasoning::with_answer("step1", "second"),
         ]);
 
-        let r0 = mock.generate_reasoning(&[], &[]).await.unwrap();
-        let r1 = mock.generate_reasoning(&[], &[]).await.unwrap();
+        let r0 = mock.generate_reasoning(&[], &[], None).await.unwrap();
+        let r1 = mock.generate_reasoning(&[], &[], None).await.unwrap();
         // 超出脚本长度，应粘在最后一项 "second"
-        let r2 = mock.generate_reasoning(&[], &[]).await.unwrap();
-        let r3 = mock.generate_reasoning(&[], &[]).await.unwrap();
+        let r2 = mock.generate_reasoning(&[], &[], None).await.unwrap();
+        let r3 = mock.generate_reasoning(&[], &[], None).await.unwrap();
 
         assert_eq!(r0.final_answer.as_deref(), Some("first"));
         assert_eq!(r1.final_answer.as_deref(), Some("second"));
@@ -111,9 +112,9 @@ mod tests {
             Reasoning::with_answer("t2", "two"),
         ]);
 
-        let r0 = mock.generate_reasoning(&[], &[]).await.unwrap();
-        let r1 = mock.generate_reasoning(&[], &[]).await.unwrap();
-        let r2 = mock.generate_reasoning(&[], &[]).await.unwrap();
+        let r0 = mock.generate_reasoning(&[], &[], None).await.unwrap();
+        let r1 = mock.generate_reasoning(&[], &[], None).await.unwrap();
+        let r2 = mock.generate_reasoning(&[], &[], None).await.unwrap();
 
         assert_eq!(r0.final_answer.as_deref(), Some("zero"));
         assert_eq!(r1.final_answer.as_deref(), Some("one"));
@@ -125,8 +126,8 @@ mod tests {
     async fn test_mockllm_always_answer_factory() {
         let mock = MockLLM::always_answer("fixed answer");
 
-        let r0 = mock.generate_reasoning(&[], &[]).await.unwrap();
-        let r1 = mock.generate_reasoning(&[], &[]).await.unwrap(); // 超出，粘在唯一项
+        let r0 = mock.generate_reasoning(&[], &[], None).await.unwrap();
+        let r1 = mock.generate_reasoning(&[], &[], None).await.unwrap(); // 超出，粘在唯一项
 
         assert_eq!(r0.final_answer.as_deref(), Some("fixed answer"));
         assert_eq!(
@@ -142,8 +143,8 @@ mod tests {
     async fn test_mockllm_tool_then_answer_factory() {
         let mock = MockLLM::tool_then_answer("my_tool", serde_json::json!({"key": "val"}), "final");
 
-        let r0 = mock.generate_reasoning(&[], &[]).await.unwrap();
-        let r1 = mock.generate_reasoning(&[], &[]).await.unwrap();
+        let r0 = mock.generate_reasoning(&[], &[], None).await.unwrap();
+        let r1 = mock.generate_reasoning(&[], &[], None).await.unwrap();
 
         // 第一步：工具调用，无最终答案
         assert_eq!(r0.tool_calls.len(), 1);
@@ -161,8 +162,8 @@ mod tests {
         let call = ToolCall::new("id1", "echo", serde_json::json!({}));
         let mock = MockLLM::new(vec![Reasoning::with_tools("thinking", vec![call])]);
 
-        let r0 = mock.generate_reasoning(&[], &[]).await.unwrap();
-        let r1 = mock.generate_reasoning(&[], &[]).await.unwrap(); // 超出，粘在第一项
+        let r0 = mock.generate_reasoning(&[], &[], None).await.unwrap();
+        let r1 = mock.generate_reasoning(&[], &[], None).await.unwrap(); // 超出，粘在第一项
 
         assert_eq!(r0.tool_calls.len(), 1);
         assert_eq!(r0.tool_calls[0].name, "echo");

@@ -15,6 +15,7 @@ impl ReactLLM for TwoToolCallLLM {
         &self,
         messages: &[BaseMessage],
         _tools: &[&dyn BaseTool],
+        _streaming: Option<crate::llm::types::StreamingContext>,
     ) -> crate::error::AgentResult<Reasoning> {
         let has_tool_result = messages
             .iter()
@@ -119,6 +120,7 @@ async fn test_cancel_during_tool_execution() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             let has_tool = messages
                 .iter()
@@ -187,6 +189,7 @@ async fn test_tool_rejection_continues_loop() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> AgentResult<Reasoning> {
             let has_tool_result = messages
                 .iter()
@@ -240,6 +243,7 @@ async fn test_text_chunk_message_id() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             Ok(Reasoning::with_answer("thinking", "final answer"))
         }
@@ -306,6 +310,7 @@ async fn test_tool_message_id() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             if messages
                 .iter()
@@ -414,6 +419,7 @@ async fn test_system_prompt_is_first() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             Ok(Reasoning::with_answer("", "done"))
         }
@@ -467,6 +473,7 @@ async fn test_system_prompt_order_independent() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             Ok(Reasoning::with_answer("", "done"))
         }
@@ -550,6 +557,7 @@ async fn test_state_snapshot_on_final_answer() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             Ok(Reasoning::with_answer("thinking", "final answer"))
         }
@@ -615,6 +623,7 @@ async fn test_max_iterations_exceeded() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             Ok(Reasoning::with_tools(
                 "loop",
@@ -670,6 +679,7 @@ async fn test_batch_before_tools_execution() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             if messages
                 .iter()
@@ -751,6 +761,7 @@ async fn test_context_budget_wiring() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             let mut r = Reasoning::with_answer("", "ok");
             r.usage = Some(crate::llm::types::TokenUsage {
@@ -794,6 +805,7 @@ async fn test_no_context_budget_fallback() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             let mut r = Reasoning::with_answer("", "ok");
             r.usage = Some(crate::llm::types::TokenUsage {
@@ -832,6 +844,7 @@ async fn test_context_budget_emits_warning_event() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             let mut r = Reasoning::with_answer("", "ok");
             r.usage = Some(crate::llm::types::TokenUsage {
@@ -898,6 +911,7 @@ async fn test_fallback_path_emits_warning_event() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             let mut r = Reasoning::with_answer("", "ok");
             // context_window 默认 200K，input=170K → 170K/200K = 85% > 80% 硬编码阈值
@@ -962,6 +976,7 @@ async fn test_low_usage_no_warning_event() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             let mut r = Reasoning::with_answer("", "ok");
             r.usage = Some(crate::llm::types::TokenUsage {
@@ -1014,6 +1029,7 @@ async fn test_state_snapshot_no_overlap() {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             let has_tool_result = messages
                 .iter()
@@ -1114,6 +1130,7 @@ async fn test_state_snapshot_excludes_system_messages() {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> crate::error::AgentResult<Reasoning> {
             Ok(Reasoning::with_answer("done", "final answer"))
         }

@@ -90,10 +90,21 @@ impl<L: ReactLLM> ReactLLM for RetryableLLM<L> {
         &self,
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
+        streaming: Option<crate::llm::types::StreamingContext>,
     ) -> AgentResult<Reasoning> {
         // 重试循环：attempt 0..max_retries，每次失败若可重试则延迟后继续
         for attempt in 0..self.config.max_retries {
-            match self.inner.generate_reasoning(messages, tools).await {
+            // 仅首次尝试透传 streaming，重试时传 None 防止同一 message_id 双重发射
+            let retry_streaming = if attempt == 0 {
+                streaming.clone()
+            } else {
+                None
+            };
+            match self
+                .inner
+                .generate_reasoning(messages, tools, retry_streaming)
+                .await
+            {
                 Ok(r) => return Ok(r),
                 Err(e) if e.is_retryable() => {
                     let delay = self.config.exponential_delay(attempt);
@@ -115,8 +126,8 @@ impl<L: ReactLLM> ReactLLM for RetryableLLM<L> {
                 Err(e) => return Err(e),
             }
         }
-        // 最终尝试（不重试），直接返回结果或错误
-        self.inner.generate_reasoning(messages, tools).await
+        // 最终尝试（不重试），直接返回结果或错误（重试已耗尽，传 None 避免双重发射）
+        self.inner.generate_reasoning(messages, tools, None).await
     }
 
     fn model_name(&self) -> String {
@@ -160,6 +171,7 @@ mod tests {
             &self,
             _messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
         ) -> AgentResult<Reasoning> {
             let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
             if idx < self.results.len() {
@@ -213,7 +225,7 @@ mod tests {
     async fn test_retry_then_success() {
         let mock = MockLLM::new(vec![http_error(503), http_error(503), ok_reasoning()]);
         let retry = RetryableLLM::new(mock, RetryConfig::default().with_base_delay_ms(1));
-        let result = retry.generate_reasoning(&[], &[]).await;
+        let result = retry.generate_reasoning(&[], &[], None).await;
         assert!(result.is_ok());
     }
 
@@ -222,7 +234,7 @@ mod tests {
     async fn test_non_retryable_immediate_return() {
         let mock = MockLLM::new(vec![http_error(400)]);
         let retry = RetryableLLM::new(mock, RetryConfig::default().with_base_delay_ms(1));
-        let result = retry.generate_reasoning(&[], &[]).await;
+        let result = retry.generate_reasoning(&[], &[], None).await;
         assert!(result.is_err());
         if let Err(AgentError::LlmHttpError { status, .. }) = result {
             assert_eq!(status, 400);
@@ -239,7 +251,7 @@ mod tests {
             .with_max_retries(2)
             .with_base_delay_ms(1);
         let retry = RetryableLLM::new(mock, config);
-        let result = retry.generate_reasoning(&[], &[]).await;
+        let result = retry.generate_reasoning(&[], &[], None).await;
         assert!(result.is_err());
         if let Err(AgentError::LlmHttpError { status, .. }) = result {
             assert_eq!(status, 429);
@@ -253,7 +265,7 @@ mod tests {
     async fn test_network_error_retryable() {
         let mock = MockLLM::new(vec![network_error("connection refused"), ok_reasoning()]);
         let retry = RetryableLLM::new(mock, RetryConfig::default().with_base_delay_ms(1));
-        let result = retry.generate_reasoning(&[], &[]).await;
+        let result = retry.generate_reasoning(&[], &[], None).await;
         assert!(result.is_ok());
     }
 
@@ -288,7 +300,7 @@ mod tests {
             .with_max_retries(2)
             .with_base_delay_ms(1);
         let retry = RetryableLLM::new(mock, config);
-        let result = retry.generate_reasoning(&[], &[]).await;
+        let result = retry.generate_reasoning(&[], &[], None).await;
         assert!(result.is_err());
         // 重试 2 次（attempt 0,1）+ 最终尝试（返回错误）= 共 3 次调用
         // 脚本只有 3 个错误，恰好覆盖
@@ -305,7 +317,7 @@ mod tests {
         let mock = MockLLM::new(vec![ok_reasoning()]);
         let config = RetryConfig::default().with_max_retries(0);
         let retry = RetryableLLM::new(mock, config);
-        let result = retry.generate_reasoning(&[], &[]).await;
+        let result = retry.generate_reasoning(&[], &[], None).await;
         assert!(result.is_ok(), "max_retries=0 时应直接返回结果");
     }
 }

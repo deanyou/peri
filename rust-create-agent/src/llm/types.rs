@@ -80,6 +80,27 @@ pub enum StopReason {
     Other(String),
 }
 
+use crate::agent::events::AgentEventHandler;
+use crate::messages::MessageId;
+use std::sync::Arc;
+
+/// 流式输出上下文，由 Executor 注入到 LLM 适配器。
+/// LLM 适配器在 SSE 解析过程中通过 event_handler 发射增量事件。
+pub struct StreamingContext {
+    pub event_handler: Arc<dyn AgentEventHandler>,
+    /// 预生成的 AI 消息 ID，所有增量 TextChunk 关联到此 ID
+    pub message_id: MessageId,
+}
+
+impl Clone for StreamingContext {
+    fn clone(&self) -> Self {
+        Self {
+            event_handler: Arc::clone(&self.event_handler),
+            message_id: self.message_id,
+        }
+    }
+}
+
 impl StopReason {
     pub fn from_openai(s: &str) -> Self {
         match s {

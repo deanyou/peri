@@ -1,10 +1,13 @@
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::{json, Value};
 
 use super::BaseModel;
+use crate::agent::events::AgentEvent;
 use crate::agent::react::{ReactLLM, Reasoning, ToolCall};
 use crate::error::{AgentError, AgentResult};
-use crate::llm::types::{LlmRequest, LlmResponse, StopReason};
+use crate::llm::sse::SseParser;
+use crate::llm::types::{LlmRequest, LlmResponse, StopReason, StreamingContext};
 use crate::messages::{BaseMessage, ContentBlock, ImageSource, MessageContent, ToolCallRequest};
 use crate::tools::BaseTool;
 
@@ -828,6 +831,331 @@ impl BaseModel for ChatAnthropic {
     fn context_window(&self) -> u32 {
         200_000
     }
+
+    async fn invoke_streaming(
+        &self,
+        request: LlmRequest,
+        ctx: StreamingContext,
+    ) -> AgentResult<LlmResponse> {
+        let msg_count = request.messages.len();
+        let start = std::time::Instant::now();
+
+        let chat_url = match &self.base_url {
+            Some(base) => format!("{}/v1/messages", base.trim_end_matches('/')),
+            None => "https://api.anthropic.com/v1/messages".to_string(),
+        };
+
+        let tools_json: Vec<Value> = request
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters
+                })
+            })
+            .collect();
+
+        let (mut messages, system_from_msgs) = Self::messages_to_anthropic(&request.messages);
+
+        if self.extended_thinking {
+            Self::ensure_thinking_blocks(&mut messages);
+        }
+
+        let mut system_blocks = system_from_msgs;
+        if let Some(ref base) = request.system {
+            if !base.is_empty() {
+                system_blocks.push(SystemPromptBlock {
+                    text: base.clone(),
+                    cache_control: false,
+                });
+            }
+        }
+        let max_tokens = request.max_tokens.unwrap_or(4096);
+
+        if self.enable_cache {
+            Self::apply_cache_to_messages(&mut messages);
+        }
+
+        let mut body = json!({
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+            "stream": true
+        });
+
+        if self.enable_cache {
+            if !system_blocks.is_empty() {
+                let last_idx = system_blocks.len() - 1;
+                let blocks_json: Vec<Value> = system_blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        let mut block = json!({"type": "text", "text": &b.text});
+                        if b.cache_control || i == last_idx {
+                            block["cache_control"] = json!({"type": "ephemeral"});
+                        }
+                        block
+                    })
+                    .collect();
+                body["system"] = Value::Array(blocks_json);
+            }
+        } else if !system_blocks.is_empty() {
+            let text = system_blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+                .replace(SYSTEM_PROMPT_DYNAMIC_BOUNDARY, "");
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                body["system"] = json!(trimmed);
+            }
+        }
+
+        if !tools_json.is_empty() {
+            body["tools"] = Value::Array(tools_json);
+        }
+
+        if let Some(temperature) = request.temperature {
+            body["temperature"] = json!(temperature);
+        }
+
+        if self.extended_thinking {
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": self.thinking_budget
+            });
+            body["output_config"] = json!({ "effort": self.thinking_effort });
+        }
+
+        let mut req = self
+            .client
+            .post(chat_url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json");
+
+        if self.enable_cache {
+            req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
+        }
+
+        if let Some(ref sid) = request.session_id {
+            req = req.header("x-session-id", sid.as_str());
+        }
+
+        let resp = req.json(&body).send().await.map_err(|e| {
+            tracing::error!(
+                provider = "anthropic", model = %self.model,
+                elapsed_ms = start.elapsed().as_millis() as u64, error = %e,
+                "LLM 流式网络请求失败"
+            );
+            AgentError::LlmError(e.to_string())
+        })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let resp_text = resp.text().await.unwrap_or_default();
+            let error_msg = serde_json::from_str::<Value>(&resp_text)
+                .ok()
+                .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "未知错误".to_string());
+            tracing::error!(
+                provider = "anthropic", model = %self.model, status = %status,
+                error_message = %error_msg,
+                elapsed_ms = start.elapsed().as_millis() as u64, msg_count,
+                "LLM 流式 API 错误"
+            );
+            return Err(AgentError::LlmHttpError {
+                status: status.as_u16(),
+                message: format!("API 错误 {status}: {error_msg}"),
+            });
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut parser = SseParser::new();
+
+        // Accumulators
+        let mut text_content = String::new();
+        let mut reasoning_content = String::new();
+        let mut thinking_signature: Option<String> = None;
+        let mut tool_use_id: Option<String> = None;
+        let mut tool_use_name: Option<String> = None;
+        let mut tool_input_fragments: String = String::new();
+        let mut accumulated_blocks: Vec<Value> = Vec::new(); // for final parse
+        let mut current_block_type: Option<String> = None;
+
+        let mut input_tokens: u32 = 0;
+        let mut output_tokens: u32 = 0;
+        let mut stop_reason_str: String = "end_turn".to_string();
+        let mut stream_request_id: Option<String> = None;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk =
+                chunk_result.map_err(|e| AgentError::LlmError(format!("流式读取失败: {e}")))?;
+
+            for (event_type, data) in parser.push(&chunk) {
+                let event = event_type.as_deref().unwrap_or("");
+                let parsed: Value = match serde_json::from_str(&data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                match event {
+                    "message_start" => {
+                        stream_request_id = parsed["message"]["id"].as_str().map(|s| s.to_string());
+                        input_tokens = parsed["message"]["usage"]["input_tokens"]
+                            .as_u64()
+                            .unwrap_or(0) as u32;
+                    }
+                    "content_block_start" => {
+                        let cb = &parsed["content_block"];
+                        let cb_type = cb["type"].as_str().unwrap_or("");
+                        current_block_type = Some(cb_type.to_string());
+
+                        match cb_type {
+                            "thinking" => {
+                                // Signature is in content_block_start (NOT content_block_stop)
+                                if let Some(sig) = cb["signature"].as_str() {
+                                    thinking_signature = Some(sig.to_string());
+                                }
+                            }
+                            "tool_use" => {
+                                tool_use_id = cb["id"].as_str().map(|s| s.to_string());
+                                tool_use_name = cb["name"].as_str().map(|s| s.to_string());
+                                tool_input_fragments.clear();
+                            }
+                            _ => {}
+                        }
+                    }
+                    "content_block_delta" => {
+                        let delta = &parsed["delta"];
+                        match delta["type"].as_str().unwrap_or("") {
+                            "thinking_delta" => {
+                                if let Some(t) = delta["thinking"].as_str() {
+                                    if !t.is_empty() {
+                                        ctx.event_handler
+                                            .on_event(AgentEvent::AiReasoning(t.to_string()));
+                                        reasoning_content.push_str(t);
+                                    }
+                                }
+                            }
+                            "text_delta" => {
+                                if let Some(t) = delta["text"].as_str() {
+                                    if !t.is_empty() {
+                                        ctx.event_handler.on_event(AgentEvent::TextChunk {
+                                            message_id: ctx.message_id,
+                                            chunk: t.to_string(),
+                                        });
+                                        text_content.push_str(t);
+                                    }
+                                }
+                            }
+                            "input_json_delta" => {
+                                if let Some(json_part) = delta["partial_json"].as_str() {
+                                    tool_input_fragments.push_str(json_part);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    "content_block_stop" => {
+                        // Finalize current block
+                        match current_block_type.as_deref() {
+                            Some("thinking") => {
+                                let mut block = json!({
+                                    "type": "thinking",
+                                    "thinking": &reasoning_content
+                                });
+                                if let Some(ref sig) = thinking_signature {
+                                    block["signature"] = json!(sig);
+                                }
+                                accumulated_blocks.push(block);
+                            }
+                            Some("text") => {
+                                accumulated_blocks.push(json!({
+                                    "type": "text",
+                                    "text": &text_content
+                                }));
+                            }
+                            Some("tool_use") => {
+                                let input: Value = serde_json::from_str(&tool_input_fragments)
+                                    .unwrap_or(Value::Null);
+                                accumulated_blocks.push(json!({
+                                    "type": "tool_use",
+                                    "id": tool_use_id,
+                                    "name": tool_use_name,
+                                    "input": input
+                                }));
+                            }
+                            _ => {}
+                        }
+                        current_block_type = None;
+                    }
+                    "message_delta" => {
+                        stop_reason_str = parsed["delta"]["stop_reason"]
+                            .as_str()
+                            .unwrap_or("end_turn")
+                            .to_string();
+                        output_tokens =
+                            parsed["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+                    }
+                    "message_stop" => {
+                        // stream naturally ends
+                    }
+                    _ => {}
+                }
+            }
+
+            if parser.is_done() {
+                break;
+            }
+        }
+
+        // Build final response using existing parse_content_blocks
+        let stop_reason = StopReason::from_anthropic(&stop_reason_str);
+
+        let (blocks, tool_calls) = Self::parse_content_blocks(&accumulated_blocks);
+
+        let message = if !tool_calls.is_empty() {
+            let content = if let [single] = blocks.as_slice() {
+                if let Some(text) = single.as_text() {
+                    MessageContent::text(text)
+                } else {
+                    MessageContent::Blocks(blocks)
+                }
+            } else {
+                MessageContent::Blocks(blocks)
+            };
+            BaseMessage::ai_with_tool_calls(content, tool_calls)
+        } else if let [single] = blocks.as_slice() {
+            if let Some(text) = single.as_text() {
+                BaseMessage::ai(text)
+            } else {
+                BaseMessage::ai(MessageContent::Blocks(blocks))
+            }
+        } else if blocks.is_empty() {
+            BaseMessage::ai("")
+        } else {
+            BaseMessage::ai(MessageContent::Blocks(blocks))
+        };
+
+        let usage = Some(crate::llm::types::TokenUsage {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            request_id: stream_request_id.clone(),
+        });
+
+        Ok(LlmResponse {
+            message,
+            stop_reason,
+            usage,
+            request_id: stream_request_id,
+        })
+    }
 }
 
 #[async_trait]
@@ -836,6 +1164,7 @@ impl ReactLLM for ChatAnthropic {
         &self,
         messages: &[BaseMessage],
         tools: &[&dyn BaseTool],
+        _streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
         let tool_defs = tools.iter().map(|t| t.definition()).collect();
         let request = LlmRequest::new(messages.to_vec()).with_tools(tool_defs);

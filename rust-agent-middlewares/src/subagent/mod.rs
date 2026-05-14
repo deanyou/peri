@@ -374,6 +374,7 @@ mod tests {
             &self,
             messages: &[BaseMessage],
             _tools: &[&dyn BaseTool],
+            _streaming: Option<rust_create_agent::llm::types::StreamingContext>,
         ) -> rust_create_agent::error::AgentResult<Reasoning> {
             let last = messages.last().map(|m| m.content()).unwrap_or_default();
             Ok(Reasoning::with_answer("", format!("echo: {}", last)))

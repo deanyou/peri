@@ -37,7 +37,7 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
     state.add_message(ai_msg);
     agent.emit(AgentEvent::MessageAdded(ai_msg_clone));
     // emit AI 工具前文本（作为 TextChunk 而非 AiReasoning，确保 TUI 正确显示为文本而非推理提示）
-    if !reasoning.thought.trim().is_empty() {
+    if !reasoning.streamed && !reasoning.thought.trim().is_empty() {
         agent.emit(AgentEvent::TextChunk {
             message_id: ai_msg_id,
             chunk: reasoning.thought.clone(),

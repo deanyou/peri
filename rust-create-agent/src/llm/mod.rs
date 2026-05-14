@@ -1,13 +1,14 @@
 pub mod anthropic;
 pub mod openai;
 pub mod retry;
+pub mod sse;
 pub mod types;
 
 mod adapter;
 mod react_adapter;
 
 use crate::error::AgentResult;
-use crate::llm::types::{LlmRequest, LlmResponse};
+use crate::llm::types::{LlmRequest, LlmResponse, StreamingContext};
 use async_trait::async_trait;
 
 /// BaseModel trait - 统一 LLM 接口，对齐 LangChain Python BaseModel
@@ -23,6 +24,16 @@ pub trait BaseModel: Send + Sync {
     /// 默认返回 200_000（适用于大多数 modern LLM）。
     fn context_window(&self) -> u32 {
         200_000
+    }
+
+    /// 流式调用。默认实现回退到非流式 invoke()。
+    /// 仅 ChatOpenAI 和 ChatAnthropic override 此方法实现 SSE 流式。
+    async fn invoke_streaming(
+        &self,
+        request: LlmRequest,
+        _ctx: StreamingContext,
+    ) -> AgentResult<LlmResponse> {
+        self.invoke(request).await
     }
 }
 

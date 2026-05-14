@@ -189,7 +189,7 @@ pub async fn execute_prompt_hook(
         let llm = llm_factory();
         // Build a minimal message list with just the prompt as a system message
         let messages = vec![BaseMessage::system(prompt.clone())];
-        let reasoning = llm.generate_reasoning(&messages, &[]).await?;
+        let reasoning = llm.generate_reasoning(&messages, &[], None).await?;
         Ok::<_, anyhow::Error>(reasoning)
     })
     .await;
