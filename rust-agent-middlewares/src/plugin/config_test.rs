@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::plugin::types::{InstallScope, InstalledPlugin, KnownMarketplace, MarketplaceSource};
 use tempfile::tempdir;

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::hooks::types::HookEvent;
 use rust_create_agent::messages::MessageId;

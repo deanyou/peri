@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::hooks::types::HookEvent;
 use std::collections::HashMap;

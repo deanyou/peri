@@ -1,4 +1,3 @@
-
 use super::*;
 use rust_create_agent::tools::BaseTool;
 use std::time::Instant;
