@@ -605,6 +605,8 @@ impl MessagePipeline {
         if !self.current_ai_reasoning.is_empty() {
             blocks.push(ContentBlockView::Reasoning {
                 char_count: self.current_ai_reasoning.chars().count(),
+                text: self.current_ai_reasoning.clone(),
+                tail_lines: None,
             });
         }
         if !self.current_ai_text.trim().is_empty() {
@@ -781,6 +783,9 @@ impl MessagePipeline {
             aggregate_batch_groups(&mut tail_vms);
         }
 
+        // 后处理：最后一条 AI 消息（无 Text 正文 + 最后 block 是 Reasoning）追加思考尾部预览
+        add_thinking_tail_snapshot(&mut tail_vms);
+
         tail_vms
     }
 
@@ -837,7 +842,7 @@ impl MessagePipeline {
             if let MessageViewModel::AssistantBubble { blocks, .. } = &vm {
                 let has_visible = blocks.iter().any(|b| match b {
                     ContentBlockView::Text { raw, .. } => !raw.trim().is_empty(),
-                    ContentBlockView::Reasoning { char_count } => *char_count > 0,
+                    ContentBlockView::Reasoning { char_count, .. } => *char_count > 0,
                     ContentBlockView::ToolUse { .. } => false,
                 });
                 if !has_visible {
@@ -901,6 +906,41 @@ impl MessagePipeline {
             is_error: false,
             collapsed: true,
             color: tool_color(name),
+        }
+    }
+}
+
+/// 提取文本的最后 `n` 行（按换行符切分，单行不截断）。
+/// 返回换行分隔的字符串。
+fn extract_tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// 扫描 tail_vms 的最后一个 AssistantBubble，
+/// 若满足条件（无 Text block + 最后一个 block 是 Reasoning）则设置 tail_lines。
+fn add_thinking_tail_snapshot(tail_vms: &mut [MessageViewModel]) {
+    for vm in tail_vms.iter_mut().rev() {
+        if let MessageViewModel::AssistantBubble { blocks, .. } = vm {
+            // 条件 1：没有任何 ContentBlockView::Text block（允许空的 Text block）
+            let has_text = blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlockView::Text { raw, .. } if !raw.trim().is_empty()));
+            if has_text {
+                return;
+            }
+            // 条件 2：最后一个 block 是 Reasoning
+            if let Some(ContentBlockView::Reasoning {
+                text, tail_lines, ..
+            }) = blocks.last_mut()
+            {
+                let tail = extract_tail_lines(text, 1);
+                if !tail.is_empty() {
+                    *tail_lines = Some(tail);
+                }
+            }
+            return;
         }
     }
 }

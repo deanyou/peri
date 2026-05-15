@@ -262,7 +262,11 @@ pub fn render_view_model(
                             }
                         }
                     }
-                    ContentBlockView::Reasoning { char_count } => {
+                    ContentBlockView::Reasoning {
+                        char_count,
+                        tail_lines,
+                        ..
+                    } => {
                         // 显示思考字数摘要（不显示具体内容）
                         if !first_text_merged {
                             lines.push(Line::from(vec![
@@ -274,6 +278,18 @@ pub fn render_view_model(
                                 ),
                             ]));
                             first_text_merged = true;
+                        }
+                        // 渲染尾部行预览（最后 4 行，⎿ 前缀，dim 颜色）
+                        if let Some(tail) = tail_lines {
+                            for tail_line in tail.lines() {
+                                lines.push(Line::from(vec![
+                                    Span::styled(" ⎿ ", Style::default().fg(theme::DIM)),
+                                    Span::styled(
+                                        tail_line.to_string(),
+                                        Style::default().fg(theme::DIM),
+                                    ),
+                                ]));
+                            }
                         }
                     }
                     ContentBlockView::ToolUse { .. } => {

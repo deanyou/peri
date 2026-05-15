@@ -571,8 +571,16 @@ pub enum ContentBlockView {
         /// `rendered` 中对应前缀的行数（避免重解析计数）
         rendered_prefix_lines: usize,
     },
-    /// 推理/思考过程（仅显示字数摘要）
-    Reasoning { char_count: usize },
+    /// 推理/思考过程（仅显示字数摘要，尾部预览可选）
+    Reasoning {
+        char_count: usize,
+        /// 原始推理全文（仅用于提取尾部预览，不参与哈希/比较）
+        text: String,
+        /// 尾部行预览：符合条件时由后处理设置。
+        /// 值为最后 1 行原始文本（不含 ⎿ 前缀）。
+        /// None = 不显示尾部预览
+        tail_lines: Option<String>,
+    },
     /// 工具使用请求（AI 发起的调用请求）
     ToolUse { name: String },
 }
@@ -594,8 +602,8 @@ impl PartialEq for ContentBlockView {
                 },
             ) => a_raw == b_raw && a_dirty == b_dirty,
             (
-                ContentBlockView::Reasoning { char_count: a },
-                ContentBlockView::Reasoning { char_count: b },
+                ContentBlockView::Reasoning { char_count: a, .. },
+                ContentBlockView::Reasoning { char_count: b, .. },
             ) => a == b,
             (ContentBlockView::ToolUse { name: a }, ContentBlockView::ToolUse { name: b }) => {
                 a == b
@@ -615,9 +623,14 @@ impl Hash for ContentBlockView {
                 raw.hash(state);
                 dirty.hash(state);
             }
-            ContentBlockView::Reasoning { char_count } => {
+            ContentBlockView::Reasoning {
+                char_count,
+                tail_lines,
+                ..
+            } => {
                 1u8.hash(state);
                 char_count.hash(state);
+                tail_lines.hash(state);
             }
             ContentBlockView::ToolUse { name } => {
                 2u8.hash(state);
@@ -679,6 +692,8 @@ impl MessageViewModel {
                         }
                         ContentBlock::Reasoning { text, .. } => ContentBlockView::Reasoning {
                             char_count: text.chars().count(),
+                            text: text.clone(),
+                            tail_lines: None,
                         },
                         ContentBlock::ToolUse { name, .. } => ContentBlockView::ToolUse { name },
                         ContentBlock::Image { .. } => ContentBlockView::Text {

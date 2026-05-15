@@ -942,3 +942,27 @@ fn test_build_tail_vms_aggregate_after_all_done() {
         .collect();
     assert_eq!(batch_vms.len(), 1, "reconcile 路径应触发聚合");
 }
+
+/// 测试 extract_tail_lines：基本提取
+#[test]
+fn test_extract_tail_lines_basic() {
+    let text = "line1\nline2\nline3\nline4\nline5\nline6";
+    let result = extract_tail_lines(text, 4);
+    assert_eq!(result, "line3\nline4\nline5\nline6");
+}
+
+/// 测试 extract_tail_lines：不足 N 行返回全部
+#[test]
+fn test_extract_tail_lines_less_than_n() {
+    let text = "line1\nline2";
+    let result = extract_tail_lines(text, 4);
+    assert_eq!(result, "line1\nline2");
+}
+
+/// 测试 extract_tail_lines：单行
+#[test]
+fn test_extract_tail_lines_single_line() {
+    let text = "hello world";
+    let result = extract_tail_lines(text, 4);
+    assert_eq!(result, "hello world");
+}

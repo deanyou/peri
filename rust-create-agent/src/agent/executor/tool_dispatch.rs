@@ -55,6 +55,17 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
     for (i, (tool_call, before_result)) in original_calls.iter().zip(before_results).enumerate() {
         // before_tool 阶段也检查取消
         if cancel.is_cancelled() {
+            // modified_calls 中的调用已通过 before_tool 但尚未执行，
+            // 必须补全 error tool_result，否则 AI 消息中的 tool_use 无配对 tool_result，
+            // 导致 Anthropic API 400 (orphaned tool_use without tool_result)。
+            flush_pending_tool_errors(
+                agent,
+                state,
+                &modified_calls,
+                ai_msg_id,
+                &mut all_tool_calls,
+                "interrupted by user",
+            );
             flush_pending_tool_errors(
                 agent,
                 state,
@@ -100,6 +111,16 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
                 // 否则当前工具的 tool_use 已在第 37 行写入 state 但 tool_result 永远缺失，
                 // 导致 Anthropic API 400 (orphaned tool_use without tool_result)。
                 let _ = agent.chain.run_on_error(state, &e).await;
+                // modified_calls 中的调用已通过 before_tool 但尚未执行/写入 tool_result，
+                // 必须补全 error tool_result 以闭合 AI 消息中的 tool_use 配对。
+                flush_modified_tool_errors(
+                    agent,
+                    state,
+                    &modified_calls,
+                    ai_msg_id,
+                    &mut all_tool_calls,
+                    &e.to_string(),
+                );
                 flush_pending_tool_errors(
                     agent,
                     state,
@@ -252,6 +273,35 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
     Ok(all_tool_calls)
 }
 
+/// 将已通过 before_tool 但尚未执行/写入 tool_result 的 modified_calls
+/// 以 error tool_result 写入 state，确保 AI 消息中所有 tool_use 都有配对。
+/// 与 flush_pending_tool_errors 配合使用：先 flush modified，再 flush pending。
+fn flush_modified_tool_errors<L: ReactLLM, S: State>(
+    agent: &ReActAgent<L, S>,
+    state: &mut S,
+    modified_calls: &[ToolCall],
+    ai_msg_id: MessageId,
+    all_tool_calls: &mut Vec<(ToolCall, ToolResult)>,
+    reason: &str,
+) {
+    for tc in modified_calls {
+        let result = ToolResult::error(&tc.id, &tc.name, reason);
+        // ToolStart 已在 before_tool Ok 路径中 emit，此处只 emit ToolEnd
+        agent.emit(AgentEvent::ToolEnd {
+            message_id: ai_msg_id,
+            tool_call_id: tc.id.clone(),
+            name: tc.name.clone(),
+            output: result.output.clone(),
+            is_error: true,
+        });
+        let tool_msg = BaseMessage::tool_error(&result.tool_call_id, result.output.as_str());
+        let tool_msg_clone = tool_msg.clone();
+        state.add_message(tool_msg);
+        agent.emit(AgentEvent::MessageAdded(tool_msg_clone));
+        all_tool_calls.push((tc.clone(), result));
+    }
+}
+
 /// 将未处理的 tool_calls 以 error tool_result 写入 state，
 /// 确保每个 tool_use block 都有闭合的 tool_result 消息，
 /// 满足 Anthropic API 的配对约束。
@@ -285,3 +335,7 @@ fn flush_pending_tool_errors<L: ReactLLM, S: State>(
         all_tool_calls.push((tc.clone(), result));
     }
 }
+
+#[cfg(test)]
+#[path = "tool_dispatch_test.rs"]
+mod tests;
