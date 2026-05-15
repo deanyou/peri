@@ -23,6 +23,8 @@ pub struct MessageState {
     /// 临时系统通知（不在 BaseMessage[] 中），记录 (锚点索引, VM)。
     /// 锚点 = 创建时 view_messages.len()，RebuildAll 时按锚点插入到对应位置。
     pub ephemeral_notes: Vec<(usize, MessageViewModel)>,
+    /// 最近一次发送给渲染线程的 resize 宽度（用于去抖，避免每帧重复发送）
+    pub last_resize_width: Option<u16>,
 }
 
 impl MessageState {
@@ -43,6 +45,7 @@ impl MessageState {
             pending_messages: Vec::new(),
             last_submitted_text: None,
             ephemeral_notes: Vec::new(),
+            last_resize_width: None,
         }
     }
 

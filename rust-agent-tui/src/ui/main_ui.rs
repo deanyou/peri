@@ -450,21 +450,34 @@ fn render_messages(f: &mut Frame, app: &mut App, header_area: Rect, messages_are
             None
         };
 
+    // 渲染驱动宽度同步：用 last_resize_width 去抖——宽度未变时跳过重复发送，
+    // 避免每秒 N 次 resize 事件导致渲染线程队列积压和 CPU 暴涨
+    // （参见 spec/issues/2026-05-14-streaming-resize-cpu-spike）。
+    {
+        let text_area_width = inner.width.saturating_sub(1);
+        let cache_width = app.session_mgr.sessions[app.session_mgr.active]
+            .messages
+            .render_cache
+            .read()
+            .width;
+        let messages = &mut app.session_mgr.sessions[app.session_mgr.active].messages;
+        if messages.last_resize_width != Some(text_area_width)
+            && cache_width != text_area_width
+            && text_area_width > 0
+        {
+            messages.last_resize_width = Some(text_area_width);
+            let _ = messages
+                .render_tx
+                .send(RenderEvent::Resize(text_area_width));
+        }
+    }
+
     // 从 RenderCache 读取已渲染好的行（浅克隆 Vec 头，开销极小）
     let (mut all_lines, _total_lines, max_scroll, offset, scroll_follow, last_render_version) = {
         let cache = app.session_mgr.sessions[app.session_mgr.active]
             .messages
             .render_cache
             .read();
-
-        // 渲染驱动宽度同步：比较 cache 记录的渲染宽度与当前 text_area 宽度
-        let text_area_width = inner.width.saturating_sub(1);
-        if cache.width != text_area_width && text_area_width > 0 {
-            let _ = app.session_mgr.sessions[app.session_mgr.active]
-                .messages
-                .render_tx
-                .send(RenderEvent::Resize(text_area_width));
-        }
 
         // total_lines 已是 wrap 后的真实视觉行数（由渲染线程通过 Paragraph::line_count 计算）
         let total_lines = cache.total_lines;

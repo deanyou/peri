@@ -375,6 +375,11 @@ impl RenderTask {
                 }
                 RenderEvent::Resize(new_width) => {
                     self.width = new_width;
+                    // Drain coalesce：拖动 resize 时可能积压多个 Resize 事件，
+                    // 合并为一个最终宽度，避免连续多次全量重建导致 CPU 暴涨
+                    while let Ok(RenderEvent::Resize(w)) = rx.try_recv() {
+                        self.width = w;
+                    }
                     // 清空 hash 缓存，强制全量重渲染
                     self.message_hashes.clear();
                     // 用 last_messages 重新渲染（宽度变化需要重新计算所有行的 wrap）
