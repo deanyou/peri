@@ -1,6 +1,6 @@
 # 工具调用参数错误（如 Read - Missing file_path）导致 Agent 停止而非自动重试
 
-**状态**：Open
+**状态**：Open — 部分修复：ToolNotFound/ToolExecutionFailed 已不再设 deferred_error，但 after_tool 中间件错误（run_after_tool 返回 Err）仍设 deferred_error 导致 Agent 停止。
 **优先级**：高
 **创建日期**：2026-05-15
 
@@ -28,38 +28,37 @@ dispatch_tools() 阶段三结果处理循环（tool_dispatch.rs:175-247）
   └─ if deferred_error.is_some() → return Err(MiddlewareError)  ← 循环终止
 ```
 
-## 根因
+## 根因（原分析，代码已部分修复）
 
-`rust-create-agent/src/agent/executor/tool_dispatch.rs:187-191`
+`rust-create-agent/src/agent/executor/tool_dispatch.rs` 阶段三结果处理循环
 
+~~原问题代码（已修复）~~：
 ```rust
 Err(ref e) => {
     let _ = agent.chain.run_on_error(state, e).await;
-    deferred_error = deferred_error.or(Some(e.to_string())); // BUG: 不应停止循环
+    deferred_error = deferred_error.or(Some(e.to_string())); // 已移除
     ToolResult::error(&modified_call.id, &modified_call.name, e.to_string())
 }
 ```
 
-以及 `tool_dispatch.rs:178-181` 的 `ToolNotFound` 也有相同问题：
+**截至 2026-05-15**：ToolNotFound（行 179-186）和 ToolExecutionFailed（行 188-192）**已不再设置 deferred_error**，错误 ToolResult 正常写入，Agent 继续循环。✅
 
+**仍残留**：after_tool 中间件错误（行 211-218）仍设 deferred_error：
 ```rust
-Err(AgentError::ToolNotFound(ref name)) => {
-    deferred_error = deferred_error.or(Some(format!("工具 '{}' 不存在", name)));
-    ToolResult::error(...)
+if let Err(e) = agent.chain.run_after_tool(state, &modified_call, &result).await {
+    let _ = agent.chain.run_on_error(state, &e).await;
+    deferred_error = deferred_error.or(Some(e.to_string())); // ← 仍存在
 }
 ```
-
-`deferred_error` 机制来自 issue `2026-05-14-orphaned-tool-use-without-tool-result`，用于确保所有 tool_use 都有 tool_result 后再统一报错。但它错误地将**工具执行错误**也当作需要终止循环的错误——工具执行失败应该只产生 error ToolResult 并让 LLM 学习修正，而不是终止。
+循环结束后 deferred_error 为 Some 时返回 MiddlewareError 终止 Agent（行 242-247）。
 
 ## 期望行为
 
 | 错误来源 | 当前行为 | 期望行为 |
 |----------|----------|----------|
-| 工具执行失败（`ToolExecutionFailed`） | 设置 deferred_error → 停止循环 | 仅创建 error ToolResult → 继续循环 |
-| 工具不存在（`ToolNotFound`） | 设置 deferred_error → 停止循环 | 仅创建 error ToolResult → 继续循环 |
-| after_tool 中间件错误 | 设置 deferred_error → 停止循环 | 仅创建 error ToolResult → 继续循环 |
-
-三类错误都应反馈给 LLM 而非终止 Agent。
+| 工具执行失败（`ToolExecutionFailed`） | ✅ 仅创建 error ToolResult → 继续循环 | 已修复 |
+| 工具不存在（`ToolNotFound`） | ✅ 仅创建 error ToolResult → 继续循环 | 已修复 |
+| after_tool 中间件错误（`run_after_tool` 返回 Err） | ⚠ 设置 deferred_error → 停止循环 | 仅创建 error ToolResult → 继续循环 |
 
 ## 涉及文件
 

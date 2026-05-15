@@ -1,6 +1,6 @@
 # Anthropic API 400: 并发工具调用中部分 tool_result 缺失导致孤儿 tool_use
 
-**状态**：Fixed
+**状态**：Fixed (2026-05-15 re-fixed: P3 before_tool error path was off-by-one)
 **优先级**：高
 **创建日期**：2026-05-14
 

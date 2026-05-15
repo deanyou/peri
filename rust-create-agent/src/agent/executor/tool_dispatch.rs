@@ -95,12 +95,15 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
                 continue;
             }
             Err(e) => {
-                // run_on_error 副作用已执行；吞掉传播，先补全剩余工具的错误结果
+                // run_on_error 副作用已执行；吞掉传播，先补全当前及剩余工具的错误结果。
+                // 注意：P1（取消）路径用 &original_calls[i..]（含当前索引），此处必须一致，
+                // 否则当前工具的 tool_use 已在第 37 行写入 state 但 tool_result 永远缺失，
+                // 导致 Anthropic API 400 (orphaned tool_use without tool_result)。
                 let _ = agent.chain.run_on_error(state, &e).await;
                 flush_pending_tool_errors(
                     agent,
                     state,
-                    &original_calls[i + 1..],
+                    &original_calls[i..],
                     ai_msg_id,
                     &mut all_tool_calls,
                     &e.to_string(),
