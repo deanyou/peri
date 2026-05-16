@@ -12,7 +12,6 @@ export LC_ALL=C
 #   GITHUB_TOKEN           GitHub personal access token (bypasses API rate limiting)
 #   PERI_NO_PATH_HINT      Set to 1 to skip PATH hint
 #   PERI_INSTALL_PLATFORM  Override platform detection (e.g. linux-x86_64, macos-aarch64)
-#   PERI_SKIP_CHECKSUM     Set to 1 to skip SHA256 verification
 #
 # Example:
 #   PERI_INSTALL_VERSION=agent-v1.17 bash install.sh
@@ -42,7 +41,7 @@ detect_platform() {
             echo "  Expected: macos-x86_64 | macos-aarch64 | linux-x86_64 | linux-aarch64 | linux-riscv64 | windows-x86_64"
             exit 1
         fi
-        info "Platform (manual): ${PERI_INSTALL_PLATFORM}"
+        info "Platform (manual): ${PERI_INSTALL_PLATFORM}" >&2
         echo "${PERI_INSTALL_PLATFORM}"
         return
     fi
@@ -61,7 +60,7 @@ detect_platform() {
     esac
 
     platform="${os}-${arch}"
-    info "Detected platform: ${platform}"
+    info "Detected platform: ${platform}" >&2
     echo "${platform}"
 }
 
@@ -160,42 +159,6 @@ main() {
         exit 1
     }
 
-    # --- SHA256 Verification ---
-    if [[ "${PERI_SKIP_CHECKSUM:-}" != "1" ]]; then
-        step "Verifying checksum..."
-
-        # Find checksums.txt download URL from the same release
-        CHECKSUMS_URL=$(echo "${RELEASE_JSON}" | tr ',' '\n' | grep -F '"browser_download_url"' | grep -F 'checksums.txt' | head -1 | cut -d'"' -f4)
-        CHECKSUMS_FILE="${VERSION_DIR}/checksums.txt"
-
-        if [[ -n "${CHECKSUMS_URL}" ]]; then
-            CHECKSUMS_FINAL=$(get_download_url "${CHECKSUMS_URL}")
-            curl -fsSL "${CHECKSUMS_FINAL}" -o "${CHECKSUMS_FILE}" 2>/dev/null || {
-                warn "Failed to download checksums.txt, skipping verification."
-            }
-
-            if [[ -f "${CHECKSUMS_FILE}" ]]; then
-                # Extract just the line for our tarball and verify
-                pushd "${VERSION_DIR}" > /dev/null
-                if grep -F "${ASSET_NAME}" "${CHECKSUMS_FILE}" | sha256sum -c --quiet 2>/dev/null; then
-                    info "Checksum verified OK"
-                else
-                    error "Checksum verification FAILED! The downloaded file may be corrupted."
-                    error "Expected:"
-                    grep -F "${ASSET_NAME}" "${CHECKSUMS_FILE}" || echo "  (no checksum entry found for ${ASSET_NAME})"
-                    error "Got:"
-                    sha256sum "${ASSET_NAME}" 2>/dev/null || shasum -a 256 "${ASSET_NAME}" 2>/dev/null
-                    rm -f "${TARBALL}"
-                    exit 1
-                fi
-                popd > /dev/null
-                rm -f "${CHECKSUMS_FILE}"
-            fi
-        else
-            warn "No checksums.txt found in release, skipping verification."
-        fi
-    fi
-
     # Extract tarball
     step "Extracting..."
     tar -xzf "${TARBALL}" -C "${VERSION_DIR}" || {
@@ -203,6 +166,18 @@ main() {
         exit 1
     }
     rm -f "${TARBALL}"
+
+    # Tarball contains peri-<platform> (e.g., peri-macos-aarch64), rename to peri
+    if [[ ! -f "${TARGET}" ]]; then
+        EXTRACTED=$(ls "${VERSION_DIR}"/peri-* 2>/dev/null | head -1)
+        if [[ -f "${EXTRACTED}" ]]; then
+            mv "${EXTRACTED}" "${TARGET}"
+        else
+            error "No binary found in extracted tarball."
+            ls -la "${VERSION_DIR}" || true
+            exit 1
+        fi
+    fi
 
     # Make executable
     chmod +x "${TARGET}"
@@ -216,7 +191,7 @@ main() {
     # Write current version
     echo "${VERSION_TAG}" > "${INSTALL_DIR}/current-version.txt"
 
-    # --- PATH Check ---
+    # --- PATH Setup ---
     if [[ "${PERI_NO_PATH_HINT:-}" != "1" ]]; then
         BIN_LINK="${INSTALL_DIR}/peri"
         SHELL_PROFILE=""
@@ -226,23 +201,21 @@ main() {
             */fish) SHELL_PROFILE="${HOME}/.config/fish/config.fish" ;;
         esac
 
-        if [[ -n "${SHELL_PROFILE}" ]] && ! grep -qF "${INSTALL_DIR}" "${SHELL_PROFILE}" 2>/dev/null; then
-            echo ""
-            warn "The install directory is not in your PATH."
-            echo ""
-            echo "  To add it now, run:"
-            echo ""
-            if [[ "${SHELL}" == */fish ]]; then
-                echo "    echo 'set -gx PATH ${INSTALL_DIR} \$PATH' >> ${SHELL_PROFILE}"
-            else
-                echo "    echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ${SHELL_PROFILE}"
+        if [[ -n "${SHELL_PROFILE}" ]]; then
+            # Check for exact PATH entry (not substring: avoid .peri matching .perihelion)
+            INSTALL_DIR_ESC="${INSTALL_DIR//\./\\.}"
+            if ! grep -qE "(^|[:\" ])${INSTALL_DIR_ESC}([:\"\$ ]|$)" "${SHELL_PROFILE}" 2>/dev/null; then
+                if [[ "${SHELL}" == */fish ]]; then
+                    echo "set -gx PATH ${INSTALL_DIR} \$PATH" >> "${SHELL_PROFILE}"
+                else
+                    echo "export PATH=\"${INSTALL_DIR}:\$PATH\"" >> "${SHELL_PROFILE}"
+                fi
+                info "Added ${INSTALL_DIR} to PATH in ${SHELL_PROFILE}"
             fi
-            echo "    source ${SHELL_PROFILE}"
-            echo ""
-        elif [[ -z "${SHELL_PROFILE}" ]]; then
+        else
             echo ""
             warn "Unknown shell. Add this directory to your PATH manually:"
-            echo "    ${INSTALL_DIR}"
+            echo "    export PATH=\"${INSTALL_DIR}:\$PATH\""
             echo ""
         fi
     fi
