@@ -291,34 +291,22 @@ impl SetupWizardPanel {
         };
         match self.form_focus {
             FormField::ProviderId => {
-                insert_at_cursor(&mut mp.provider_id, &mut mp.cur_provider_id, &text);
+                insert_at_cursor(&mut mp.provider_id, &mut mp.cur_provider_id, text);
             }
             FormField::BaseUrl => {
-                insert_at_cursor(&mut mp.base_url, &mut mp.cur_base_url, &text);
+                insert_at_cursor(&mut mp.base_url, &mut mp.cur_base_url, text);
             }
             FormField::ApiKey => {
-                insert_at_cursor(&mut mp.api_key, &mut mp.cur_api_key, &text);
+                insert_at_cursor(&mut mp.api_key, &mut mp.cur_api_key, text);
             }
             FormField::OpusModel => {
-                insert_at_cursor(
-                    &mut mp.aliases[0].model_id,
-                    &mut mp.aliases[0].cursor,
-                    &text,
-                );
+                insert_at_cursor(&mut mp.aliases[0].model_id, &mut mp.aliases[0].cursor, text);
             }
             FormField::SonnetModel => {
-                insert_at_cursor(
-                    &mut mp.aliases[1].model_id,
-                    &mut mp.aliases[1].cursor,
-                    &text,
-                );
+                insert_at_cursor(&mut mp.aliases[1].model_id, &mut mp.aliases[1].cursor, text);
             }
             FormField::HaikuModel => {
-                insert_at_cursor(
-                    &mut mp.aliases[2].model_id,
-                    &mut mp.aliases[2].cursor,
-                    &text,
-                );
+                insert_at_cursor(&mut mp.aliases[2].model_id, &mut mp.aliases[2].cursor, text);
             }
             _ => {}
         }
