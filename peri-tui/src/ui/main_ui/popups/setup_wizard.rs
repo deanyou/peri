@@ -228,6 +228,15 @@ fn render_form_browse(
         lines.push(Line::from(""));
     }
 
+    // Submit 错误提示
+    if let Some(ref err) = wizard.submit_error {
+        lines.push(Line::from(Span::styled(
+            format!("  ⚠ {}", err),
+            Style::default().fg(theme::WARNING),
+        )));
+        lines.push(Line::from(""));
+    }
+
     // Submit 按钮
     let submit_active = wizard.browse_cursor == submit_pos;
     let submit_style = if submit_active {

@@ -243,6 +243,8 @@ pub struct SetupWizardPanel {
     pub form_focus: FormField,
     /// 是否由 /setup 命令打开（false = 启动时无 Provider 自动触发）
     pub from_command: bool,
+    /// Browse Submit 失败时的提示消息（下次操作自动清除）
+    pub submit_error: Option<String>,
 }
 
 impl Default for SetupWizardPanel {
@@ -265,6 +267,7 @@ impl SetupWizardPanel {
             browse_cursor: 0,
             form_focus: FormField::ProviderType,
             from_command: false,
+            submit_error: None,
         }
     }
 
@@ -603,12 +606,14 @@ fn handle_browse(
     let max_pos = wizard.providers.len(); // Submit 在最后
     match input {
         tui_textarea::Input { key: Key::Up, .. } => {
+            wizard.submit_error = None;
             if wizard.browse_cursor > 0 {
                 wizard.browse_cursor -= 1;
             }
             Some(SetupWizardAction::Redraw)
         }
         tui_textarea::Input { key: Key::Down, .. } => {
+            wizard.submit_error = None;
             if wizard.browse_cursor < max_pos {
                 wizard.browse_cursor += 1;
             }
@@ -619,6 +624,7 @@ fn handle_browse(
             key: Key::Char(' '),
             ..
         } => {
+            wizard.submit_error = None;
             if wizard.browse_cursor < wizard.providers.len() {
                 let mp = &mut wizard.providers[wizard.browse_cursor];
                 mp.selected = !mp.selected;
@@ -633,6 +639,7 @@ fn handle_browse(
         } => {
             if wizard.browse_cursor < wizard.providers.len() {
                 // 进入编辑模式
+                wizard.submit_error = None;
                 wizard.active_provider = wizard.browse_cursor;
                 wizard.form_mode = FormMode::Edit;
                 wizard.form_focus = FormField::ProviderType;
@@ -644,13 +651,20 @@ fn handle_browse(
                     .iter()
                     .any(|p| p.selected && p.is_complete());
                 if has_valid {
+                    wizard.submit_error = None;
                     wizard.step = SetupStep::Done;
+                } else {
+                    wizard.submit_error = Some(
+                        "No provider selected or incomplete. Select at least one provider with all fields filled."
+                            .into(),
+                    );
                 }
                 Some(SetupWizardAction::Redraw)
             }
         }
         // Esc: 返回 Choose
         tui_textarea::Input { key: Key::Esc, .. } => {
+            wizard.submit_error = None;
             wizard.step = SetupStep::Choose;
             Some(SetupWizardAction::Redraw)
         }
@@ -778,6 +792,7 @@ fn handle_step_done(
             key: Key::Enter, ..
         } => Some(SetupWizardAction::SaveAndClose),
         tui_textarea::Input { key: Key::Esc, .. } => {
+            wizard.submit_error = None;
             wizard.step = SetupStep::Form;
             wizard.form_mode = FormMode::Browse;
             Some(SetupWizardAction::Redraw)
