@@ -1,7 +1,7 @@
 use agent_client_protocol::schema::{
     Content, ContentBlock, ContentChunk, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-    SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind,
+    SessionInfoUpdate, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
 };
 use peri_agent::agent::events::AgentEvent as ExecutorEvent;
 use peri_middlewares::tools::TodoStatus;
@@ -25,6 +25,7 @@ pub fn map_event_to_updates(event: &AgentEvent) -> Vec<SessionUpdate> {
             tool_call_id,
             name,
             args,
+            input,
             ..
         } => {
             vec![SessionUpdate::ToolCall(
@@ -33,7 +34,8 @@ pub fn map_event_to_updates(event: &AgentEvent) -> Vec<SessionUpdate> {
                     .status(ToolCallStatus::InProgress)
                     .content(vec![ToolCallContent::Content(Content::new(
                         ContentBlock::Text(TextContent::new(truncate_str(args, 500))),
-                    ))]),
+                    ))])
+                    .raw_input(Some(input.clone())),
             )]
         }
         AgentEvent::ToolEnd {
@@ -42,6 +44,10 @@ pub fn map_event_to_updates(event: &AgentEvent) -> Vec<SessionUpdate> {
             is_error,
             ..
         } => {
+            let raw_output = match serde_json::from_str::<serde_json::Value>(output) {
+                Ok(v) => Some(v),
+                Err(_) => Some(serde_json::Value::String(output.clone())),
+            };
             vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 tool_call_id.clone(),
                 ToolCallUpdateFields::new()
@@ -52,7 +58,8 @@ pub fn map_event_to_updates(event: &AgentEvent) -> Vec<SessionUpdate> {
                     })
                     .content(vec![ToolCallContent::Content(Content::new(
                         ContentBlock::Text(TextContent::new(truncate_str(output, 500))),
-                    ))]),
+                    ))])
+                    .raw_output(raw_output),
             ))]
         }
         AgentEvent::TodoUpdate(todos) => {
@@ -83,6 +90,7 @@ fn infer_tool_kind(name: &str) -> ToolKind {
         "Write" | "Edit" | "folder_operations" => ToolKind::Edit,
         "Bash" => ToolKind::Execute,
         "Grep" | "Glob" => ToolKind::Search,
+        "WebFetch" | "WebSearch" => ToolKind::Fetch,
         _ => ToolKind::Other,
     }
 }
@@ -97,7 +105,9 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 }
 
 /// 直接将 ExecutorEvent 映射为 ACP SessionUpdate（ACP 模式专用，无 TUI 依赖）
-pub fn map_executor_to_updates(event: &ExecutorEvent) -> Vec<SessionUpdate> {
+///
+/// `context_window` 是当前模型的上下文窗口大小（tokens），用于填充 UsageUpdate.size。
+pub fn map_executor_to_updates(event: &ExecutorEvent, context_window: u32) -> Vec<SessionUpdate> {
     match event {
         ExecutorEvent::TextChunk { chunk, .. } => {
             vec![SessionUpdate::AgentMessageChunk(ContentChunk::new(
@@ -122,7 +132,8 @@ pub fn map_executor_to_updates(event: &ExecutorEvent) -> Vec<SessionUpdate> {
                     .status(ToolCallStatus::InProgress)
                     .content(vec![ToolCallContent::Content(Content::new(
                         ContentBlock::Text(TextContent::new(truncate_str(&args_str, 500))),
-                    ))]),
+                    ))])
+                    .raw_input(Some(input.clone())),
             )]
         }
         ExecutorEvent::ToolEnd {
@@ -131,6 +142,10 @@ pub fn map_executor_to_updates(event: &ExecutorEvent) -> Vec<SessionUpdate> {
             is_error,
             ..
         } => {
+            let raw_output = match serde_json::from_str::<serde_json::Value>(output) {
+                Ok(v) => Some(v),
+                Err(_) => Some(serde_json::Value::String(output.clone())),
+            };
             vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 tool_call_id.clone(),
                 ToolCallUpdateFields::new()
@@ -141,8 +156,38 @@ pub fn map_executor_to_updates(event: &ExecutorEvent) -> Vec<SessionUpdate> {
                     })
                     .content(vec![ToolCallContent::Content(Content::new(
                         ContentBlock::Text(TextContent::new(truncate_str(output, 500))),
-                    ))]),
+                    ))])
+                    .raw_output(raw_output),
             ))]
+        }
+        ExecutorEvent::LlmCallEnd { usage: Some(u), .. } => {
+            vec![SessionUpdate::UsageUpdate(UsageUpdate::new(
+                u64::from(u.input_tokens) + u64::from(u.output_tokens),
+                u64::from(context_window),
+            ))]
+        }
+        ExecutorEvent::ContextWarning {
+            used_tokens,
+            total_tokens,
+            ..
+        } => {
+            vec![SessionUpdate::UsageUpdate(UsageUpdate::new(
+                *used_tokens,
+                *total_tokens,
+            ))]
+        }
+        ExecutorEvent::LlmRetrying {
+            attempt,
+            max_attempts,
+            delay_ms,
+            ..
+        } => {
+            vec![SessionUpdate::SessionInfoUpdate(
+                SessionInfoUpdate::new().title(format!(
+                    "Retrying LLM call (attempt {}/{}, {}ms delay)",
+                    attempt, max_attempts, delay_ms
+                )),
+            )]
         }
         // 内部事件、LLM 调用事件等不映射
         _ => vec![],

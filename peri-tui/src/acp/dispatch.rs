@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
 use agent_client_protocol::schema::{
-    ClientNotification, ClientRequest, CloseSessionRequest, CloseSessionResponse, ContentBlock,
-    ForkSessionRequest, ForkSessionResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, ModelId, ModelInfo, NewSessionRequest,
-    NewSessionResponse, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptRequest,
-    PromptResponse, SessionConfigId, SessionConfigKind, SessionConfigOptionCategory,
-    SessionConfigOptionValue, SessionConfigSelect, SessionConfigSelectOption, SessionConfigValueId,
-    SessionId, SessionInfo, SessionMode, SessionModeId, SessionModeState, SessionModelState,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
-    SetSessionModelRequest, SetSessionModelResponse, StopReason,
+    ClientNotification, ClientRequest, CloseSessionRequest, CloseSessionResponse,
+    ConfigOptionUpdate, ContentBlock, CurrentModeUpdate, ForkSessionRequest, ForkSessionResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelId,
+    ModelInfo, NewSessionRequest, NewSessionResponse, Plan, PlanEntry, PlanEntryPriority,
+    PlanEntryStatus, PromptRequest, PromptResponse, SessionConfigId, SessionConfigKind,
+    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelect,
+    SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionInfo, SessionMode,
+    SessionModeId, SessionModeState, SessionModelState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, SetSessionModelRequest, SetSessionModelResponse, StopReason,
 };
 use agent_client_protocol::{Client, ConnectionTo, Dispatch, Handled};
 use peri_agent::agent::events::{AgentEvent as ExecutorEvent, FnEventHandler};
@@ -360,9 +360,16 @@ pub async fn handle_prompt(
         // 事件处理器：ExecutorEvent → SessionUpdate → SessionNotification → conn.send_notification()
         let conn_for_handler = conn.clone();
         let sid_for_handler = session_id_acp.clone();
+        let context_window = {
+            let mut cw = provider.context_window();
+            if mgr_peri_config.config.context_1m.unwrap_or(false) {
+                cw = 1_000_000;
+            }
+            cw
+        };
         let handler: Arc<dyn peri_agent::agent::events::AgentEventHandler> =
             Arc::new(FnEventHandler(move |event: ExecutorEvent| {
-                let updates = event_mapper::map_executor_to_updates(&event);
+                let updates = event_mapper::map_executor_to_updates(&event, context_window);
                 for update in updates {
                     let notif = SessionNotification::new(sid_for_handler.clone(), update);
                     let _ = conn_for_handler.send_notification(notif);
@@ -441,6 +448,9 @@ pub async fn handle_prompt(
         let stop_reason = match &result {
             Ok(_) => StopReason::EndTurn,
             Err(peri_agent::error::AgentError::Interrupted) => StopReason::Cancelled,
+            Err(peri_agent::error::AgentError::MaxIterationsExceeded(_)) => {
+                StopReason::MaxTurnRequests
+            }
             Err(e) => {
                 tracing::error!(error = %e, "ACP prompt execution error");
                 StopReason::EndTurn
@@ -542,10 +552,10 @@ pub async fn handle_set_mode(
     responder: agent_client_protocol::Responder<SetSessionModeResponse>,
     _conn: ConnectionTo<Client>,
 ) -> Result<(), agent_client_protocol::Error> {
-    let mode_id = req.mode_id.0.as_ref();
-    let session_id = req.session_id.0.as_ref();
+    let mode_id_str = req.mode_id.0.as_ref();
+    let session_id_str = req.session_id.0.as_ref();
 
-    let mode = match mode_id {
+    let mode = match mode_id_str {
         "bypass" => PermissionMode::Bypass,
         "default" => PermissionMode::Default,
         "acceptEdits" => PermissionMode::AcceptEdit,
@@ -558,12 +568,18 @@ pub async fn handle_set_mode(
         }
     };
 
-    if let Some(session) = mgr().get_session(session_id) {
+    if let Some(session) = mgr().get_session(session_id_str) {
         session.permission_mode.store(mode);
-        tracing::info!(session_id, mode_id, "Session mode changed");
+        tracing::info!(session_id_str, mode_id_str, "Session mode changed");
     } else {
-        tracing::warn!(session_id, "Session not found for set_mode");
+        tracing::warn!(session_id_str, "Session not found for set_mode");
     }
+
+    // 发送 CurrentModeUpdate 通知，使客户端感知模式变更
+    let _ = _conn.send_notification(SessionNotification::new(
+        req.session_id.clone(),
+        SessionUpdate::CurrentModeUpdate(CurrentModeUpdate::new(req.mode_id.clone())),
+    ));
 
     let _ = responder.respond(SetSessionModeResponse::default());
     Ok(())
@@ -592,6 +608,16 @@ pub async fn handle_set_model(
             "Session not found for set_model"
         );
     }
+
+    // 发送 ConfigOptionUpdate 通知，使客户端感知模型变更
+    let config_options = mgr()
+        .get_session(session_id_str)
+        .map(|s| build_config_options(&s))
+        .unwrap_or_default();
+    let _ = _conn.send_notification(SessionNotification::new(
+        req.session_id.clone(),
+        SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(config_options)),
+    ));
 
     let _ = responder.respond(SetSessionModelResponse::default());
     Ok(())
@@ -669,11 +695,28 @@ pub async fn handle_set_config_option(
         }
     }
 
-    // 返回更新后的 config_options
+    // 构建更新后的 config_options
     let config_options = mgr()
         .get_session(session_id)
         .map(|s| build_config_options(&s))
         .unwrap_or_default();
+
+    // 发送 ConfigOptionUpdate 通知，使客户端感知配置变更
+    let _ = _conn.send_notification(SessionNotification::new(
+        req.session_id.clone(),
+        SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(config_options.clone())),
+    ));
+
+    // 如果是 mode 变更，额外发送 CurrentModeUpdate 通知
+    if config_id == "mode" {
+        let _ = _conn.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::CurrentModeUpdate(CurrentModeUpdate::new(
+                agent_client_protocol::schema::SessionModeId::new(value_id),
+            )),
+        ));
+    }
+
     let _ = responder.respond(SetSessionConfigOptionResponse::new(config_options));
     Ok(())
 }

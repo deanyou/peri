@@ -111,6 +111,36 @@ scripts/start-relay.sh               # 启动 Relay Server（端口 8080）
 
 插件通过 `plugin_skill_dirs` → `SkillsMiddleware.with_extra_dirs()`、`plugin_hooks` → `HookMiddleware` 注入，无独立 PluginMiddleware。
 
+## ACP 模式
+
+`peri-tui/src/acp/` 实现 ACP Agent 服务端，通过 stdio 传输接受 IDE（如 Cursor）连接。与 TUI 路径**共用同一套 Agent 构建逻辑**。
+
+**入口**：`main_acp.rs:run_acp_mode()` → `Agent::builder().connect_to(Stdio::new())`，注册 12 个 handler（initialize + 10 个 session 方法 + dispatch 兜底）。
+
+**Agent 构建复用**：`agent.rs:build_bare_agent(BareAgentConfig) → BareAgentOutput` 是 TUI 和 ACP 的**唯一 Agent 构建入口**。`run_universal_agent()`（TUI）和 `agent_assembler.rs:assemble_agent()`（ACP）都调用此函数。
+
+```
+build_bare_agent()  ← 共享构建（agent.rs）
+├── TUI:  run_universal_agent()  → +LSP → execute → Done/Error 事件
+└── ACP:  assemble_agent()      → 返回 executor → 外部 execute → PromptResponse
+```
+
+**事件映射**：`event_mapper.rs` 双映射层：
+- `map_executor_to_updates(&ExecutorEvent, context_window)` → `Vec<SessionUpdate>`（ACP 模式，prompt 执行时实时推送）
+- `map_event_to_updates(&AgentEvent)` → `Vec<SessionUpdate>`（备用，TUI 层事件）
+- `map_message_to_updates(&BaseMessage)` → `Vec<SessionUpdate>`（session/load 历史回放）
+
+**权限桥接**：`broker.rs:AcpInteractionBroker` 实现 `UserInteractionBroker` trait，通过 `RequestPermission` RPC 将 HITL 审批转发给 ACP Client。
+
+**与 TUI 路径的差异**：
+- 事件处理：ACP → `SessionNotification`，TUI → `AgentEvent` channel
+- 权限 broker：ACP → `AcpInteractionBroker`，TUI → `TuiInteractionBroker`
+- 传输：ACP → stdio，TUI → 本地 channel
+- TUI 独有：Langfuse 追踪、LSP 中间件、插件 hooks/LSP 配置
+- ACP 独有：`RequestPermission` RPC 桥接、session/load 历史回放
+
+**[TRAP]** ACP 和 TUI 的 Agent 构建必须通过 `build_bare_agent()` 共用，禁止在 `agent_assembler.rs` 或 `dispatch.rs` 中独立构建 ReActAgent。中间件链和 builder 配置必须一致。
+
 ## HITL 审批
 
 默认需审批：`Bash`、`folder_operations`、`Agent`、`Write`、`Edit`、`delete_*`、`rm_*`、`mcp__*`、`WebFetch`、`WebSearch`。

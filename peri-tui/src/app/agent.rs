@@ -9,6 +9,7 @@ use peri_agent::agent::events::{AgentEvent as ExecutorEvent, FnEventHandler};
 use peri_agent::agent::react::AgentInput;
 use peri_agent::agent::state::AgentState;
 use peri_agent::agent::{AgentCancellationToken, ReActAgent};
+use peri_agent::interaction::UserInteractionBroker;
 use peri_agent::llm::BaseModelReactLLM;
 use peri_middlewares::prelude::*;
 use peri_middlewares::tools::{AskUserTool, TodoItem};
@@ -55,6 +56,293 @@ pub struct AgentRunConfig {
     pub preload_skills: Vec<String>,
 }
 
+// ── 共享 Agent 构建（ACP 和 TUI 共用）─────────────────────────────────────────
+
+use parking_lot::RwLock;
+use std::collections::HashMap;
+
+/// 共享 Agent 构建配置（ACP 和 TUI 共用）
+pub(crate) struct BareAgentConfig {
+    pub provider: LlmProvider,
+    pub cwd: String,
+    pub system_prompt: String,
+    pub event_handler: Arc<dyn peri_agent::agent::events::AgentEventHandler>,
+    pub cancel: AgentCancellationToken,
+    pub permission_mode: Arc<SharedPermissionMode>,
+    pub peri_config: Arc<crate::config::PeriConfig>,
+    pub cron_scheduler: Option<Arc<parking_lot::Mutex<peri_middlewares::cron::CronScheduler>>>,
+    pub agent_overrides: Option<peri_middlewares::agent_define::AgentOverrides>,
+    pub preload_skills: Vec<String>,
+    pub session_id: Option<String>,
+    pub broker: Arc<dyn UserInteractionBroker>,
+    pub plugin_skill_dirs: Vec<std::path::PathBuf>,
+    pub plugin_agent_dirs: Vec<std::path::PathBuf>,
+    pub hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>>,
+    pub hook_session_start: bool,
+    pub mcp_pool: Option<Arc<peri_middlewares::mcp::McpClientPool>>,
+    pub tool_search_index: Arc<peri_middlewares::tool_search::ToolSearchIndex>,
+    pub shared_tools: Arc<RwLock<HashMap<String, Arc<dyn peri_agent::tools::BaseTool>>>>,
+}
+
+pub(crate) struct BareAgentOutput {
+    pub executor: ReActAgent<peri_agent::llm::RetryableLLM<BaseModelReactLLM>, AgentState>,
+    pub todo_rx: mpsc::Receiver<Vec<TodoItem>>,
+    #[allow(dead_code)]
+    pub context_window: u32,
+}
+
+/// 构建可复用的 Agent（ACP 和 TUI 共用核心构建逻辑）
+pub(crate) fn build_bare_agent(cfg: BareAgentConfig) -> BareAgentOutput {
+    let BareAgentConfig {
+        provider,
+        cwd,
+        system_prompt,
+        event_handler,
+        cancel,
+        permission_mode,
+        peri_config,
+        cron_scheduler,
+        agent_overrides,
+        preload_skills,
+        session_id,
+        broker: permission_broker,
+        plugin_skill_dirs,
+        plugin_agent_dirs,
+        hook_groups,
+        hook_session_start,
+        mcp_pool,
+        tool_search_index,
+        shared_tools,
+    } = cfg;
+
+    // 应用 agent overrides 到系统提示词
+    let system_prompt = agent_overrides.as_ref().map_or_else(
+        || system_prompt.clone(),
+        |ov| {
+            let features = crate::prompt::PromptFeatures::detect();
+            crate::prompt::build_system_prompt(Some(ov), &cwd, features, &plugin_agent_dirs)
+        },
+    );
+
+    let provider_for_factory = provider.clone();
+    let model_name = provider.model_name().to_string();
+    let provider_name = provider.display_name().to_string();
+
+    // LLM 模型
+    let mut base_llm = BaseModelReactLLM::new(provider.into_model());
+    if let Some(ref sid) = session_id {
+        base_llm = base_llm.with_session_id(sid);
+    }
+    let model =
+        peri_agent::llm::RetryableLLM::new(base_llm, peri_agent::llm::RetryConfig::default())
+            .with_event_handler(Arc::clone(&event_handler));
+
+    // Todo channel
+    let (todo_tx, todo_rx) = mpsc::channel::<Vec<TodoItem>>(8);
+
+    // HITL middleware
+    let auto_classifier: Option<Arc<dyn AutoClassifier>> =
+        Some(Arc::new(LlmAutoClassifier::new(Arc::new(
+            tokio::sync::Mutex::new(provider_for_factory.clone().into_model()),
+        ))));
+    let hitl = HumanInTheLoopMiddleware::with_shared_mode(
+        permission_broker.clone(),
+        default_requires_approval,
+        permission_mode,
+        auto_classifier,
+    );
+
+    // AskUser 工具
+    let ask_user_tool = AskUserTool::new(permission_broker);
+
+    // 父工具集（供子 agent 继承）
+    let mut parent_tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
+        FilesystemMiddleware::build_tools(&cwd);
+    parent_tools.extend(TerminalMiddleware::build_tools(&cwd));
+    if let Some(ref pool) = mcp_pool {
+        let mcp_tools = peri_middlewares::mcp::build_tool_bridges(pool);
+        for tool in mcp_tools {
+            parent_tools.push(tool);
+        }
+        if pool.has_resources() {
+            parent_tools.push(Box::new(peri_middlewares::mcp::McpResourceTool::new(
+                Arc::clone(pool),
+            )));
+        }
+    }
+
+    // 子 agent LLM 工厂
+    let provider_clone = provider_for_factory;
+    let config_for_factory = peri_config.clone();
+    let session_id_for_factory = session_id.clone();
+    #[allow(clippy::type_complexity)]
+    let llm_factory: Arc<
+        dyn Fn(Option<&str>) -> Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>
+            + Send
+            + Sync,
+    > = Arc::new(move |model_alias: Option<&str>| {
+        let sid = session_id_for_factory.as_deref();
+        if let Some(alias) = model_alias {
+            if let Some(p) = LlmProvider::from_config_for_alias(&config_for_factory, alias) {
+                let mut llm = BaseModelReactLLM::new(p.into_model());
+                if let Some(s) = sid {
+                    llm = llm.with_session_id(s);
+                }
+                return Box::new(peri_agent::llm::RetryableLLM::new(
+                    llm,
+                    peri_agent::llm::RetryConfig::default(),
+                ));
+            }
+        }
+        let mut llm = BaseModelReactLLM::new(provider_clone.clone().into_model());
+        if let Some(s) = sid {
+            llm = llm.with_session_id(s);
+        }
+        Box::new(peri_agent::llm::RetryableLLM::new(
+            llm,
+            peri_agent::llm::RetryConfig::default(),
+        ))
+    });
+
+    // 系统提示构建器
+    #[allow(clippy::type_complexity)]
+    let system_builder: Arc<
+        dyn Fn(Option<&peri_middlewares::agent_define::AgentOverrides>, &str) -> String
+            + Send
+            + Sync,
+    > = Arc::new(|overrides, cwd_dir| {
+        let features = crate::prompt::PromptFeatures::detect();
+        crate::prompt::build_system_prompt(overrides, cwd_dir, features, &[])
+    });
+
+    // Parent message snapshot
+    let parent_messages: Arc<RwLock<Vec<peri_agent::messages::BaseMessage>>> =
+        Arc::new(RwLock::new(Vec::new()));
+
+    // 后台任务通知通道
+    let (bg_notification_tx, bg_notification_rx) = tokio::sync::mpsc::unbounded_channel();
+    let background_registry = Arc::new(peri_middlewares::BackgroundTaskRegistry::new(
+        bg_notification_tx,
+    ));
+
+    let claude_md_excludes = peri_config
+        .config
+        .claude_md_excludes
+        .clone()
+        .unwrap_or_default();
+
+    // SubAgent middleware
+    let subagent = SubAgentMiddleware::new(
+        parent_tools,
+        Some(Arc::clone(&event_handler) as Arc<dyn peri_agent::agent::events::AgentEventHandler>),
+        llm_factory.clone(),
+    )
+    .with_system_builder(system_builder)
+    .with_cancel(cancel.clone())
+    .with_parent_messages(parent_messages)
+    .with_background_registry(Arc::clone(&background_registry))
+    .with_registered_hooks(vec![]);
+
+    // 上下文预算
+    let mut context_window = model.context_window();
+    let context_1m = peri_config.config.context_1m.unwrap_or(false);
+    if context_1m {
+        context_window = 1_000_000;
+    }
+    let mut compact_config = peri_config.config.compact.clone().unwrap_or_default();
+    compact_config.apply_env_overrides();
+    let context_budget = peri_agent::agent::token::ContextBudget::new(context_window)
+        .with_auto_compact_threshold(compact_config.auto_compact_threshold)
+        .with_warning_threshold(compact_config.micro_compact_threshold);
+
+    // 构建 ReActAgent
+    let executor = ReActAgent::new(model)
+        .max_iterations(500)
+        .with_context_budget(context_budget)
+        .with_compact_config(compact_config)
+        .with_notification_rx(bg_notification_rx)
+        .with_system_prompt(system_prompt)
+        .with_tool_filter(peri_middlewares::tool_search::is_deferred_tool)
+        .with_shared_tools(Arc::clone(&shared_tools))
+        .add_middleware(Box::new(
+            AgentsMdMiddleware::new().with_excludes(claude_md_excludes),
+        ))
+        .add_middleware(Box::new(AgentDefineMiddleware::new()))
+        .add_middleware(Box::new(
+            SkillsMiddleware::new().with_extra_dirs(plugin_skill_dirs),
+        ))
+        .add_middleware(Box::new(SkillPreloadMiddleware::new(preload_skills, &cwd)))
+        .add_middleware(Box::new(FilesystemMiddleware::new()))
+        .add_middleware(Box::new(peri_middlewares::GitAttributionMiddleware::new(
+            &model_name,
+        )))
+        .add_middleware(Box::new(TerminalMiddleware::new()))
+        .add_middleware(Box::new(WebMiddleware::new()))
+        .add_middleware(Box::new(TodoMiddleware::new(todo_tx)))
+        .add_middleware(Box::new(peri_middlewares::cron::CronMiddleware::new(
+            cron_scheduler.unwrap_or_else(|| {
+                Arc::new(parking_lot::Mutex::new(
+                    peri_middlewares::cron::CronScheduler::new(
+                        tokio::sync::mpsc::unbounded_channel().0,
+                    ),
+                ))
+            }),
+        )));
+
+    // Hook middleware groups
+    let mut executor = executor;
+    if !hook_groups.is_empty() {
+        let hook_llm_factory: Arc<
+            dyn Fn() -> Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> + Send + Sync,
+        > = Arc::new({
+            let factory = llm_factory.clone();
+            move || factory(None)
+        });
+        for (i, group) in hook_groups.into_iter().enumerate() {
+            if group.is_empty() {
+                continue;
+            }
+            let mw = peri_middlewares::hooks::HookMiddleware::with_session_start(
+                group,
+                hook_llm_factory.clone(),
+                &cwd,
+                "",
+                "",
+                "",
+                provider_name.clone(),
+                hook_session_start && i == 0,
+            );
+            executor = executor.add_middleware(Box::new(mw));
+        }
+    }
+
+    let executor = executor.add_middleware(Box::new(hitl));
+    let executor = executor.add_middleware(Box::new(subagent));
+
+    // MCP 中间件
+    let executor = if let Some(pool) = mcp_pool {
+        executor.add_middleware(Box::new(peri_middlewares::mcp::McpMiddleware::new(pool)))
+    } else {
+        executor
+    };
+
+    // ToolSearch 中间件
+    let executor = executor.add_middleware(Box::new(peri_middlewares::ToolSearchMiddleware::new(
+        Arc::clone(&tool_search_index),
+        Arc::clone(&shared_tools),
+    )));
+
+    let executor = executor
+        .with_event_handler(Arc::clone(&event_handler))
+        .register_tool(Box::new(ask_user_tool));
+
+    BareAgentOutput {
+        executor,
+        todo_rx,
+        context_window,
+    }
+}
+
 pub async fn run_universal_agent(cfg: AgentRunConfig) {
     let AgentRunConfig {
         provider,
@@ -73,7 +361,7 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
         mcp_pool,
         plugin_skill_dirs,
         plugin_agent_dirs,
-        plugin_hooks,
+        plugin_hooks: _,
         plugin_lsp_servers,
         hook_groups,
         hook_session_start,
@@ -98,7 +386,6 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
     let features = crate::prompt::PromptFeatures::detect();
     let system_prompt =
         crate::prompt::build_system_prompt(overrides.as_ref(), &cwd, features, &plugin_agent_dirs);
-    let provider_for_factory = provider.clone();
     let provider_name = provider.display_name().to_string();
 
     // 事件回调 → TUI AgentEvent channel（在 model 之前创建，供 RetryableLLM 使用）
@@ -165,19 +452,40 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
         },
     ));
 
-    // 不使用 .with_system()，改由 with_system_prompt() 注入到 state，使 Langfuse 可见
-    let model_name = provider.model_name().to_string();
-    let model = peri_agent::llm::RetryableLLM::new(
-        BaseModelReactLLM::new(provider.into_model()).with_session_id(thread_id.to_string()),
-        peri_agent::llm::RetryConfig::default(),
-    )
-    .with_event_handler(Arc::clone(&handler));
+    // 使用共享 Agent 构建逻辑
+    let broker: Arc<dyn UserInteractionBroker> = TuiInteractionBroker::new(tx.clone());
+    let shared_cfg = BareAgentConfig {
+        provider,
+        cwd: cwd.clone(),
+        system_prompt,
+        event_handler: Arc::clone(&handler),
+        cancel: cancel.clone(),
+        permission_mode,
+        peri_config,
+        cron_scheduler,
+        agent_overrides: overrides,
+        preload_skills,
+        session_id: Some(thread_id.to_string()),
+        broker: broker as Arc<dyn UserInteractionBroker>,
+        plugin_skill_dirs,
+        plugin_agent_dirs,
+        hook_groups,
+        hook_session_start,
+        mcp_pool,
+        tool_search_index: Arc::clone(&tool_search_index),
+        shared_tools: Arc::clone(&shared_tools),
+    };
+    let BareAgentOutput {
+        mut executor,
+        todo_rx,
+        ..
+    } = build_bare_agent(shared_cfg);
 
-    // Todo channel：TodoMiddleware → TUI
-    let (todo_tx, mut todo_rx) = mpsc::channel::<Vec<TodoItem>>(8);
+    // Todo 转发到 TUI
     let tx_todo = tx.clone();
     tokio::spawn(async move {
-        while let Some(todos) = todo_rx.recv().await {
+        let mut rx = todo_rx;
+        while let Some(todos) = rx.recv().await {
             if tx_todo.send(AgentEvent::TodoUpdate(todos)).await.is_err() {
                 tracing::warn!("todo forwarding: TUI channel closed, stopping");
                 break;
@@ -185,240 +493,30 @@ pub async fn run_universal_agent(cfg: AgentRunConfig) {
         }
     });
 
-    // 统一人机交互 broker（取代旧的 TuiHitlHandler + TuiAskUserHandler）
-    let broker = TuiInteractionBroker::new(tx.clone());
-
-    // HITL 中间件：使用 with_shared_mode 注入共享权限模式
-    // 为 Auto 模式创建 LLM 分类器（独立于主 agent 的 BaseModel 实例）
-    let auto_classifier: Option<Arc<dyn AutoClassifier>> =
-        Some(Arc::new(LlmAutoClassifier::new(Arc::new(
-            tokio::sync::Mutex::new(provider_for_factory.clone().into_model()),
-        ))));
-    let hitl = HumanInTheLoopMiddleware::with_shared_mode(
-        broker.clone() as Arc<dyn peri_agent::interaction::UserInteractionBroker>,
-        default_requires_approval,
-        permission_mode,
-        auto_classifier,
-    );
-
-    // AskUser 工具
-    let ask_user_tool =
-        AskUserTool::new(broker as Arc<dyn peri_agent::interaction::UserInteractionBroker>);
-
-    // 构建父工具集（供子 agent 继承），来自 Filesystem + Terminal
-    let mut parent_tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
-        FilesystemMiddleware::build_tools(&cwd);
-    parent_tools.extend(TerminalMiddleware::build_tools(&cwd));
-
-    // 将 MCP 工具加入 parent_tools，供 SubAgent 继承
-    if let Some(ref pool) = mcp_pool {
-        let mcp_tools = peri_middlewares::mcp::build_tool_bridges(pool);
-        for tool in mcp_tools {
-            parent_tools.push(tool);
-        }
-        if pool.has_resources() {
-            parent_tools.push(Box::new(peri_middlewares::mcp::McpResourceTool::new(
-                Arc::clone(pool),
-            )));
-        }
-    }
-
-    // LLM 工厂：每次为子 agent 创建裸 LLM（不设 system）
-    // 系统提示词由 system_builder + with_system_prompt() 注入，使其在 Langfuse 中可见
-    // model_alias: None 表示继承父模型；有值时通过 from_config_for_alias 解析
-    let provider_clone = provider_for_factory;
-    let claude_md_excludes = peri_config
-        .config
-        .claude_md_excludes
-        .clone()
-        .unwrap_or_default();
-    let mut compact_config = peri_config.config.compact.clone().unwrap_or_default();
-    compact_config.apply_env_overrides();
-    let context_1m = peri_config.config.context_1m.unwrap_or(false);
-    let config_for_factory = peri_config;
-    let session_id_for_factory = thread_id.to_string();
-    #[allow(clippy::type_complexity)]
-    let llm_factory: Arc<
-        dyn Fn(Option<&str>) -> Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync>
-            + Send
-            + Sync,
-    > = Arc::new(move |model_alias: Option<&str>| {
-        if let Some(alias) = model_alias {
-            if let Some(p) = LlmProvider::from_config_for_alias(&config_for_factory, alias) {
-                return Box::new(peri_agent::llm::RetryableLLM::new(
-                    BaseModelReactLLM::new(p.into_model()).with_session_id(&session_id_for_factory),
-                    peri_agent::llm::RetryConfig::default(),
-                ));
-            }
-        }
-        Box::new(peri_agent::llm::RetryableLLM::new(
-            BaseModelReactLLM::new(provider_clone.clone().into_model())
-                .with_session_id(&session_id_for_factory),
-            peri_agent::llm::RetryConfig::default(),
-        ))
-    });
-
-    // 系统提示构建器：根据 agent overrides 构建包含 tone/proactiveness 的完整系统提示
-    #[allow(clippy::type_complexity)]
-    let system_builder: Arc<
-        dyn Fn(Option<&peri_middlewares::AgentOverrides>, &str) -> String + Send + Sync,
-    > = Arc::new(|overrides, cwd| {
-        crate::prompt::build_system_prompt(
-            overrides,
-            cwd,
-            crate::prompt::PromptFeatures::detect(),
-            &[],
-        )
-    });
-
-    // Parent message snapshot shared reference: written by SubAgentMiddleware::before_agent, read by Fork child agent
-    let parent_messages: Arc<parking_lot::RwLock<Vec<BaseMessage>>> =
-        Arc::new(parking_lot::RwLock::new(Vec::new()));
-
-    // 后台任务通知通道
-    let (bg_notification_tx, bg_notification_rx) = tokio::sync::mpsc::unbounded_channel();
-    let background_registry = Arc::new(peri_middlewares::BackgroundTaskRegistry::new(
-        bg_notification_tx,
-    ));
-
-    // SubAgent middleware
-    let subagent = SubAgentMiddleware::new(
-        parent_tools,
-        Some(Arc::clone(&handler) as Arc<dyn peri_agent::agent::events::AgentEventHandler>),
-        llm_factory.clone(),
-    )
-    .with_system_builder(system_builder)
-    .with_cancel(cancel.clone())
-    .with_parent_messages(parent_messages)
-    .with_background_registry(Arc::clone(&background_registry))
-    .with_registered_hooks(plugin_hooks.clone());
-
-    // 构建 ReActAgent
-    // FilesystemMiddleware 和 TerminalMiddleware 通过 collect_tools 自动提供工具
-
-    // Tool Search: 使用会话级共享的搜索索引和工具注册表（跨 submit 复用，缓存提示词）
-    // （从 AgentRunConfig 传入，已在 session 层初始化）
-
-    // 设置 context_budget 以启用核心层的 token 用量监控和 micro_compact
-    let mut context_window = model.context_window();
-    if context_1m {
-        context_window = 1_000_000;
-    }
-    let context_budget = peri_agent::agent::token::ContextBudget::new(context_window)
-        .with_auto_compact_threshold(compact_config.auto_compact_threshold)
-        .with_warning_threshold(compact_config.micro_compact_threshold);
-
-    let executor = ReActAgent::new(model)
-        .max_iterations(500)
-        .with_context_budget(context_budget)
-        .with_compact_config(compact_config)
-        .with_notification_rx(bg_notification_rx)
-        .with_system_prompt(system_prompt) // executor 内部固定 prepend，无顺序约束
-        .with_tool_filter(peri_middlewares::tool_search::is_deferred_tool)
-        .with_shared_tools(Arc::clone(&shared_tools))
-        .add_middleware(Box::new(
-            AgentsMdMiddleware::new().with_excludes(claude_md_excludes),
-        ))
-        .add_middleware(Box::new(AgentDefineMiddleware::new()))
-        .add_middleware(Box::new(
-            SkillsMiddleware::new().with_extra_dirs(plugin_skill_dirs),
-        ))
-        .add_middleware(Box::new(SkillPreloadMiddleware::new(preload_skills, &cwd)))
-        .add_middleware(Box::new(FilesystemMiddleware::new()))
-        .add_middleware(Box::new(peri_middlewares::GitAttributionMiddleware::new(
-            &model_name,
-        )))
-        .add_middleware(Box::new(TerminalMiddleware::new()))
-        .add_middleware(Box::new(WebMiddleware::new()))
-        .add_middleware(Box::new(TodoMiddleware::new(todo_tx)))
-        .add_middleware(Box::new(peri_middlewares::cron::CronMiddleware::new(
-            cron_scheduler.unwrap_or_else(|| {
-                Arc::new(parking_lot::Mutex::new(
-                    peri_middlewares::cron::CronScheduler::new(
-                        tokio::sync::mpsc::unbounded_channel().0,
-                    ),
-                ))
-            }),
-        )));
-
-    // Hook middleware groups（每组对应一个独立的 HookMiddleware 实例）
-    // Placed before HITL so PermissionRequest hooks fire before the approval popup.
-    // PreToolUse hooks also fire here; SubagentStart/Stop are handled by SubAgentTool directly.
-    let mut executor = executor;
-    if !hook_groups.is_empty() {
-        let hook_llm_factory: Arc<
-            dyn Fn() -> Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> + Send + Sync,
-        > = Arc::new({
-            let factory = llm_factory.clone();
-            move || factory(None)
-        });
-        for (i, group) in hook_groups.into_iter().enumerate() {
-            if group.is_empty() {
-                continue;
-            }
-            let mw = peri_middlewares::hooks::HookMiddleware::with_session_start(
-                group,
-                hook_llm_factory.clone(),
-                &cwd,
-                "", // session_id — 不由 TUI 提供
-                "", // transcript_path — 不由 TUI 提供
-                "", // permission_mode — 由 HITL 中间件管理
-                provider_name.clone(),
-                hook_session_start && i == 0, // 仅第一个 group 触发 SessionStart
-            );
-            executor = executor.add_middleware(Box::new(mw));
-        }
-    }
-
-    let executor = executor.add_middleware(Box::new(hitl));
-
-    let executor = executor.add_middleware(Box::new(subagent));
-
-    // MCP 中间件：仅在 pool 初始化成功时注册
-    let executor = if let Some(pool) = mcp_pool {
-        executor.add_middleware(Box::new(peri_middlewares::mcp::McpMiddleware::new(pool)))
-    } else {
-        executor
-    };
-
-    // ToolSearch 中间件：注册 SearchExtraTools + ExecuteExtraTool 元工具
-    // 必须在 MCP 之后，确保 MCP 工具已注册到 executor
-    let executor = executor.add_middleware(Box::new(peri_middlewares::ToolSearchMiddleware::new(
-        Arc::clone(&tool_search_index),
-        Arc::clone(&shared_tools),
-    )));
-
-    // LSP 中间件：合并全局 LSP 配置和插件 LSP 配置，惰性初始化
+    // LSP 中间件（TUI only）
     let lsp_settings_path = dirs_next::home_dir().map(|h| h.join(".peri").join("settings.json"));
     let mut lsp_config = if let Some(ref settings_path) = lsp_settings_path {
         peri_lsp::config::load_global_lsp_config(settings_path)
     } else {
         peri_lsp::config::LspConfigFile::default()
     };
-    // 插件 LSP 配置（全局同名覆盖插件）
     for server in plugin_lsp_servers {
         lsp_config
             .lsp_servers
             .entry(server.name.clone())
             .or_insert(server);
     }
-    let executor = if lsp_config.lsp_servers.is_empty() {
-        executor
-    } else {
+    if !lsp_config.lsp_servers.is_empty() {
         tracing::info!(
             target: "lsp",
             servers = lsp_config.lsp_servers.len(),
             "加载 LSP 配置"
         );
-        executor.add_middleware(Box::new(peri_middlewares::LspMiddleware::new(
+        executor = executor.add_middleware(Box::new(peri_middlewares::LspMiddleware::new(
             cwd.to_string(),
             lsp_config,
-        )))
-    };
-
-    let executor = executor
-        .with_event_handler(Arc::clone(&handler))
-        .register_tool(Box::new(ask_user_tool));
+        )));
+    }
 
     let mut state =
         AgentState::with_messages(cwd, history).with_persistence(thread_store, thread_id);
