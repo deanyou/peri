@@ -84,7 +84,7 @@ pub fn render_block(
             ];
             if !state.args_summary.is_empty() {
                 let summary =
-                    crate::tool_call::display::format_args_summary(&state.args_summary, 40);
+                    crate::tool_call::display::format_args_summary(&state.args_summary, 400);
                 header_spans.push(ratatui::text::Span::styled(
                     format!("({})", summary),
                     ratatui::style::Style::default().fg(theme.dim()),

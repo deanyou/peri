@@ -40,14 +40,12 @@ pub fn format_tool_args(
     cwd: Option<&str>,
 ) -> Option<String> {
     match tool {
-        "Bash" => input["command"].as_str().map(|s| truncate(s, 60)),
-        "Read" | "Write" | "Edit" => input["file_path"]
-            .as_str()
-            .map(|p| truncate(&strip_cwd(p, cwd), 60)),
+        "Bash" => input["command"].as_str().map(|s| truncate(s, 400)),
+        "Read" | "Write" | "Edit" => input["file_path"].as_str().map(|p| strip_cwd(p, cwd)),
         "Glob" => input["pattern"]
             .as_str()
-            .map(|p| truncate(&strip_cwd(p, cwd), 60)),
-        "Grep" => input["pattern"].as_str().map(|s| truncate(s, 60)),
+            .map(|p| truncate(&strip_cwd(p, cwd), 200)),
+        "Grep" => input["pattern"].as_str().map(|s| truncate(s, 200)),
         "folder_operations" => {
             let op = input["operation"].as_str().unwrap_or("?");
             let path = input["folder_path"].as_str().unwrap_or("?");

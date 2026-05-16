@@ -93,7 +93,7 @@ impl<'a> Widget for ToolCallWidget<'a> {
         ];
 
         if !self.state.args_summary.is_empty() {
-            let summary = display::format_args_summary(&self.state.args_summary, 40);
+            let summary = display::format_args_summary(&self.state.args_summary, 400);
             header_spans.push(Span::styled(
                 format!("({})", summary),
                 Style::default().fg(ratatui::style::Color::DarkGray),

@@ -376,7 +376,7 @@ pub fn render_view_model(
             ];
             if !state.args_summary.is_empty() {
                 let summary =
-                    peri_widgets::tool_call::display::format_args_summary(&state.args_summary, 40);
+                    peri_widgets::tool_call::display::format_args_summary(&state.args_summary, 400);
                 header_spans.push(Span::styled(
                     format!("({})", summary),
                     Style::default().fg(theme::DIM),
