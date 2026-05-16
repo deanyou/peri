@@ -357,6 +357,9 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                                     return Ok(Some(Action::Quit));
                                 }
                             }
+                            crate::app::setup_wizard::SetupWizardAction::SetLanguage(lang) => {
+                                let _ = app.services.lc.switch(&lang);
+                            }
                             crate::app::setup_wizard::SetupWizardAction::Redraw => {}
                         }
                     }

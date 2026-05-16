@@ -254,7 +254,7 @@ impl Default for SetupWizardPanel {
 impl SetupWizardPanel {
     pub fn new() -> Self {
         Self {
-            step: SetupStep::Choose,
+            step: SetupStep::Language,
             source: SetupSource::CustomApi,
             choose_cursor: 0,
             language: "en".to_string(),
@@ -485,6 +485,7 @@ pub enum SetupWizardAction {
     Redraw,
     SaveAndClose,
     Skip,
+    SetLanguage(String),
 }
 
 /// Setup 向导按键分发
@@ -536,11 +537,16 @@ fn handle_step_choose(
                 wizard.providers = vec![MigratedProvider::new(ProviderType::Anthropic)];
                 wizard.active_provider = 0;
             }
-            wizard.step = SetupStep::Language;
-            wizard.language_cursor = 0;
+            wizard.step = SetupStep::Form;
+            wizard.form_mode = FormMode::Browse;
+            wizard.browse_cursor = 0;
+            wizard.form_focus = FormField::ProviderType;
             Some(SetupWizardAction::Redraw)
         }
-        tui_textarea::Input { key: Key::Esc, .. } => Some(SetupWizardAction::Skip),
+        tui_textarea::Input { key: Key::Esc, .. } => {
+            wizard.step = SetupStep::Language;
+            Some(SetupWizardAction::Redraw)
+        }
         _ => None,
     }
 }
@@ -567,17 +573,13 @@ fn handle_step_language(
             key: Key::Char(' '),
             ..
         } => {
-            wizard.language = LANGUAGE_OPTIONS[wizard.language_cursor].0.to_string();
-            wizard.step = SetupStep::Form;
-            wizard.form_mode = FormMode::Browse;
-            wizard.browse_cursor = 0;
-            wizard.form_focus = FormField::ProviderType;
-            Some(SetupWizardAction::Redraw)
-        }
-        tui_textarea::Input { key: Key::Esc, .. } => {
+            let lang = LANGUAGE_OPTIONS[wizard.language_cursor].0.to_string();
+            wizard.language = lang.clone();
             wizard.step = SetupStep::Choose;
-            Some(SetupWizardAction::Redraw)
+            wizard.choose_cursor = 0;
+            Some(SetupWizardAction::SetLanguage(lang))
         }
+        tui_textarea::Input { key: Key::Esc, .. } => Some(SetupWizardAction::Skip),
         _ => None,
     }
 }
@@ -647,9 +649,9 @@ fn handle_browse(
                 Some(SetupWizardAction::Redraw)
             }
         }
-        // Esc: 返回 Language
+        // Esc: 返回 Choose
         tui_textarea::Input { key: Key::Esc, .. } => {
-            wizard.step = SetupStep::Language;
+            wizard.step = SetupStep::Choose;
             Some(SetupWizardAction::Redraw)
         }
         _ => None,

@@ -23,8 +23,7 @@ fn test_needs_setup_api_key_from_config() {
 #[test]
 fn test_setup_wizard_new_defaults() {
     let wizard = SetupWizardPanel::new();
-    assert_eq!(wizard.step, SetupStep::Choose);
-    assert_eq!(wizard.source, SetupSource::CustomApi);
+    assert_eq!(wizard.step, SetupStep::Language);
     assert_eq!(wizard.language, "en");
     assert_eq!(wizard.language_cursor, 0);
     assert_eq!(wizard.providers.len(), 1);
@@ -195,6 +194,7 @@ fn type_text(wizard: &mut SetupWizardPanel, text: &str) {
 #[test]
 fn test_choose_arrow_cycles_source() {
     let mut wizard = SetupWizardPanel::new();
+    wizard.step = SetupStep::Choose;
     let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Down));
     assert_eq!(wizard.source, SetupSource::MigrateClaudeCode);
     let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Up));
@@ -202,18 +202,21 @@ fn test_choose_arrow_cycles_source() {
 }
 
 #[test]
-fn test_choose_enter_custom_advances_to_language() {
+fn test_choose_enter_custom_advances_to_form() {
     let mut wizard = SetupWizardPanel::new();
+    wizard.step = SetupStep::Choose;
     let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.step, SetupStep::Language);
-    assert_eq!(wizard.language_cursor, 0);
+    assert_eq!(wizard.step, SetupStep::Form);
+    assert_eq!(wizard.form_mode, FormMode::Browse);
+    assert_eq!(wizard.providers.len(), 1);
 }
 
 #[test]
-fn test_choose_esc_skips() {
+fn test_choose_esc_back_to_language() {
     let mut wizard = SetupWizardPanel::new();
-    let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert!(matches!(action, Some(SetupWizardAction::Skip)));
+    wizard.step = SetupStep::Choose;
+    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
+    assert_eq!(wizard.step, SetupStep::Language);
 }
 
 // ── Step: Language ──
@@ -221,7 +224,7 @@ fn test_choose_esc_skips() {
 #[test]
 fn test_language_arrow_navigates() {
     let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Language;
+    assert_eq!(wizard.step, SetupStep::Language);
     assert_eq!(wizard.language_cursor, 0);
     let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Down));
     assert_eq!(wizard.language_cursor, 1);
@@ -232,31 +235,35 @@ fn test_language_arrow_navigates() {
 }
 
 #[test]
-fn test_language_enter_selects_and_advances_to_form() {
+fn test_language_enter_selects_and_advances_to_choose() {
     let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Language;
     wizard.language_cursor = 1; // zh-CN
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
+    let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
+    assert!(matches!(
+        action,
+        Some(SetupWizardAction::SetLanguage(ref s)) if s == "zh-CN"
+    ));
     assert_eq!(wizard.language, "zh-CN");
-    assert_eq!(wizard.step, SetupStep::Form);
-    assert_eq!(wizard.form_mode, FormMode::Browse);
+    assert_eq!(wizard.step, SetupStep::Choose);
 }
 
 #[test]
 fn test_language_space_selects_and_advances() {
     let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Language;
-    let _ = handle_setup_wizard_key(&mut wizard, make_char(' '));
+    let action = handle_setup_wizard_key(&mut wizard, make_char(' '));
+    assert!(matches!(
+        action,
+        Some(SetupWizardAction::SetLanguage(ref s)) if s == "en"
+    ));
     assert_eq!(wizard.language, "en");
-    assert_eq!(wizard.step, SetupStep::Form);
+    assert_eq!(wizard.step, SetupStep::Choose);
 }
 
 #[test]
-fn test_language_esc_back_to_choose() {
+fn test_language_esc_quits() {
     let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Language;
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert_eq!(wizard.step, SetupStep::Choose);
+    let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
+    assert!(matches!(action, Some(SetupWizardAction::Skip)));
 }
 
 #[test]
@@ -264,6 +271,7 @@ fn test_language_default_is_en() {
     let wizard = SetupWizardPanel::new();
     assert_eq!(wizard.language, "en");
     assert_eq!(wizard.language_cursor, 0);
+    assert_eq!(wizard.step, SetupStep::Language);
 }
 
 // ── Step: Form (Browse mode) ──
@@ -320,12 +328,12 @@ fn test_browse_enter_submit_validates() {
 }
 
 #[test]
-fn test_browse_esc_back_to_language() {
+fn test_browse_esc_back_to_choose() {
     let mut wizard = SetupWizardPanel::new();
     wizard.step = SetupStep::Form;
     wizard.form_mode = FormMode::Browse;
     let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert_eq!(wizard.step, SetupStep::Language);
+    assert_eq!(wizard.step, SetupStep::Choose);
 }
 
 // ── Step: Form (Edit mode) ──

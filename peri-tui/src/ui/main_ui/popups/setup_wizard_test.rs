@@ -19,7 +19,8 @@
 
     #[tokio::test]
     async fn test_render_step_choose() {
-        let wizard = SetupWizardPanel::new();
+        let mut wizard = SetupWizardPanel::new();
+        wizard.step = SetupStep::Choose;
         let (_, handle) = render_headless(wizard).await;
         assert!(handle.contains("Custom API"));
         assert!(handle.contains("Claude Code"));
