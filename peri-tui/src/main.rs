@@ -46,8 +46,8 @@ enum Commands {
         #[arg(short = 'g', long)]
         agent: Option<String>,
     },
-    /// 自更新：从 GitHub Releases 下载并安装最新版本
-    SelfUpdate,
+    /// 更新：从 GitHub 下载并安装最新版本
+    Update,
 }
 
 // ─── 环境变量注入 ──────────────────────────────────────────────────────────
@@ -108,16 +108,15 @@ fn main() -> Result<()> {
                 .build()?;
             rt.block_on(peri_tui::acp::run_acp_mode(cwd, model, agent))
         }
-        Some(Commands::SelfUpdate) => {
+        Some(Commands::Update) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             rt.block_on(async {
-                match peri_tui::self_update::run_self_update().await {
-                    Ok(Some(tag)) => println!("Updated to {tag}"),
-                    Ok(None) => {} // already latest, message printed
+                match peri_tui::update::run_update().await {
+                    Ok(tag) => println!("Updated to {tag}"),
                     Err(e) => {
-                        eprintln!("Self-update failed: {e:#}");
+                        eprintln!("Update failed: {e:#}");
                         std::process::exit(1);
                     }
                 }
@@ -316,6 +315,10 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Resul
                     terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
                 }
             }
+        }
+        // /exit 或 /quit 命令设置的退出标志
+        if app.global_ui.quit_requested {
+            break 'event_loop;
         }
     }
 
