@@ -190,6 +190,7 @@ setup-label-key = 密钥：
 setup-provider-anthropic = Anthropic
 setup-provider-openai = OpenAI 兼容
 setup-confirm = 确认
+setup-test-connectivity = [ 测试联通性 ]
 setup-key-switch-type = :切换类型
 setup-key-back-list = :返回列表
 setup-complete-title =  ── 设置完成 ✓

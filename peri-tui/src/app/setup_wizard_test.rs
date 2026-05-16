@@ -161,6 +161,46 @@ fn test_form_field_navigation() {
     assert_eq!(FormField::ProviderType.prev(), FormField::Confirm);
     assert_eq!(FormField::Confirm.prev(), FormField::HaikuModel);
     assert_eq!(FormField::ProviderId.prev(), FormField::ProviderType);
+
+    // TestConnectivity 插入在 BaseUrl 之后、ApiKey 之前
+    assert_eq!(FormField::BaseUrl.next(), FormField::TestConnectivity);
+    assert_eq!(FormField::TestConnectivity.next(), FormField::ApiKey);
+    assert_eq!(FormField::ApiKey.prev(), FormField::TestConnectivity);
+    assert_eq!(FormField::TestConnectivity.prev(), FormField::BaseUrl);
+    // TestConnectivity 不是文本输入
+    assert!(!FormField::TestConnectivity.is_text_input());
+}
+
+#[test]
+fn test_connectivity_invalid_url() {
+    let (ok, msg) = test_connectivity("");
+    assert!(!ok);
+    assert!(msg.contains("Invalid URL"));
+}
+
+#[test]
+fn test_connectivity_parse_host_port() {
+    assert!(parse_host_port("").is_none());
+    // localhost 应始终可解析
+    let addr = parse_host_port("https://localhost:8443/v1").unwrap();
+    assert_eq!(addr.port(), 8443);
+    let addr = parse_host_port("http://localhost:8080").unwrap();
+    assert_eq!(addr.port(), 8080);
+    // 无 scheme 默认 https/443
+    let addr = parse_host_port("127.0.0.1:9999").unwrap();
+    assert_eq!(addr.port(), 9999);
+}
+
+#[test]
+fn test_connectivity_enter_triggers_test() {
+    let mut wizard = SetupWizardPanel::new();
+    wizard.step = SetupStep::Form;
+    wizard.form_mode = FormMode::Edit;
+    wizard.form_focus = FormField::TestConnectivity;
+    wizard.providers[0].base_url = "https://example.com".to_string();
+    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
+    // 结果应已设置（无论成功或失败）
+    assert!(wizard.connectivity_result.is_some());
 }
 
 // ── Event handling tests ──

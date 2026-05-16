@@ -352,6 +352,28 @@ fn render_form_edit(
         wizard.form_focus,
     ));
 
+    // 测试联通性按钮 + 结果
+    let test_active = wizard.form_focus == FormField::TestConnectivity;
+    let test_cursor = if test_active { "❯ " } else { "  " };
+    let test_style = if test_active {
+        Style::default()
+            .fg(theme::THINKING)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::MUTED)
+    };
+    lines.push(Line::from(vec![
+        Span::styled(test_cursor, Style::default().fg(theme::THINKING)),
+        Span::styled(format!(" {}", lc.tr("setup-test-connectivity")), test_style),
+    ]));
+    if let Some((ok, ref msg)) = wizard.connectivity_result {
+        let result_color = if ok { theme::SAGE } else { theme::WARNING };
+        lines.push(Line::from(Span::styled(
+            format!("  {}", msg),
+            Style::default().fg(result_color),
+        )));
+    }
+
     let key_display = if wizard.form_focus == FormField::ApiKey {
         let (before, after) = crate::app::edit_display_parts(&mp.api_key, mp.cur_api_key);
         format!("{}▏{}", before, after)

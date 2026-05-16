@@ -191,6 +191,7 @@ setup-label-key = Key:
 setup-provider-anthropic = Anthropic
 setup-provider-openai = OpenAI Compatible
 setup-confirm = Confirm
+setup-test-connectivity = [ Test Connectivity ]
 setup-key-switch-type = :Switch type
 setup-key-back-list = :Back to list
 setup-complete-title =  ── Setup Complete ✓

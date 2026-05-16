@@ -174,6 +174,8 @@ pub enum FormField {
     ProviderType,
     ProviderId,
     BaseUrl,
+    /// 测试 Base URL 连通性（Enter 触发 TCP 连接测试，结果单行显示）
+    TestConnectivity,
     ApiKey,
     OpusModel,
     SonnetModel,
@@ -186,7 +188,8 @@ impl FormField {
         match self {
             Self::ProviderType => Self::ProviderId,
             Self::ProviderId => Self::BaseUrl,
-            Self::BaseUrl => Self::ApiKey,
+            Self::BaseUrl => Self::TestConnectivity,
+            Self::TestConnectivity => Self::ApiKey,
             Self::ApiKey => Self::OpusModel,
             Self::OpusModel => Self::SonnetModel,
             Self::SonnetModel => Self::HaikuModel,
@@ -200,7 +203,8 @@ impl FormField {
             Self::ProviderType => Self::Confirm,
             Self::ProviderId => Self::ProviderType,
             Self::BaseUrl => Self::ProviderId,
-            Self::ApiKey => Self::BaseUrl,
+            Self::TestConnectivity => Self::BaseUrl,
+            Self::ApiKey => Self::TestConnectivity,
             Self::OpusModel => Self::ApiKey,
             Self::SonnetModel => Self::OpusModel,
             Self::HaikuModel => Self::SonnetModel,
@@ -245,6 +249,8 @@ pub struct SetupWizardPanel {
     pub from_command: bool,
     /// Browse Submit 失败时的提示消息（下次操作自动清除）
     pub submit_error: Option<String>,
+    /// 连通性测试结果（bool=成功, String=描述信息）
+    pub connectivity_result: Option<(bool, String)>,
 }
 
 impl Default for SetupWizardPanel {
@@ -268,6 +274,7 @@ impl SetupWizardPanel {
             form_focus: FormField::ProviderType,
             from_command: false,
             submit_error: None,
+            connectivity_result: None,
         }
     }
 
@@ -452,6 +459,60 @@ fn env_get(env: &serde_json::Map<String, serde_json::Value>, key: &str) -> Strin
         }
         None => String::new(),
     }
+}
+
+/// 测试 Base URL 的 TCP 连通性（3 秒超时）
+///
+/// 从 URL 中提取 host:port，尝试建立 TCP 连接。
+/// 返回 `(成功标志, 结果描述)`。
+fn test_connectivity(base_url: &str) -> (bool, String) {
+    let addr = match parse_host_port(base_url) {
+        Some(a) => a,
+        None => return (false, format!("Invalid URL: {}", base_url)),
+    };
+    let timeout = std::time::Duration::from_secs(3);
+    match std::net::TcpStream::connect_timeout(&addr, timeout) {
+        Ok(_) => (true, format!("Connected to {}", addr)),
+        Err(e) => (false, format!("{} unreachable: {}", addr, e)),
+    }
+}
+
+/// 从 URL 字符串解析 host:port，默认端口 https→443, http→80
+fn parse_host_port(url: &str) -> Option<std::net::SocketAddr> {
+    let s = url.trim();
+    // 处理形如 https://host:port/path 的 URL
+    let (scheme, rest) = if let Some(idx) = s.find("://") {
+        (&s[..idx], &s[idx + 3..])
+    } else {
+        ("https", s)
+    };
+    let default_port: u16 = if scheme.eq_ignore_ascii_case("http") {
+        80
+    } else {
+        443
+    };
+    let host_port = match rest.find('/') {
+        Some(idx) => &rest[..idx],
+        None => rest,
+    };
+    let (host, port_str) = match host_port.rfind(':') {
+        Some(idx) if host_port[idx + 1..].chars().all(|c| c.is_ascii_digit()) => {
+            (&host_port[..idx], &host_port[idx + 1..])
+        }
+        _ => (host_port, ""),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port: u16 = if port_str.is_empty() {
+        default_port
+    } else {
+        port_str.parse().ok()?
+    };
+    // DNS 解析 → 取第一个 IPv4 地址
+    use std::net::ToSocketAddrs;
+    let addr_str = format!("{}:{}", host, port);
+    addr_str.to_socket_addrs().ok()?.next()
 }
 
 /// 在光标位置插入字符串并移动光标
@@ -754,11 +815,15 @@ fn handle_edit(
                 None
             }
         }
-        // Enter: Confirm 返回 Browse（校验字段完整性）
+        // Enter: Confirm 返回 Browse（校验字段完整性）或 测试联通性
         tui_textarea::Input {
             key: Key::Enter, ..
         } => {
-            if wizard.form_focus == FormField::Confirm {
+            if wizard.form_focus == FormField::TestConnectivity {
+                let mp = &wizard.providers[wizard.active_provider];
+                wizard.connectivity_result = Some(test_connectivity(&mp.base_url));
+                Some(SetupWizardAction::Redraw)
+            } else if wizard.form_focus == FormField::Confirm {
                 let mp = &wizard.providers[wizard.active_provider];
                 if !mp.provider_id.trim().is_empty()
                     && !mp.api_key.trim().is_empty()
