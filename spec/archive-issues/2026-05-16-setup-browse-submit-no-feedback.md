@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-setup-browse-submit-no-feedback.md
+
 # Browse 模式 Submit 失败时无任何反馈
 
 **状态**：Fixed

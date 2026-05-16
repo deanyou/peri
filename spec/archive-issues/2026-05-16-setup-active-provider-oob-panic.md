@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-setup-active-provider-oob-panic.md
+
 # active_provider 越界无保护可导致 render panic
 
 **状态**：Fixed

@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-13-input-history-message-duplication-after-background-tasks.md
+
 > 归档于 2026-05-14，原路径 spec/issues/2026-05-13-input-history-message-duplication-after-background-tasks.md
 # 后台 Agent 完成后 input_history 消息重复导致 Prompt Cache 失效
 

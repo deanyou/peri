@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-14-dead-code-unfinished-features-cleanup.md
+
 > 归档于 2026-05-15，原路径 spec/issues/2026-05-14-dead-code-unfinished-features-cleanup.md
 
 # 死代码与未完成功能清理：CaptureLLM 未接入测试、多个未使用字段

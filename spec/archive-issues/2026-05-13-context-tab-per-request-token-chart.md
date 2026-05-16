@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-13-context-tab-per-request-token-chart.md
+
 > 归档于 2026-05-14，原路径 spec/issues/2026-05-13-context-tab-per-request-token-chart.md
 # /context Tab 增加每次请求的 token 柱状图和缓存命中率柱状图
 

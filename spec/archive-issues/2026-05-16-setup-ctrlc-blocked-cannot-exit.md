@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-setup-ctrlc-blocked-cannot-exit.md
+
 # Ctrl+C 在 Setup Wizard 中完全被拦截——无法退出
 
 **状态**：Fixed

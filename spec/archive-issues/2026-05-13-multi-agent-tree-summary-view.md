@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-13-multi-agent-tree-summary-view.md
+
 > 归档于 2026-05-14，原路径 spec/issues/2026-05-13-multi-agent-tree-summary-view.md
 # 多 SubAgent 并发/连续调用的视图过于冗长，需要树形汇总视图
 

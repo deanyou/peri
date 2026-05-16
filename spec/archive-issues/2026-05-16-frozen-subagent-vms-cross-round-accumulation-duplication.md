@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication.md
+
 # SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示
 
 **状态**：Fixed
@@ -75,4 +77,3 @@
 - `peri-tui/src/app/message_pipeline_test.rs` —— 新增 2 个测试：
   - `test_frozen_subagent_vms_cleared_on_begin_round`：验证跨轮次清空行为
   - `test_merge_frozen_subagents_empty_is_noop`：验证空 frozen_vms 的 noop 语义
-

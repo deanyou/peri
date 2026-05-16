@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-14-orphaned-tool-use-without-tool-result.md
+
 > 归档于 2026-05-15，原路径 spec/issues/2026-05-14-orphaned-tool-use-without-tool-result.md
 
 # Anthropic API 400: 并发工具调用中部分 tool_result 缺失导致孤儿 tool_use

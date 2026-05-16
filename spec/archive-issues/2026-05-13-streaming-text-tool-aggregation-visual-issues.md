@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-13-streaming-text-tool-aggregation-visual-issues.md
+
 > 归档于 2026-05-14，原路径 spec/issues/2026-05-13-streaming-text-tool-aggregation-visual-issues.md
 # 流式渲染视觉问题：多轮 AI 文本合并在一个气泡
 

@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-setup-provider-type-toggle-resets-data.md
+
 # Edit 模式 ProviderType 切换静默重置所有已编辑数据
 
 **状态**：Fixed

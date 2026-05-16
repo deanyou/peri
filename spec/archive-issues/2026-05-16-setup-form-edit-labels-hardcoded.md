@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-setup-form-edit-labels-hardcoded.md
+
 # Form Edit 字段标签硬编码英文，未使用 i18n
 
 **状态**：Fixed

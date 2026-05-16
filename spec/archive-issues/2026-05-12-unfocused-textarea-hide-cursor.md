@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-12-unfocused-textarea-hide-cursor.md
+
 > 归档于 2026-05-13，原路径 spec/issues/2026-05-12-unfocused-textarea-hide-cursor.md
 
 # 输入框光标应随聚焦状态隐藏
@@ -61,7 +63,7 @@
 
 ### 终端焦点事件
 
-crossterm 的焦点事件**不是默认启用的**，需要手动发送 `EnableFocusChange` 命令（ANSI escape sequence `\x1b[?1004h`）。
+crossterm 的焦点事件**不是默认启用的**，需要手动发送 `EnableFocusChange` 命令（ANSI escape sequence `[?1004h`）。
 
 启用后，终端会发送以下事件：
 - `Event::FocusGained` — 应用获得焦点

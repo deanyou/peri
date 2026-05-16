@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-13-cache-warning-show-request-id.md
+
 > 归档于 2026-05-14，原路径 spec/issues/2026-05-13-cache-warning-show-request-id.md
 # 缓存命中率警告中显示 API Request ID
 

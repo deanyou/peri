@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-14-deepseek-anthropic-thinking-block-dropped.md
+
 > 归档于 2026-05-15，原路径 spec/issues/2026-05-14-deepseek-anthropic-thinking-block-dropped.md
 
 # DeepSeek Anthropic 兼容端口：SkillPreloadMiddleware 注入的伪 assistant 消息缺少 thinking block

@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-15-thinking-tail-preview.md
+
 > 归档于 2026-05-15，原路径 spec/issues/2026-05-15-thinking-tail-preview.md
 
 # Thinking 尾部预览：最后一条 AI 消息无正文时展示思考最后 1 行
@@ -57,7 +59,8 @@
 fn extract_tail_lines(text: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
-    lines[start..].join("\n")
+    lines[start..].join("
+")
 }
 ```
 

@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-14-grep-tool-capability-gap.md
+
 > 归档于 2026-05-15，原路径 spec/issues/2026-05-14-grep-tool-capability-gap.md
 
 # Grep 工具能力缺口：声明不实现 + 标准能力缺失

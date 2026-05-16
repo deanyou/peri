@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-13-cache-hit-rate-chart-y-axis-adaptive.md
+
 > 归档于 2026-05-14，原路径 spec/issues/2026-05-13-cache-hit-rate-chart-y-axis-adaptive.md
 # 缓存命中率图表 y 轴应自适应数据范围
 

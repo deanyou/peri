@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-setup-mod-zero-empty-options.md
+
 # Language 步骤空选项下取模 panic 风险
 
 **状态**：Fixed

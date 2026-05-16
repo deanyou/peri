@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-13-sync-subagent-events-leak-to-parent.md
+
 > 归档于 2026-05-14，原路径 spec/issues/2026-05-13-sync-subagent-events-leak-to-parent.md
 # 同步子 Agent（Normal/Fork）事件溢出到主 Agent 消息流
 

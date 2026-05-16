@@ -461,58 +461,98 @@ fn env_get(env: &serde_json::Map<String, serde_json::Value>, key: &str) -> Strin
     }
 }
 
-/// 测试 Base URL 的 TCP 连通性（3 秒超时）
+/// 向 LLM Provider 发送 "hello" 请求测试联通性（5 秒超时）
 ///
-/// 从 URL 中提取 host:port，尝试建立 TCP 连接。
+/// 根据 provider_type 构造 Anthropic 或 OpenAI-compatible 格式的请求，
+/// 发送到 base_url 并使用 api_key 认证。model 使用首个 alias（Opus）。
 /// 返回 `(成功标志, 结果描述)`。
-fn test_connectivity(base_url: &str) -> (bool, String) {
-    let addr = match parse_host_port(base_url) {
-        Some(a) => a,
-        None => return (false, format!("Invalid URL: {}", base_url)),
-    };
-    let timeout = std::time::Duration::from_secs(3);
-    match std::net::TcpStream::connect_timeout(&addr, timeout) {
-        Ok(_) => (true, format!("Connected to {}", addr)),
-        Err(e) => (false, format!("{} unreachable: {}", addr, e)),
+fn test_connectivity(
+    base_url: &str,
+    api_key: &str,
+    provider_type: ProviderType,
+    model: &str,
+) -> (bool, String) {
+    // 空 URL 或空 API Key 直接返回错误
+    if base_url.trim().is_empty() {
+        return (false, "Base URL is empty".to_string());
     }
-}
+    if api_key.trim().is_empty() {
+        return (false, "API Key is empty".to_string());
+    }
 
-/// 从 URL 字符串解析 host:port，默认端口 https→443, http→80
-fn parse_host_port(url: &str) -> Option<std::net::SocketAddr> {
-    let s = url.trim();
-    // 处理形如 https://host:port/path 的 URL
-    let (scheme, rest) = if let Some(idx) = s.find("://") {
-        (&s[..idx], &s[idx + 3..])
-    } else {
-        ("https", s)
+    let http = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return (false, format!("HTTP client init failed: {}", e)),
     };
-    let default_port: u16 = if scheme.eq_ignore_ascii_case("http") {
-        80
-    } else {
-        443
-    };
-    let host_port = match rest.find('/') {
-        Some(idx) => &rest[..idx],
-        None => rest,
-    };
-    let (host, port_str) = match host_port.rfind(':') {
-        Some(idx) if host_port[idx + 1..].chars().all(|c| c.is_ascii_digit()) => {
-            (&host_port[..idx], &host_port[idx + 1..])
+
+    let result = match provider_type {
+        ProviderType::Anthropic => {
+            let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
+            let body = serde_json::json!({
+                "model": model,
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            http.post(&url)
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
         }
-        _ => (host_port, ""),
+        ProviderType::OpenAiCompatible => {
+            let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+            let body = serde_json::json!({
+                "model": model,
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            http.post(&url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&body)
+                .send()
+        }
     };
-    if host.is_empty() {
-        return None;
+
+    match result {
+        Ok(resp) if resp.status().is_success() => {
+            // 尝试读取响应文本用于预览（截断到 64 字符）
+            let preview = resp
+                .text()
+                .ok()
+                .and_then(|t| {
+                    // 提取 content 字段中的文本
+                    let v: serde_json::Value = serde_json::from_str(&t).ok()?;
+                    let text = match provider_type {
+                        ProviderType::Anthropic => v["content"][0]["text"].as_str(),
+                        ProviderType::OpenAiCompatible => {
+                            v["choices"][0]["message"]["content"].as_str()
+                        }
+                    };
+                    text.map(|t| {
+                        let t = t.trim();
+                        if t.len() > 64 {
+                            format!("{}…", &t[..64])
+                        } else {
+                            t.to_string()
+                        }
+                    })
+                })
+                .unwrap_or_default();
+            if preview.is_empty() {
+                (true, format!("{} reachable", base_url))
+            } else {
+                (true, format!("{} → \"{}\"", base_url, preview))
+            }
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            (false, format!("{} returned HTTP {}", base_url, status))
+        }
+        Err(e) => (false, format!("{} unreachable: {}", base_url, e)),
     }
-    let port: u16 = if port_str.is_empty() {
-        default_port
-    } else {
-        port_str.parse().ok()?
-    };
-    // DNS 解析 → 取第一个 IPv4 地址
-    use std::net::ToSocketAddrs;
-    let addr_str = format!("{}:{}", host, port);
-    addr_str.to_socket_addrs().ok()?.next()
 }
 
 /// 在光标位置插入字符串并移动光标
@@ -756,6 +796,10 @@ fn handle_edit(
     input: tui_textarea::Input,
 ) -> Option<SetupWizardAction> {
     use tui_textarea::Key;
+    // 编辑 BaseUrl 时清空旧的联通性测试结果
+    if wizard.form_focus == FormField::BaseUrl {
+        wizard.connectivity_result = None;
+    }
     match input {
         tui_textarea::Input { key: Key::Up, .. } => {
             wizard.form_focus = wizard.form_focus.prev();
@@ -821,7 +865,12 @@ fn handle_edit(
         } => {
             if wizard.form_focus == FormField::TestConnectivity {
                 let mp = &wizard.providers[wizard.active_provider];
-                wizard.connectivity_result = Some(test_connectivity(&mp.base_url));
+                wizard.connectivity_result = Some(test_connectivity(
+                    &mp.base_url,
+                    &mp.api_key,
+                    mp.provider_type,
+                    &mp.aliases[0].model_id,
+                ));
                 Some(SetupWizardAction::Redraw)
             } else if wizard.form_focus == FormField::Confirm {
                 let mp = &wizard.providers[wizard.active_provider];

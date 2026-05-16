@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-setup-api-key-mask-byte-vs-char.md
+
 # API Key 遮罩使用字节长度而非字符数
 
 **状态**：Fixed

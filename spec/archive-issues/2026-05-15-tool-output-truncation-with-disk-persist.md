@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-15-tool-output-truncation-with-disk-persist.md
+
 # 工具输出超长时截断 + 持久化磁盘 + 提示 Read 读取剩余内容
 
 **状态**：Fixed

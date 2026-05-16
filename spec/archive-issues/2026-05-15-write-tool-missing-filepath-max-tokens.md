@@ -1,5 +1,7 @@
 > 归档于 2026-05-16，原路径 spec/issues/2026-05-15-write-tool-missing-filepath-max-tokens.md
 
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-15-write-tool-missing-filepath-max-tokens.md
+
 # Write 工具超长内容触发 max_tokens 截断导致 file_path 缺失
 
 **状态**：Fixed

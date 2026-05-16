@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-12-systemnote-position-drift-on-rebuild.md
+
 > 归档于 2026-05-13，原路径 spec/issues/2026-05-12-systemnote-position-drift-on-rebuild.md
 
 # SystemNote 在 RebuildAll 后堆积到消息列表末尾

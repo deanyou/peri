@@ -152,6 +152,18 @@ reconcile_tail(round_start_vm_idx)
 **涉及文件:** peri-tui/src/ui/message_view.rs, peri-tui/src/app/message_pipeline.rs, peri-tui/src/ui/message_render.rs
 **CLAUDE.md 链接:** false
 
+### issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication
+
+**摘要:** SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** 跨轮次累积, frozen_vms, begin_round 清理, 位置匹配, agent_id 校验
+**问题本质:** frozen_subagent_vms 仅在 clear() 清空，done()/begin_round() 均未清空，导致跨轮次累积。merge_frozen_subagents 按位置而非 agent_id 匹配，新轮次 SubAgentGroup 被旧轮次数据污染
+**通用模式:** 轮次作用域的状态（frozen_vms, ephemeral_notes 等）必须在 begin_round 或 done 时显式清空。基于位置的匹配在跨轮次场景下不可靠——应使用唯一标识（如 agent_id）匹配
+**架构影响:** Pipeline 的状态生命周期必须与轮次边界对齐，clear() 作为全量重置的终极手段不应是唯一清理路径
+**涉及文件:** peri-tui/src/app/message_pipeline.rs, peri-tui/src/app/message_pipeline_test.rs
+**CLAUDE.md 链接:** true
+
 ---
 
 ## 相关 Feature

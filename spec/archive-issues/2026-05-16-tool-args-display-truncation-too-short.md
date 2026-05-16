@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-tool-args-display-truncation-too-short.md
+
 # 工具调用参数显示截断过短
 
 **状态**：Fixed

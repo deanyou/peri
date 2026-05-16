@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-13-askuserquestion-cache-hit-rate-drop.md
+
 > 归档于 2026-05-14，原路径 spec/issues/2026-05-13-askuserquestion-cache-hit-rate-drop.md
 # AskUserQuestion 导致缓存命中率极速下降
 

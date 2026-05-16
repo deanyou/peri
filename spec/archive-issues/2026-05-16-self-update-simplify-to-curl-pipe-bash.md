@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-self-update-simplify-to-curl-pipe-bash.md
+
 # update.rs 应简化为 curl 远程脚本 | bash
 
 **状态**：Fixed

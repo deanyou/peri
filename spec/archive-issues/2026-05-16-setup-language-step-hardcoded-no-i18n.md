@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-setup-language-step-hardcoded-no-i18n.md
+
 # Language 步骤完全硬编码中英混合文本，忽略 i18n
 
 **状态**：Fixed

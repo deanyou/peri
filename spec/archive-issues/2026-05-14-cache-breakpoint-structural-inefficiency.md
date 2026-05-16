@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-14-cache-breakpoint-structural-inefficiency.md
+
 > 归档于 2026-05-15，原路径 spec/issues/2026-05-14-cache-breakpoint-structural-inefficiency.md
 
 # Prompt Cache 断点结构性效率缺陷：82% system 未缓存 + message 断点浪费

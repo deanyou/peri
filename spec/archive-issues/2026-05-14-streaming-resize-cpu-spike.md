@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-14-streaming-resize-cpu-spike.md
+
 > 归档于 2026-05-15，原路径 spec/issues/2026-05-14-streaming-resize-cpu-spike.md
 
 # 流式加载中拖动改变 TUI 窗口宽度，CPU 瞬间暴涨

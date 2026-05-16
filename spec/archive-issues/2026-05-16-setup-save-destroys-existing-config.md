@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-16-setup-save-destroys-existing-config.md
+
 # save_setup 覆盖已有配置文件导致数据永久丢失
 
 **状态**：Fixed

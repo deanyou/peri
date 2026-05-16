@@ -155,6 +155,7 @@
 
 ### unicode-width
 - [输入框鼠标点击光标定位不准](domains/tui.md#issue_2026-05-12-textarea-mouse-click-cursor-misposition-cjk) — tui
+- [Form Edit 字段标签硬编码英文，未使用 i18n](domains/tui.md#issue_2026-05-16-setup-form-edit-labels-hardcoded) — tui
 
 ### 鼠标定位
 - [输入框鼠标点击光标定位不准](domains/tui.md#issue_2026-05-12-textarea-mouse-click-cursor-misposition-cjk) — tui
@@ -291,9 +292,159 @@
 ### CPU暴涨
 - [流式加载期间拖动窗口宽度，Resize 事件无节流导致 CPU 暴涨](domains/tui.md#issue_2026-05-14-streaming-resize-cpu-spike) — tui
 
+### .get()
+- [active_provider 越界无保护可导致 render panic](domains/tui.md#issue_2026-05-16-setup-active-provider-oob-panic) — tui
+
+### _lc 参数
+- [Language 步骤完全硬编码中英混合文本，忽略 i18n](domains/tui.md#issue_2026-05-16-setup-language-step-hardcoded-no-i18n) — tui
+
+### agent_id 校验
+- [SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示](domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication) — message-pipeline
+
+### begin_round 清理
+- [SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示](domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication) — message-pipeline
+
+### chars().count()
+- [API Key 遮罩使用字节长度而非字符数](domains/tui.md#issue_2026-05-16-setup-api-key-mask-byte-vs-char) — tui
+
+### CJK 显示
+- [API Key 遮罩使用字节长度而非字符数](domains/tui.md#issue_2026-05-16-setup-api-key-mask-byte-vs-char) — tui
+
+### Ctrl+C 拦截
+- [Ctrl+C 在 Setup Wizard 中完全被拦截——无法退出](domains/tui.md#issue_2026-05-16-setup-ctrlc-blocked-cannot-exit) — tui
+
+### curl-pipe-bash
+- [update.rs 应简化为 curl 远程脚本 | bash](domains/cli.md#issue_2026-05-16-self-update-simplify-to-curl-pipe-bash) — cli
+
+### debug_assert
+- [Language 步骤空选项下取模 panic 风险](domains/tui.md#issue_2026-05-16-setup-mod-zero-empty-options) — tui
+
+### format_args_summary
+- [工具调用参数显示截断过短](domains/tui.md#issue_2026-05-16-tool-args-display-truncation-too-short) — tui
+
+### format_tool_args
+- [工具调用参数显示截断过短](domains/tui.md#issue_2026-05-16-tool-args-display-truncation-too-short) — tui
+
+### frozen_vms
+- [SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示](domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication) — message-pipeline
+
+### FTL 未使用
+- [Language 步骤完全硬编码中英混合文本，忽略 i18n](domains/tui.md#issue_2026-05-16-setup-language-step-hardcoded-no-i18n) — tui
+
+### i18n 忽略
+- [Language 步骤完全硬编码中英混合文本，忽略 i18n](domains/tui.md#issue_2026-05-16-setup-language-step-hardcoded-no-i18n) — tui
+
+### i18n 未使用
+- [Form Edit 字段标签硬编码英文，未使用 i18n](domains/tui.md#issue_2026-05-16-setup-form-edit-labels-hardcoded) — tui
+
+### len() 陷阱
+- [API Key 遮罩使用字节长度而非字符数](domains/tui.md#issue_2026-05-16-setup-api-key-mask-byte-vs-char) — tui
+
+### output_persist
+- [工具输出超长时截断 + 持久化磁盘 + 提示 Read 读取剩余内容](domains/tools.md#issue_2026-05-15-tool-output-truncation-with-disk-persist) — tools
+
+### ProviderType
+- [Form Edit 字段标签硬编码英文，未使用 i18n](domains/tui.md#issue_2026-05-16-setup-form-edit-labels-hardcoded) — tui
+
+### save-before-load
+- [save_setup 覆盖已有配置文件导致数据永久丢失](domains/tui.md#issue_2026-05-16-setup-save-destroys-existing-config) — tui
+
+### 字节 vs 字符
+- [API Key 遮罩使用字节长度而非字符数](domains/tui.md#issue_2026-05-16-setup-api-key-mask-byte-vs-char) — tui
+
+### 磁盘持久化
+- [工具输出超长时截断 + 持久化磁盘 + 提示 Read 读取剩余内容](domains/tools.md#issue_2026-05-15-tool-output-truncation-with-disk-persist) — tools
+
+### 代码去重
+- [update.rs 应简化为 curl 远程脚本 | bash](domains/cli.md#issue_2026-05-16-self-update-simplify-to-curl-pipe-bash) — cli
+
+### 导航键冲突
+- [Edit 模式 ProviderType 切换静默重置所有已编辑数据](domains/tui.md#issue_2026-05-16-setup-provider-type-toggle-resets-data) — tui
+
+### 多层截断
+- [工具调用参数显示截断过短](domains/tui.md#issue_2026-05-16-tool-args-display-truncation-too-short) — tui
+
+### 防御性编程
+- [active_provider 越界无保护可导致 render panic](domains/tui.md#issue_2026-05-16-setup-active-provider-oob-panic) — tui
+- [Language 步骤空选项下取模 panic 风险](domains/tui.md#issue_2026-05-16-setup-mod-zero-empty-options) — tui
+
+### 工具输出
+- [工具输出超长时截断 + 持久化磁盘 + 提示 Read 读取剩余内容](domains/tools.md#issue_2026-05-15-tool-output-truncation-with-disk-persist) — tools
+
+### 键过载
+- [Edit 模式 ProviderType 切换静默重置所有已编辑数据](domains/tui.md#issue_2026-05-16-setup-provider-type-toggle-resets-data) — tui
+
+### 静默失败
+- [Browse 模式 Submit 失败时无任何反馈](domains/tui.md#issue_2026-05-16-setup-browse-submit-no-feedback) — tui
+
+### 裸索引
+- [active_provider 越界无保护可导致 render panic](domains/tui.md#issue_2026-05-16-setup-active-provider-oob-panic) — tui
+
+### 配置覆盖
+- [save_setup 覆盖已有配置文件导致数据永久丢失](domains/tui.md#issue_2026-05-16-setup-save-destroys-existing-config) — tui
+
+### 全局处理器
+- [Ctrl+C 在 Setup Wizard 中完全被拦截——无法退出](domains/tui.md#issue_2026-05-16-setup-ctrlc-blocked-cannot-exit) — tui
+
+### 确认提示
+- [Edit 模式 ProviderType 切换静默重置所有已编辑数据](domains/tui.md#issue_2026-05-16-setup-provider-type-toggle-resets-data) — tui
+
+### 输出截断
+- [工具输出超长时截断 + 持久化磁盘 + 提示 Read 读取剩余内容](domains/tools.md#issue_2026-05-15-tool-output-truncation-with-disk-persist) — tools
+
+### 事件拦截
+- [Ctrl+C 在 Setup Wizard 中完全被拦截——无法退出](domains/tui.md#issue_2026-05-16-setup-ctrlc-blocked-cannot-exit) — tui
+
+### 数据丢失
+- [save_setup 覆盖已有配置文件导致数据永久丢失](domains/tui.md#issue_2026-05-16-setup-save-destroys-existing-config) — tui
+- [Edit 模式 ProviderType 切换静默重置所有已编辑数据](domains/tui.md#issue_2026-05-16-setup-provider-type-toggle-resets-data) — tui
+
+### 双份实现
+- [update.rs 应简化为 curl 远程脚本 | bash](domains/cli.md#issue_2026-05-16-self-update-simplify-to-curl-pipe-bash) — cli
+
+### 退出流程
+- [Ctrl+C 在 Setup Wizard 中完全被拦截——无法退出](domains/tui.md#issue_2026-05-16-setup-ctrlc-blocked-cannot-exit) — tui
+
+### 维护负担
+- [update.rs 应简化为 curl 远程脚本 | bash](domains/cli.md#issue_2026-05-16-self-update-simplify-to-curl-pipe-bash) — cli
+
+### 位置匹配
+- [SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示](domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication) — message-pipeline
+
+### 无反馈
+- [Browse 模式 Submit 失败时无任何反馈](domains/tui.md#issue_2026-05-16-setup-browse-submit-no-feedback) — tui
+
+### 先写后读
+- [save_setup 覆盖已有配置文件导致数据永久丢失](domains/tui.md#issue_2026-05-16-setup-save-destroys-existing-config) — tui
+
+### 显示阈值
+- [工具调用参数显示截断过短](domains/tui.md#issue_2026-05-16-tool-args-display-truncation-too-short) — tui
+
+### 用户体验
+- [Browse 模式 Submit 失败时无任何反馈](domains/tui.md#issue_2026-05-16-setup-browse-submit-no-feedback) — tui
+
+### 硬编码标签
+- [Form Edit 字段标签硬编码英文，未使用 i18n](domains/tui.md#issue_2026-05-16-setup-form-edit-labels-hardcoded) — tui
+
+### 硬编码混合文本
+- [Language 步骤完全硬编码中英混合文本，忽略 i18n](domains/tui.md#issue_2026-05-16-setup-language-step-hardcoded-no-i18n) — tui
+
+### 越界检查
+- [active_provider 越界无保护可导致 render panic](domains/tui.md#issue_2026-05-16-setup-active-provider-oob-panic) — tui
+
+### 跨轮次累积
+- [SubAgent 跨轮次 frozen_subagent_vms 累积导致批次与单个 SubAgentGroup 重复显示](domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication) — message-pipeline
+
+### 取模零除
+- [Language 步骤空选项下取模 panic 风险](domains/tui.md#issue_2026-05-16-setup-mod-zero-empty-options) — tui
+
+### 错误提示
+- [Browse 模式 Submit 失败时无任何反馈](domains/tui.md#issue_2026-05-16-setup-browse-submit-no-feedback) — tui
+
 ## 更新记录
 
 - 2026-05-13: 首次创建，归档 22 个 issue，提取 14 条领域认知
 - 2026-05-14: 第二次归档，归档 12 个 issue，提取 8 条领域认知（agent 2 + message-pipeline 2 + system-prompt 4）
 - 2026-05-15: 第三次归档，归档 8 个 issue，提取 7 条领域认知（agent 3 + code-architecture 2 + message-pipeline 2 + tui 1）
 - 2026-05-16: 第四次归档，归档 11 个 issue，提取 7 条领域认知（agent 6 + tui 1）
+- 2026-05-16: 第五次归档，归档 13 个 issue，提取 11 条领域认知（tui 10 + message-pipeline 1 + cli 1 + tools 1）

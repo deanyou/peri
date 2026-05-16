@@ -1,3 +1,5 @@
+> 归档于 2026-05-16，原路径 spec/issues/2026-05-14-test-separation-convention-debt.md
+
 > 归档于 2026-05-15，原路径 spec/issues/2026-05-14-test-separation-convention-debt.md
 
 # 测试分离规范债务：89.8% 源文件仍内联测试 → 已完成

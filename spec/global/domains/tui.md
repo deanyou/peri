@@ -564,6 +564,118 @@ submit_message(text)
 **涉及文件:** peri-tui/src/app/message_pipeline.rs, peri-tui/src/app/agent_ops.rs, peri-tui/src/app/agent.rs
 **CLAUDE.md 链接:** true
 
+### issue_2026-05-16-setup-save-destroys-existing-config
+
+**摘要:** save_setup 覆盖已有配置文件导致数据永久丢失
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** 配置覆盖, save-before-load, 数据丢失, 先写后读
+**问题本质:** save-then-load 模式中，先覆盖文件再读取同一文件做 merge，merge 成为空操作，非 provider 字段永久丢失
+**通用模式:** 需要合并已有配置时，必须先读取原始数据，合并后再写入。绝不能先写入再读取同一文件做合并——读到的是自己刚写入的数据
+**架构影响:** IO 顺序错误（写→读同一路径）是静默数据丢失的高危模式，应优先在函数签名层面阻绝（如分离 `build_config` 纯函数和 `save_config` IO 函数）
+**涉及文件:** peri-tui/src/app/setup_wizard.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-16-setup-form-edit-labels-hardcoded
+
+**摘要:** Form Edit 字段标签硬编码英文，未使用 i18n
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** i18n 未使用, 硬编码标签, ProviderType, unicode-width
+**问题本质:** i18n key 已在 FTL 文件中定义，但渲染函数使用硬编码字符串，ProviderType::label() 不接受 LcRegistry 参数
+**通用模式:** 使用 `_lc` 前缀命名但实际未消费的 i18n 参数是代码坏味道；需要翻译的类型应在签名中要求 `&LcRegistry`
+**技术决策:** 字段标签对齐使用 `unicode-width` crate 的 `pad_display_columns` 辅助函数
+**涉及文件:** peri-tui/src/ui/main_ui/popups/setup_wizard.rs, peri-tui/src/app/setup_wizard.rs, peri-tui/locales/en/main.ftl, peri-tui/locales/zh-CN/main.ftl
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-16-setup-browse-submit-no-feedback
+
+**摘要:** Browse 模式 Submit 失败时无任何反馈
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** 静默失败, 无反馈, 用户体验, 错误提示
+**问题本质:** has_valid=false 时仅返回 Redraw，界面无变化、无错误消息，用户无法理解为何无法提交
+**通用模式:** 每个用户操作必须有可见反馈——成功进入下一状态，失败显示原因。空 Redraw 是反模式
+**涉及文件:** peri-tui/src/app/setup_wizard.rs, peri-tui/src/ui/main_ui/popups/setup_wizard.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-16-setup-ctrlc-blocked-cannot-exit
+
+**摘要:** Ctrl+C 在 Setup Wizard 中完全被拦截——无法退出
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** 事件拦截, Ctrl+C 拦截, 全局处理器, 退出流程
+**问题本质:** Wizard 拦截块在 `handle_setup_wizard_key` 返回 None 后无条件返回 Redraw，后续全局 Ctrl+C 处理器永远无法到达
+**通用模式:** 事件拦截块必须在调用业务处理器之前检查全局关键事件（Ctrl+C、quit），或将这些事件作为业务处理器必须处理的基本事件
+**涉及文件:** peri-tui/src/event.rs, peri-tui/src/app/setup_wizard.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-16-setup-api-key-mask-byte-vs-char
+
+**摘要:** API Key 遮罩使用字节长度而非字符数
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** 字节 vs 字符, CJK 显示, chars().count(), len() 陷阱
+**问题本质:** `"•".repeat(s.len())` 使用字节长度，CJK 字符每字符 3 字节导致遮罩数量膨胀
+**通用模式:** 所有面向用户显示的字符串长度计算必须使用 `chars().count()`，仅内部 buffer 管理可用 `len()`
+**涉及文件:** peri-tui/src/ui/main_ui/popups/setup_wizard.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-16-setup-active-provider-oob-panic
+
+**摘要:** active_provider 越界无保护可导致 render panic
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** 越界检查, 裸索引, .get(), 防御性编程
+**问题本质:** `providers[active_provider]` 裸索引，active_provider 可能因异常状态越界导致 panic
+**通用模式:** 用户管理/异步更新的索引始终用 `.get()` 并处理 None 回退，防御性代码成本极低但收益巨大
+**涉及文件:** peri-tui/src/ui/main_ui/popups/setup_wizard.rs, peri-tui/src/app/setup_wizard.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-16-setup-provider-type-toggle-resets-data
+
+**摘要:** Edit 模式 ProviderType 切换静默重置所有已编辑数据
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** 数据丢失, 确认提示, 键过载, 导航键冲突
+**问题本质:** ←/→ 键在 ProviderType 字段上做类型切换+数据重置，但在其他字段是光标移动——同一按键在不同上下文语义完全不同，导致误触即数据丢失
+**通用模式:** 导航键（←/→）不应触发破坏性操作；破坏性状态变更需要确认提示；一个按键在一个表单中应保持语义一致
+**涉及文件:** peri-tui/src/app/setup_wizard.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-16-setup-language-step-hardcoded-no-i18n
+
+**摘要:** Language 步骤完全硬编码中英混合文本，忽略 i18n
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** i18n 忽略, 硬编码混合文本, _lc 参数, FTL 未使用
+**问题本质:** FTL 已定义完整翻译 key，但渲染函数故意忽略 `_lc` 参数，所有文本硬编码为中英混合
+**通用模式:** `_lc` 前缀命名暗示参数应被消费，实际忽略是代码坏味道。应为所有面向用户的字符串使用 i18n，不留硬编码回退
+**涉及文件:** peri-tui/src/ui/main_ui/popups/setup_wizard.rs, peri-tui/locales/
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-16-tool-args-display-truncation-too-short
+
+**摘要:** 工具调用参数显示截断过短
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** 多层截断, 显示阈值, format_tool_args, format_args_summary
+**问题本质:** 两条截断链（`format_tool_args` 60→`format_args_summary` 40）叠加，最终截断过短失去可读性
+**通用模式:** 多层格式化管道中，修改一层阈值时必须检查下游是否二次截断；阈值应设在最终消费端而非每层都截
+**涉及文件:** peri-tui/src/app/tool_display.rs, peri-widgets/src/tool_call/mod.rs, peri-widgets/src/message_block/blocks.rs, peri-tui/src/ui/message_render.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-16-setup-mod-zero-empty-options
+
+**摘要:** Language 步骤空选项下取模 panic 风险
+**状态:** Fixed
+**归档日期:** 2026-05-16
+**关键词:** 取模零除, debug_assert, 防御性编程
+**问题本质:** `(cursor + len - 1) % len` 在 len=0 时 panic，当前 len 为编译期常量无实际风险
+**通用模式:** 取模运算前加 `debug_assert!(!slice.is_empty())` 守卫——debug 构建捕获逻辑错误，release 无开销
+**涉及文件:** peri-tui/src/app/setup_wizard.rs
+**CLAUDE.md 链接:** false
+
 ---
 
 ## 相关 Feature

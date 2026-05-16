@@ -172,23 +172,34 @@ fn test_form_field_navigation() {
 }
 
 #[test]
-fn test_connectivity_invalid_url() {
-    let (ok, msg) = test_connectivity("");
+fn test_connectivity_empty_base_url() {
+    let (ok, msg) = test_connectivity("", "sk-test", ProviderType::Anthropic, "claude-opus-4-6");
     assert!(!ok);
-    assert!(msg.contains("Invalid URL"));
+    assert!(msg.contains("Base URL"));
 }
 
 #[test]
-fn test_connectivity_parse_host_port() {
-    assert!(parse_host_port("").is_none());
-    // localhost 应始终可解析
-    let addr = parse_host_port("https://localhost:8443/v1").unwrap();
-    assert_eq!(addr.port(), 8443);
-    let addr = parse_host_port("http://localhost:8080").unwrap();
-    assert_eq!(addr.port(), 8080);
-    // 无 scheme 默认 https/443
-    let addr = parse_host_port("127.0.0.1:9999").unwrap();
-    assert_eq!(addr.port(), 9999);
+fn test_connectivity_empty_api_key() {
+    let (ok, msg) = test_connectivity(
+        "https://example.com",
+        "",
+        ProviderType::Anthropic,
+        "claude-opus-4-6",
+    );
+    assert!(!ok);
+    assert!(msg.contains("API Key"));
+}
+
+#[test]
+fn test_connectivity_unreachable_url() {
+    // 无法连接的 URL (TEST-NET 地址不会路由)
+    let (ok, msg) = test_connectivity(
+        "https://192.0.2.1",
+        "sk-test",
+        ProviderType::OpenAiCompatible,
+        "gpt-4o",
+    );
+    assert!(!ok);
 }
 
 #[test]
@@ -198,9 +209,33 @@ fn test_connectivity_enter_triggers_test() {
     wizard.form_mode = FormMode::Edit;
     wizard.form_focus = FormField::TestConnectivity;
     wizard.providers[0].base_url = "https://example.com".to_string();
+    wizard.providers[0].api_key = "sk-fake-key".to_string();
     let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    // 结果应已设置（无论成功或失败）
     assert!(wizard.connectivity_result.is_some());
+}
+
+#[test]
+fn test_connectivity_enter_no_api_key() {
+    let mut wizard = SetupWizardPanel::new();
+    wizard.step = SetupStep::Form;
+    wizard.form_mode = FormMode::Edit;
+    wizard.form_focus = FormField::TestConnectivity;
+    // api_key 为空 → test_connectivity 内部返回错误
+    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
+    let (ok, _) = wizard.connectivity_result.as_ref().unwrap();
+    assert!(!*ok);
+}
+
+#[test]
+fn test_edit_base_url_clears_connectivity() {
+    let mut wizard = SetupWizardPanel::new();
+    wizard.step = SetupStep::Form;
+    wizard.form_mode = FormMode::Edit;
+    wizard.form_focus = FormField::BaseUrl;
+    wizard.connectivity_result = Some((true, "old result".into()));
+    // 任意按键在 BaseUrl 焦点上应清空结果
+    let _ = handle_setup_wizard_key(&mut wizard, make_char('x'));
+    assert!(wizard.connectivity_result.is_none());
 }
 
 // ── Event handling tests ──
