@@ -173,33 +173,33 @@ fn test_form_field_navigation() {
 
 #[test]
 fn test_connectivity_empty_base_url() {
-    let (ok, msg) = test_connectivity("", "sk-test", ProviderType::Anthropic, "claude-opus-4-6");
+    let (ok, msg) = test_connectivity("");
     assert!(!ok);
     assert!(msg.contains("Base URL"));
 }
 
 #[test]
-fn test_connectivity_empty_api_key() {
-    let (ok, msg) = test_connectivity(
-        "https://example.com",
-        "",
-        ProviderType::Anthropic,
-        "claude-opus-4-6",
-    );
+fn test_connectivity_unreachable_url() {
+    // 无法连接的 URL (TEST-NET 地址不会路由)
+    let (ok, _msg) = test_connectivity("https://192.0.2.1");
     assert!(!ok);
-    assert!(msg.contains("API Key"));
 }
 
 #[test]
-fn test_connectivity_unreachable_url() {
-    // 无法连接的 URL (TEST-NET 地址不会路由)
-    let (ok, msg) = test_connectivity(
-        "https://192.0.2.1",
-        "sk-test",
-        ProviderType::OpenAiCompatible,
-        "gpt-4o",
-    );
-    assert!(!ok);
+fn test_connectivity_parse_url_parts() {
+    assert!(parse_url_parts("").is_none());
+    let (host, port, path) = parse_url_parts("https://localhost:8443/v1/models").unwrap();
+    assert_eq!(host, "localhost");
+    assert_eq!(port, 8443);
+    assert_eq!(path, "/v1/models");
+    let (_host, port, path) = parse_url_parts("http://localhost:8080").unwrap();
+    assert_eq!(port, 8080);
+    assert_eq!(path, "/");
+    let (host, port, _) = parse_url_parts("127.0.0.1:9999").unwrap();
+    assert_eq!(host, "127.0.0.1");
+    assert_eq!(port, 9999);
+    let (_, port, _) = parse_url_parts("https://api.openai.com/v1").unwrap();
+    assert_eq!(port, 443);
 }
 
 #[test]
@@ -209,21 +209,8 @@ fn test_connectivity_enter_triggers_test() {
     wizard.form_mode = FormMode::Edit;
     wizard.form_focus = FormField::TestConnectivity;
     wizard.providers[0].base_url = "https://example.com".to_string();
-    wizard.providers[0].api_key = "sk-fake-key".to_string();
     let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
     assert!(wizard.connectivity_result.is_some());
-}
-
-#[test]
-fn test_connectivity_enter_no_api_key() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Edit;
-    wizard.form_focus = FormField::TestConnectivity;
-    // api_key 为空 → test_connectivity 内部返回错误
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    let (ok, _) = wizard.connectivity_result.as_ref().unwrap();
-    assert!(!*ok);
 }
 
 #[test]

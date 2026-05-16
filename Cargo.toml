@@ -39,7 +39,6 @@ serde_yaml = "0.9"
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "rustls",
-    "blocking",
 ] }
 
 # --- Time ---

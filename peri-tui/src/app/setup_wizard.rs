@@ -461,98 +461,82 @@ fn env_get(env: &serde_json::Map<String, serde_json::Value>, key: &str) -> Strin
     }
 }
 
-/// 向 LLM Provider 发送 "hello" 请求测试联通性（5 秒超时）
+/// 向 Provider 端点发送最小 HTTP GET 请求测试联通性（5 秒超时）
 ///
-/// 根据 provider_type 构造 Anthropic 或 OpenAI-compatible 格式的请求，
-/// 发送到 base_url 并使用 api_key 认证。model 使用首个 alias（Opus）。
+/// 向 base_url 发送 HTTP/1.0 GET 请求，检查服务器是否有任何响应。
 /// 返回 `(成功标志, 结果描述)`。
-fn test_connectivity(
-    base_url: &str,
-    api_key: &str,
-    provider_type: ProviderType,
-    model: &str,
-) -> (bool, String) {
-    // 空 URL 或空 API Key 直接返回错误
+fn test_connectivity(base_url: &str) -> (bool, String) {
+    use std::io::{Read, Write};
+
     if base_url.trim().is_empty() {
         return (false, "Base URL is empty".to_string());
     }
-    if api_key.trim().is_empty() {
-        return (false, "API Key is empty".to_string());
-    }
 
-    let http = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return (false, format!("HTTP client init failed: {}", e)),
+    let (host, port, path) = match parse_url_parts(base_url) {
+        Some(p) => p,
+        None => return (false, format!("Invalid URL: {}", base_url)),
     };
 
-    let result = match provider_type {
-        ProviderType::Anthropic => {
-            let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-            let body = serde_json::json!({
-                "model": model,
-                "max_tokens": 10,
-                "messages": [{"role": "user", "content": "hello"}],
-            });
-            http.post(&url)
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01")
-                .json(&body)
-                .send()
-        }
-        ProviderType::OpenAiCompatible => {
-            let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-            let body = serde_json::json!({
-                "model": model,
-                "max_tokens": 10,
-                "messages": [{"role": "user", "content": "hello"}],
-            });
-            http.post(&url)
-                .header("Authorization", format!("Bearer {}", api_key))
-                .json(&body)
-                .send()
-        }
+    let addr_str = format!("{}:{}", host, port);
+    use std::net::ToSocketAddrs;
+    let addr = match addr_str.to_socket_addrs().ok().and_then(|mut a| a.next()) {
+        Some(a) => a,
+        None => return (false, format!("DNS resolution failed for {}", host)),
     };
 
-    match result {
-        Ok(resp) if resp.status().is_success() => {
-            // 尝试读取响应文本用于预览（截断到 64 字符）
-            let preview = resp
-                .text()
-                .ok()
-                .and_then(|t| {
-                    // 提取 content 字段中的文本
-                    let v: serde_json::Value = serde_json::from_str(&t).ok()?;
-                    let text = match provider_type {
-                        ProviderType::Anthropic => v["content"][0]["text"].as_str(),
-                        ProviderType::OpenAiCompatible => {
-                            v["choices"][0]["message"]["content"].as_str()
-                        }
-                    };
-                    text.map(|t| {
-                        let t = t.trim();
-                        if t.len() > 64 {
-                            format!("{}…", &t[..64])
-                        } else {
-                            t.to_string()
-                        }
-                    })
-                })
-                .unwrap_or_default();
-            if preview.is_empty() {
-                (true, format!("{} reachable", base_url))
-            } else {
-                (true, format!("{} → \"{}\"", base_url, preview))
-            }
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            (false, format!("{} returned HTTP {}", base_url, status))
-        }
-        Err(e) => (false, format!("{} unreachable: {}", base_url, e)),
+    let timeout = std::time::Duration::from_secs(5);
+    let mut stream = match std::net::TcpStream::connect_timeout(&addr, timeout) {
+        Ok(s) => s,
+        Err(e) => return (false, format!("{} unreachable: {}", host, e)),
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+
+    // 发送最小 HTTP/1.0 GET 请求
+    let req = format!("GET {} HTTP/1.0\r\nHost: {}\r\n\r\n", path, host);
+    if stream.write_all(req.as_bytes()).is_err() {
+        return (false, format!("{} connected but send failed", host));
     }
+
+    // 读取至少 1 字节即视为响应成功
+    let mut buf = [0u8; 1];
+    match stream.read_exact(&mut buf) {
+        Ok(()) => (true, format!("{} reachable", base_url)),
+        Err(e) => (false, format!("{} no response: {}", host, e)),
+    }
+}
+
+/// 解析 URL 部件：`(host, port, path)`，默认端口 https→443, http→80
+fn parse_url_parts(url: &str) -> Option<(&str, u16, &str)> {
+    let s = url.trim();
+    let (scheme, rest) = if let Some(idx) = s.find("://") {
+        (&s[..idx], &s[idx + 3..])
+    } else {
+        ("https", s)
+    };
+    let default_port: u16 = if scheme.eq_ignore_ascii_case("http") {
+        80
+    } else {
+        443
+    };
+    let (host_port, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    let (host, port_str) = match host_port.rfind(':') {
+        Some(idx) if host_port[idx + 1..].chars().all(|c| c.is_ascii_digit()) => {
+            (&host_port[..idx], &host_port[idx + 1..])
+        }
+        _ => (host_port, ""),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port: u16 = if port_str.is_empty() {
+        default_port
+    } else {
+        port_str.parse().ok()?
+    };
+    Some((host, port, path))
 }
 
 /// 在光标位置插入字符串并移动光标
@@ -865,12 +849,7 @@ fn handle_edit(
         } => {
             if wizard.form_focus == FormField::TestConnectivity {
                 let mp = &wizard.providers[wizard.active_provider];
-                wizard.connectivity_result = Some(test_connectivity(
-                    &mp.base_url,
-                    &mp.api_key,
-                    mp.provider_type,
-                    &mp.aliases[0].model_id,
-                ));
+                wizard.connectivity_result = Some(test_connectivity(&mp.base_url));
                 Some(SetupWizardAction::Redraw)
             } else if wizard.form_focus == FormField::Confirm {
                 let mp = &wizard.providers[wizard.active_provider];
