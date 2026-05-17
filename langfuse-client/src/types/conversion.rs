@@ -1,188 +1,7 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use super::otlp::*;
+use super::ObservationLevel;
 
-// ─── OTLP (OpenTelemetry Protocol) Types ───────────────────────────
-// These types represent the OTLP HTTP/JSON payload for trace ingestion.
-// Endpoint: POST /api/public/otel/v1/traces
-// Spec: https://opentelemetry.io/docs/specs/otlp/
-
-/// OTLP trace export request body
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OtelTraceExportRequest {
-    #[serde(rename = "resourceSpans")]
-    pub resource_spans: Vec<OtelResourceSpan>,
-}
-
-/// A collection of spans from a single resource
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelResourceSpan {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resource: Option<OtelResource>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope_spans: Option<Vec<OtelScopeSpan>>,
-}
-
-/// Resource attributes identifying the source of telemetry
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OtelResource {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attributes: Option<Vec<OtelAttribute>>,
-}
-
-/// Collection of spans from a single instrumentation scope
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelScopeSpan {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<OtelScope>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub spans: Option<Vec<OtelSpan>>,
-}
-
-/// Instrumentation scope information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OtelScope {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attributes: Option<Vec<OtelAttribute>>,
-}
-
-/// Individual OTLP span representing a unit of work
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelSpan {
-    /// Trace ID — 16 bytes hex-encoded (32 chars), must NOT contain hyphens
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_id: Option<String>,
-    /// Span ID — 8 bytes hex-encoded (16 chars)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub span_id: Option<String>,
-    /// Parent span ID
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_span_id: Option<String>,
-    /// Span name
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Span kind: 1=INTERNAL, 2=SERVER, 3=CLIENT, 4=PRODUCER, 5=CONSUMER
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<i32>,
-    /// Start time in nanoseconds since Unix epoch (string representation)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub start_time_unix_nano: Option<String>,
-    /// End time in nanoseconds since Unix epoch (string representation)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub end_time_unix_nano: Option<String>,
-    /// Span attributes (langfuse.* namespace for Langfuse-specific mapping)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attributes: Option<Vec<OtelAttribute>>,
-    /// Span status
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<OtelStatus>,
-}
-
-/// Span status
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OtelStatus {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-/// Key-value attribute pair
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OtelAttribute {
-    pub key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<OtelAttributeValue>,
-}
-
-/// Attribute value wrapper supporting different value types
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OtelAttributeValue {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub string_value: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub int_value: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub double_value: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bool_value: Option<bool>,
-}
-
-impl OtelAttributeValue {
-    pub fn string(v: impl Into<String>) -> Self {
-        Self {
-            string_value: Some(v.into()),
-            int_value: None,
-            double_value: None,
-            bool_value: None,
-        }
-    }
-
-    pub fn int(v: i64) -> Self {
-        Self {
-            string_value: None,
-            int_value: Some(v),
-            double_value: None,
-            bool_value: None,
-        }
-    }
-
-    pub fn bool(v: bool) -> Self {
-        Self {
-            string_value: None,
-            int_value: None,
-            double_value: None,
-            bool_value: Some(v),
-        }
-    }
-}
-
-/// Helper to build an attribute
-impl OtelAttribute {
-    pub fn new(key: impl Into<String>, value: OtelAttributeValue) -> Self {
-        Self {
-            key: key.into(),
-            value: Some(value),
-        }
-    }
-
-    pub fn string(key: impl Into<String>, val: impl Into<String>) -> Self {
-        Self::new(key, OtelAttributeValue::string(val))
-    }
-}
-
-/// OTLP trace export response (empty object = success)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OtelTraceResponse {}
-
-// ─── IngestionEvent helpers ─────────────────────────────────────────
-
-impl IngestionEvent {
-    /// Get the event envelope timestamp (all variants have a `timestamp` field)
-    pub fn event_timestamp(&self) -> &str {
-        match self {
-            IngestionEvent::TraceCreate { timestamp, .. } => timestamp,
-            IngestionEvent::SpanCreate { timestamp, .. } => timestamp,
-            IngestionEvent::SpanUpdate { timestamp, .. } => timestamp,
-            IngestionEvent::GenerationCreate { timestamp, .. } => timestamp,
-            IngestionEvent::GenerationUpdate { timestamp, .. } => timestamp,
-            IngestionEvent::EventCreate { timestamp, .. } => timestamp,
-            IngestionEvent::ScoreCreate { timestamp, .. } => timestamp,
-            IngestionEvent::ObservationCreate { timestamp, .. } => timestamp,
-            IngestionEvent::ObservationUpdate { timestamp, .. } => timestamp,
-            IngestionEvent::SdkLog { timestamp, .. } => timestamp,
-        }
-    }
-}
-
-// ─── Conversion: IngestionEvent → OTLP Spans ───────────────────────
+// ─── IngestionEvent → OTLP Spans ───────────────────────
 
 /// Convert a batch of IngestionEvents into an OTLP trace export request.
 ///
@@ -194,12 +13,12 @@ impl IngestionEvent {
 /// - EventCreate → span with `langfuse.observation.type` = "event"
 /// - ScoreCreate → span with `langfuse.observation.type` = omitted (attached to trace)
 /// - Others → span with basic attributes
-pub(crate) fn ingestion_events_to_otel(events: &[IngestionEvent]) -> OtelTraceExportRequest {
+pub(crate) fn ingestion_events_to_otel(events: &[super::IngestionEvent]) -> OtelTraceExportRequest {
     let mut spans: Vec<OtelSpan> = Vec::with_capacity(events.len());
 
     for event in events {
         match event {
-            IngestionEvent::TraceCreate { body, .. } => {
+            super::IngestionEvent::TraceCreate { body, .. } => {
                 let mut attrs = Vec::new();
                 if let Some(ref session_id) = body.session_id {
                     attrs.push(OtelAttribute::string("langfuse.session.id", session_id));
@@ -249,7 +68,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[IngestionEvent]) -> OtelTraceEx
                     status: Some(OtelStatus::default()),
                 });
             }
-            IngestionEvent::SpanCreate { body, .. } => {
+            super::IngestionEvent::SpanCreate { body, .. } => {
                 let mut attrs = vec![OtelAttribute::string("langfuse.observation.type", "span")];
                 append_common_obs_attrs(
                     &mut attrs,
@@ -288,7 +107,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[IngestionEvent]) -> OtelTraceEx
                     status: build_status(body.level.as_ref(), body.status_message.as_deref()),
                 });
             }
-            IngestionEvent::SpanUpdate { body, .. } => {
+            super::IngestionEvent::SpanUpdate { body, .. } => {
                 // For updates, we still create a span — Langfuse OTel deduplicates by spanId
                 let mut attrs = vec![OtelAttribute::string("langfuse.observation.type", "span")];
                 if let Some(ref session_id) = body.session_id {
@@ -322,7 +141,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[IngestionEvent]) -> OtelTraceEx
                     status: build_status(body.level.as_ref(), body.status_message.as_deref()),
                 });
             }
-            IngestionEvent::GenerationCreate { body, .. } => {
+            super::IngestionEvent::GenerationCreate { body, .. } => {
                 let mut attrs = vec![OtelAttribute::string(
                     "langfuse.observation.type",
                     "generation",
@@ -408,7 +227,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[IngestionEvent]) -> OtelTraceEx
                     status: build_status(body.level.as_ref(), body.status_message.as_deref()),
                 });
             }
-            IngestionEvent::GenerationUpdate { body, .. } => {
+            super::IngestionEvent::GenerationUpdate { body, .. } => {
                 let mut attrs = vec![OtelAttribute::string(
                     "langfuse.observation.type",
                     "generation",
@@ -458,7 +277,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[IngestionEvent]) -> OtelTraceEx
                     status: build_status(body.level.as_ref(), body.status_message.as_deref()),
                 });
             }
-            IngestionEvent::EventCreate { body, .. } => {
+            super::IngestionEvent::EventCreate { body, .. } => {
                 let mut attrs = vec![OtelAttribute::string("langfuse.observation.type", "event")];
                 append_common_obs_attrs(
                     &mut attrs,
@@ -488,7 +307,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[IngestionEvent]) -> OtelTraceEx
                     status: build_status(body.level.as_ref(), body.status_message.as_deref()),
                 });
             }
-            IngestionEvent::ObservationCreate { body, .. } => {
+            super::IngestionEvent::ObservationCreate { body, .. } => {
                 let obs_type_str = serde_json::to_value(&body.r#type)
                     .ok()
                     .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
@@ -540,7 +359,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[IngestionEvent]) -> OtelTraceEx
                     status: build_status(body.level.as_ref(), body.status_message.as_deref()),
                 });
             }
-            IngestionEvent::ObservationUpdate { body, .. } => {
+            super::IngestionEvent::ObservationUpdate { body, .. } => {
                 let obs_type_str = serde_json::to_value(&body.r#type)
                     .ok()
                     .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
@@ -580,7 +399,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[IngestionEvent]) -> OtelTraceEx
                     status: build_status(body.level.as_ref(), body.status_message.as_deref()),
                 });
             }
-            IngestionEvent::ScoreCreate { body, .. } => {
+            super::IngestionEvent::ScoreCreate { body, .. } => {
                 // Scores are attached via attributes on the trace
                 let mut attrs = vec![];
                 attrs.push(OtelAttribute::string("langfuse.score.name", &body.name));
@@ -627,7 +446,7 @@ pub(crate) fn ingestion_events_to_otel(events: &[IngestionEvent]) -> OtelTraceEx
                     status: Some(OtelStatus::default()),
                 });
             }
-            IngestionEvent::SdkLog { body, .. } => {
+            super::IngestionEvent::SdkLog { body, .. } => {
                 // SDK logs are metadata; we skip them in OTLP as there's no natural mapping
                 let attrs = vec![OtelAttribute::string(
                     "langfuse.sdk.log",
@@ -722,287 +541,3 @@ fn rfc3339_to_nano(rfc3339: &str) -> Option<String> {
     let ts = chrono::DateTime::parse_from_rfc3339(rfc3339).ok()?;
     Some(ts.timestamp_nanos_opt()?.to_string())
 }
-
-/// 观测类型（V4 扩展，含 10 种变体）
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ObservationType {
-    #[default]
-    Span,
-    Generation,
-    Event,
-    Agent,
-    Tool,
-    Chain,
-    Retriever,
-    Evaluator,
-    Embedding,
-    Guardrail,
-}
-
-/// 观测日志级别
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ObservationLevel {
-    Debug,
-    Default,
-    Warning,
-    Error,
-}
-
-/// 评分数据类型
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ScoreDataType {
-    Numeric,
-    Boolean,
-    Categorical,
-    Correction,
-}
-
-/// Langfuse Usage（legacy，API required 字段为 input/output/total）
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Usage {
-    pub input: i32,
-    pub output: i32,
-    pub total: i32,
-    pub input_cost: Option<f64>,
-    pub output_cost: Option<f64>,
-    pub total_cost: Option<f64>,
-    pub unit: Option<String>,
-}
-
-/// UsageDetails — 灵活的 key-value map
-pub type UsageDetails = HashMap<String, i32>;
-
-/// CostDetails — 成本详情 map
-pub type CostDetails = HashMap<String, f64>;
-
-/// IngestionUsage — 兼容 Usage 和 OpenAIUsage 的灵活格式
-pub type IngestionUsage = HashMap<String, serde_json::Value>;
-
-/// Trace 创建/更新的 Body
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-pub struct TraceBody {
-    pub id: Option<String>,
-    pub name: Option<String>,
-    pub user_id: Option<String>,
-    pub input: Option<serde_json::Value>,
-    pub output: Option<serde_json::Value>,
-    pub session_id: Option<String>,
-    pub release: Option<String>,
-    pub version: Option<String>,
-    pub metadata: Option<serde_json::Value>,
-    pub tags: Option<Vec<String>>,
-    pub environment: Option<String>,
-    pub public: Option<bool>,
-    pub timestamp: Option<String>,
-}
-
-/// V4 统一观测类型（ObservationCreate/ObservationUpdate 共用）
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-pub struct ObservationBody {
-    pub id: Option<String>,
-    pub trace_id: Option<String>,
-    pub r#type: ObservationType,
-    pub name: Option<String>,
-    pub start_time: Option<String>,
-    pub end_time: Option<String>,
-    pub completion_start_time: Option<String>,
-    pub parent_observation_id: Option<String>,
-    pub input: Option<serde_json::Value>,
-    pub output: Option<serde_json::Value>,
-    pub metadata: Option<serde_json::Value>,
-    pub model: Option<String>,
-    pub model_parameters: Option<HashMap<String, serde_json::Value>>,
-    pub level: Option<ObservationLevel>,
-    pub status_message: Option<String>,
-    pub version: Option<String>,
-    pub environment: Option<String>,
-    pub session_id: Option<String>,
-}
-
-/// Span Body（SpanCreate/SpanUpdate 共用）
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-pub struct SpanBody {
-    pub id: Option<String>,
-    pub trace_id: Option<String>,
-    pub name: Option<String>,
-    pub start_time: Option<String>,
-    pub end_time: Option<String>,
-    pub input: Option<serde_json::Value>,
-    pub output: Option<serde_json::Value>,
-    pub metadata: Option<serde_json::Value>,
-    pub level: Option<ObservationLevel>,
-    pub status_message: Option<String>,
-    pub parent_observation_id: Option<String>,
-    pub version: Option<String>,
-    pub environment: Option<String>,
-    pub session_id: Option<String>,
-}
-
-/// Generation Body（GenerationCreate/GenerationUpdate 共用）
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-pub struct GenerationBody {
-    // From OptionalObservationBody
-    pub id: Option<String>,
-    pub trace_id: Option<String>,
-    pub name: Option<String>,
-    pub start_time: Option<String>,
-    pub end_time: Option<String>,
-    pub input: Option<serde_json::Value>,
-    pub output: Option<serde_json::Value>,
-    pub metadata: Option<serde_json::Value>,
-    pub level: Option<ObservationLevel>,
-    pub status_message: Option<String>,
-    pub parent_observation_id: Option<String>,
-    pub version: Option<String>,
-    pub environment: Option<String>,
-    // Generation-specific fields
-    pub completion_start_time: Option<String>,
-    pub model: Option<String>,
-    pub model_parameters: Option<HashMap<String, serde_json::Value>>,
-    pub usage: Option<IngestionUsage>,
-    pub usage_details: Option<UsageDetails>,
-    pub cost_details: Option<CostDetails>,
-    pub prompt_name: Option<String>,
-    pub prompt_version: Option<i32>,
-    pub session_id: Option<String>,
-}
-
-/// Event Body（EventCreate 使用）
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-pub struct EventBody {
-    pub id: Option<String>,
-    pub trace_id: Option<String>,
-    pub name: Option<String>,
-    pub start_time: Option<String>,
-    pub input: Option<serde_json::Value>,
-    pub output: Option<serde_json::Value>,
-    pub metadata: Option<serde_json::Value>,
-    pub level: Option<ObservationLevel>,
-    pub status_message: Option<String>,
-    pub parent_observation_id: Option<String>,
-    pub version: Option<String>,
-    pub environment: Option<String>,
-}
-
-/// Score Body（ScoreCreate 使用）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-pub struct ScoreBody {
-    pub name: String,
-    pub value: serde_json::Value,
-    pub id: Option<String>,
-    pub trace_id: Option<String>,
-    pub observation_id: Option<String>,
-    pub comment: Option<String>,
-    pub data_type: Option<ScoreDataType>,
-    pub config_id: Option<String>,
-    pub queue_id: Option<String>,
-    pub environment: Option<String>,
-    pub session_id: Option<String>,
-    pub metadata: Option<serde_json::Value>,
-    pub dataset_run_id: Option<String>,
-}
-
-/// SDK Log Body（SdkLog 使用）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-pub struct SdkLogBody {
-    pub log: serde_json::Value,
-}
-
-/// Ingestion 事件统一枚举（10 种变体）
-/// 通过 serde 内部标签自动序列化 `type` 判别字段
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
-pub enum IngestionEvent {
-    TraceCreate {
-        id: String,
-        timestamp: String,
-        body: TraceBody,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-    SpanCreate {
-        id: String,
-        timestamp: String,
-        body: SpanBody,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-    SpanUpdate {
-        id: String,
-        timestamp: String,
-        body: SpanBody,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-    GenerationCreate {
-        id: String,
-        timestamp: String,
-        body: GenerationBody,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-    GenerationUpdate {
-        id: String,
-        timestamp: String,
-        body: GenerationBody,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-    EventCreate {
-        id: String,
-        timestamp: String,
-        body: EventBody,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-    ScoreCreate {
-        id: String,
-        timestamp: String,
-        body: ScoreBody,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-    ObservationCreate {
-        id: String,
-        timestamp: String,
-        body: ObservationBody,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-    ObservationUpdate {
-        id: String,
-        timestamp: String,
-        body: ObservationBody,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-    SdkLog {
-        id: String,
-        timestamp: String,
-        body: SdkLogBody,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-}
-
-#[cfg(test)]
-#[path = "types_test.rs"]
-mod tests;
