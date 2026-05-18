@@ -488,6 +488,8 @@ impl App {
 
         // --- 加载 Discover 数据 ---
         let cache_base = marketplaces_cache_dir();
+        // 确保缓存目录存在（首次运行时 ~/.claude/ 可能不存在）
+        let _ = std::fs::create_dir_all(&cache_base);
         let mgr = MarketplaceManager::new(None);
         let known = load_known_marketplaces(None).unwrap_or_default();
 
@@ -625,6 +627,8 @@ impl App {
             discover_plugins.sort_by(|a, b| a.name.cmp(&b.name));
         }
 
+        let discover_was_empty = discover_plugins.is_empty();
+
         let mut panel = crate::app::plugin_panel::PluginPanel::new(entries);
         panel.discover_plugins = discover_plugins;
         panel.marketplace_entries = marketplace_view_entries;
@@ -648,6 +652,56 @@ impl App {
                             message: String::new(),
                         })
                         .await;
+                }
+            });
+        }
+
+        // 首次无缓存时，后台刷新 official marketplace
+        if discover_was_empty {
+            // 标记面板加载中状态，避免显示"No plugins available"
+            if let Some(ref mut p) = self
+                .global_panels
+                .get_mut::<crate::app::plugin_panel::PluginPanel>()
+            {
+                p.discover_loading = true;
+            }
+            let tx = self.services.bg_event_tx.clone();
+            let official_source = MarketplaceSource::GitHub {
+                repo: "anthropics/claude-plugins-official".into(),
+            };
+            let official_name = MarketplaceManager::extract_name(&official_source);
+            tokio::spawn(async move {
+                use peri_middlewares::plugin::marketplace::refresh_marketplace;
+                match refresh_marketplace(&official_source, &official_name).await {
+                    Ok((_manifest, _install_location)) => {
+                        // 同步到 known_marketplaces 以记录 install_location
+                        if let Ok(mut marketplaces) =
+                            peri_middlewares::plugin::load_known_marketplaces(None)
+                        {
+                            if let Some(km) = marketplaces
+                                .iter_mut()
+                                .find(|km| km.source == official_source)
+                            {
+                                km.install_location = _install_location;
+                                km.last_updated = chrono::Utc::now().to_rfc3339();
+                                let _ = peri_middlewares::plugin::save_known_marketplaces(
+                                    &marketplaces,
+                                    None,
+                                );
+                            }
+                        }
+                        let _ = tx
+                            .send(crate::app::AgentEvent::PluginActionCompleted {
+                                plugin_id: official_name,
+                                action: "refresh".to_string(),
+                                success: true,
+                                message: String::new(),
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "official marketplace \u{521d}\u{59cb}\u{5237}\u{65b0}\u{5931}\u{8d25}");
+                    }
                 }
             });
         }
