@@ -27,7 +27,6 @@ use crate::app::events::AgentEvent;
 use crate::app::tool_display;
 #[allow(unused_imports)]
 use crate::ui::message_view::{aggregate_tool_groups, ContentBlockView, MessageViewModel};
-use crate::ui::theme;
 
 mod reconcile;
 mod transform;
@@ -652,7 +651,6 @@ impl MessagePipeline {
         self.frozen_subagent_vms.len()
     }
 
-    /// 构建当前流式 AssistantBubble（从 pipeline 流式缓冲区构建完整内容）
     // ── 轮次管理 ──────────────────────────────────────────────────────────────
 
     /// 标记新一轮对话开始。由 submit_message() 调用。
