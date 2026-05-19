@@ -85,7 +85,7 @@ pub async fn run_acp_server(
     while let Some(msg) = transport.recv().await {
         match msg {
             IncomingMessage::Request { id, method, params } => {
-                if method == "session/prompt" {
+                if method == "session/prompt" || method == "session/compact" {
                     // Spawn long-running prompt execution so the server loop
                     // continues processing $/cancel_request notifications.
                     let sessions = sessions.clone();
@@ -102,25 +102,39 @@ pub async fn run_acp_server(
                     let shared_tools = cfg.shared_tools.clone();
                     let plugin_lsp_servers = cfg.plugin_lsp_servers.clone();
                     let thread_store = cfg.thread_store.clone();
+                    let method_clone = method.clone();
                     tokio::spawn(async move {
-                        let result = execute_prompt(
-                            params,
-                            &sessions,
-                            &provider,
-                            &peri_config,
-                            &permission_mode,
-                            cron_scheduler,
-                            &plugin_skill_dirs,
-                            &plugin_agent_dirs,
-                            &hook_groups,
-                            mcp_pool,
-                            tool_search_index,
-                            shared_tools,
-                            &plugin_lsp_servers,
-                            &transport,
-                            &thread_store,
-                        )
-                        .await;
+                        let result = if method_clone == "session/compact" {
+                            execute_compact(
+                                params,
+                                &sessions,
+                                &provider,
+                                &peri_config,
+                                &hook_groups,
+                                &transport,
+                                &thread_store,
+                            )
+                            .await
+                        } else {
+                            execute_prompt(
+                                params,
+                                &sessions,
+                                &provider,
+                                &peri_config,
+                                &permission_mode,
+                                cron_scheduler,
+                                &plugin_skill_dirs,
+                                &plugin_agent_dirs,
+                                &hook_groups,
+                                mcp_pool,
+                                tool_search_index,
+                                shared_tools,
+                                &plugin_lsp_servers,
+                                &transport,
+                                &thread_store,
+                            )
+                            .await
+                        };
                         let _ = transport.send_response(id, result).await;
                     });
                 } else {
@@ -435,6 +449,152 @@ async fn execute_prompt(
 
     let resp = PromptResponse::new(StopReason::EndTurn);
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+}
+
+// ── Manual compact (spawned into background task) ────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_compact(
+    params: Value,
+    sessions: &SharedSessions,
+    provider: &Arc<RwLock<LlmProvider>>,
+    peri_config: &Arc<RwLock<PeriConfig>>,
+    hook_groups: &[Vec<peri_middlewares::hooks::RegisteredHook>],
+    transport: &Arc<dyn peri_acp::transport::AcpTransport>,
+    thread_store: &Arc<dyn peri_agent::thread::ThreadStore>,
+) -> Result<Value, AcpError> {
+    use peri_acp::session::compact_runner::{self, HookContext};
+    use peri_acp::session::event_sink::EventSink;
+    use peri_agent::agent::events::AgentEvent as ExecutorEvent;
+
+    let session_id = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
+        .to_string();
+    let instructions = params
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Read session data under lock.
+    let (cwd, history, _thread_id) = {
+        let sessions = sessions.lock().await;
+        let state = sessions
+            .get(&session_id)
+            .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+        (
+            state.cwd.clone(),
+            state.history.clone(),
+            state.thread_id.clone(),
+        )
+    };
+
+    if history.is_empty() {
+        return Err(AcpError::new(-32602, "no messages to compact"));
+    }
+
+    let cancel = AgentCancellationToken::new();
+    {
+        let mut sessions = sessions.lock().await;
+        if let Some(state) = sessions.get_mut(&session_id) {
+            state.cancel_token = Some(cancel.clone());
+        }
+    }
+
+    // Event channel + pump for compact events.
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+    let event_tx = Arc::new(std::sync::Mutex::new(Some(event_tx)));
+    let event_sink: Arc<dyn EventSink> = Arc::new(TransportEventSink::new(Arc::clone(transport)));
+    let sink = event_sink.clone();
+    let sid = session_id.clone();
+    let (pump_done_tx, pump_done_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        while let Some(exec_event) = event_rx.recv().await {
+            sink.push_event(&sid, &exec_event, 0).await;
+        }
+        sink.push_done(&sid).await;
+        let _ = pump_done_tx.send(());
+    });
+
+    let provider_snapshot = provider.read().clone();
+    let peri_config_snapshot = peri_config.read().clone();
+    let mut compact_config = peri_config_snapshot
+        .config
+        .compact
+        .clone()
+        .unwrap_or_default();
+    compact_config.apply_env_overrides();
+
+    let all_hooks: Vec<_> = hook_groups.iter().flatten().cloned().collect();
+    let hook_ctx = HookContext {
+        cwd: cwd.clone(),
+        session_id: session_id.clone(),
+        transcript_path: String::new(),
+        provider_name: provider_snapshot.display_name().to_string(),
+        instructions,
+    };
+
+    let result = compact_runner::run_full_compact(
+        &history,
+        provider_snapshot.into_model().as_ref(),
+        &compact_config,
+        &cwd,
+        &event_tx,
+        &cancel,
+        &all_hooks,
+        &hook_ctx,
+    )
+    .await;
+
+    // Close event channel and wait for pump.
+    {
+        let mut tx_guard = event_tx.lock().unwrap();
+        *tx_guard = None;
+    }
+    let _ = pump_done_rx.await;
+
+    match result {
+        Ok(output) => {
+            // Update in-memory session history with compacted messages.
+            let new_messages = output.new_messages;
+            {
+                let mut sessions = sessions.lock().await;
+                if let Some(state) = sessions.get_mut(&session_id) {
+                    state.history = new_messages.clone();
+                    state.cancel_token = None;
+                }
+            }
+            // Persist compacted messages as a new thread.
+            let mut meta = ThreadMeta::new(&cwd);
+            let truncated: String = output.summary.chars().take(30).collect();
+            meta.title = Some(format!("Compact: {}…", truncated));
+            match thread_store.create_thread(meta).await {
+                Ok(new_tid) => {
+                    if let Err(e) = thread_store.append_messages(&new_tid, &new_messages).await {
+                        tracing::warn!(error = %e, "compact: failed to persist messages");
+                    }
+                    info!(session_id = %session_id, new_thread = %new_tid, "Manual compact completed");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "compact: failed to create thread");
+                }
+            }
+            serde_json::to_value(serde_json::json!({ "status": "ok" }))
+                .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+        }
+        Err(e) => {
+            {
+                let mut sessions = sessions.lock().await;
+                if let Some(state) = sessions.get_mut(&session_id) {
+                    state.cancel_token = None;
+                }
+            }
+            Err(AcpError::new(-32603, format!("Compact failed: {e}")))
+        }
+    }
 }
 
 // ── ACP standard state builders (re-exported from peri-acp) ──────────────────

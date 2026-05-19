@@ -1,5 +1,4 @@
 use super::*;
-use peri_agent::agent::AgentCancellationToken;
 
 impl App {
     /// 获取或新建当前 thread id（同步，block_in_place）
@@ -331,7 +330,7 @@ impl App {
             .send(RenderEvent::Clear);
     }
 
-    /// 压缩当前对话上下文：调用 LLM 生成摘要，替换 agent_state_messages
+    /// 压缩当前对话上下文：通过 ACP session/compact 请求执行
     pub fn start_compact(&mut self, instructions: String) {
         if self.session_mgr.sessions[self.session_mgr.active]
             .agent
@@ -343,61 +342,19 @@ impl App {
             return;
         }
 
-        let provider = match self
-            .services
-            .peri_config
-            .as_ref()
-            .and_then(agent::LlmProvider::from_config)
-            .or_else(agent::LlmProvider::from_env)
-        {
-            Some(p) => p,
+        let acp_client = match self.acp_client {
+            Some(ref c) => c.clone(),
             None => {
-                self.push_system_note(self.services.lc.tr("app-compact-no-provider"));
+                self.push_system_note("ACP client not available".to_string());
                 self.render_rebuild();
                 return;
             }
         };
 
-        let messages = self.session_mgr.sessions[self.session_mgr.active]
-            .agent
-            .agent_state_messages
-            .clone();
-        let model = provider.into_model();
-        let config = self.get_compact_config();
-        let cwd = self.services.cwd.clone();
-
-        let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-        self.session_mgr.sessions[self.session_mgr.active]
-            .agent
-            .agent_rx = Some(rx);
-
-        // 创建取消令牌，使 Ctrl+C 可以中断 compact 任务
-        let cancel = AgentCancellationToken::new();
-        self.session_mgr.sessions[self.session_mgr.active]
-            .agent
-            .cancel_token = Some(cancel.clone());
-
         self.set_loading(true);
         self.session_mgr.sessions[self.session_mgr.active]
             .spinner_state
             .set_verb(Some(self.services.lc.tr("app-compact-compressing").leak()));
-
-        self.render_rebuild();
-
-        // 保存用户输入副本：compact 后 resubmit 用，防止 last_user_input 被 pending_messages 覆盖
-        self.session_mgr.sessions[self.session_mgr.active]
-            .agent
-            .pre_compact_user_input = self.session_mgr.sessions[self.session_mgr.active]
-            .agent
-            .last_user_input
-            .clone();
-
-        // 标记 compact 完成后是否应自动 resubmit：
-        // 仅 agent 执行中的 auto-compact 应 resubmit，
-        // 手动 /compact（instructions != "auto"）和 Done 后 auto-compact 不应 resubmit
-        self.session_mgr.sessions[self.session_mgr.active]
-            .agent
-            .compact_should_resubmit = instructions == "auto";
 
         // 保存快照：compact 失败时恢复，防止 tracker 失去对上下文大小的感知
         self.session_mgr.sessions[self.session_mgr.active]
@@ -413,40 +370,12 @@ impl App {
             .session_token_tracker
             .reset();
 
-        // Merge hooks for PreCompact/PostCompact dispatch
-        let mut compact_hooks: Vec<peri_middlewares::hooks::types::RegisteredHook> = self
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_hooks.clone())
-            .unwrap_or_default();
-        compact_hooks.extend(peri_middlewares::hooks::loader::load_settings_local_hooks(
-            &self.services.cwd,
-        ));
-
-        let session_id = self.session_mgr.sessions[self.session_mgr.active]
-            .current_thread_id
-            .clone()
-            .unwrap_or_default();
-        let provider_name = self.services.provider_name.clone();
-        // transcript_path not available in App; hooks receive empty string
-        let transcript_path = String::new();
+        self.render_rebuild();
 
         tokio::spawn(async move {
-            agent::compact_task(
-                messages,
-                model,
-                instructions,
-                config,
-                cwd,
-                tx,
-                cancel,
-                compact_hooks,
-                session_id,
-                transcript_path,
-                provider_name,
-            )
-            .await;
+            if let Err(e) = acp_client.compact(&instructions).await {
+                tracing::error!(error = %e, "ACP compact request failed");
+            }
         });
     }
 

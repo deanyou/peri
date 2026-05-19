@@ -229,6 +229,25 @@ impl AcpTuiClient {
             .map_err(|e| e.to_string())
     }
 
+    /// Run manual compact on the current session's history.
+    pub async fn compact(&self, instructions: &str) -> Result<(), String> {
+        let session_id = self
+            .current_session_id
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("no active session")?;
+        let params = json!({
+            "sessionId": session_id,
+            "instructions": instructions,
+        });
+        self.transport
+            .send_request("session/compact", params)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// Change the model for the current session.
     pub async fn set_model(&self, alias: &str) -> Result<(), String> {
         let session_id = self
