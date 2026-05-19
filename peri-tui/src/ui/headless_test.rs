@@ -1658,9 +1658,11 @@ fn make_compact_done_event(summary: &str, re_inject_parts: &[&str]) -> AgentEven
         )
     };
     let combined = format!("{}{}", summary, re_inject_content);
-    AgentEvent::CompactDone {
+    AgentEvent::CompactCompleted {
         summary: combined,
-        new_thread_id: String::new(),
+        files: vec![],
+        skills: vec![],
+        micro_cleared: 0,
     }
 }
 

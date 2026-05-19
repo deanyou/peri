@@ -352,23 +352,6 @@ impl App {
                         .agent
                         .context_window = cw;
                 }
-                // 核心层上下文警告：触发 auto-compact 标记
-                if std::env::var("DISABLE_COMPACT").is_ok() {
-                    return (true, false, false);
-                }
-                let compact_config = self.get_compact_config();
-                if !compact_config.auto_compact_enabled {
-                    return (true, false, false);
-                }
-                if self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .auto_compact_failures
-                    < compact_config.max_consecutive_failures
-                {
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .needs_auto_compact = true;
-                }
                 (true, false, false)
             }
             AgentEvent::OAuthAuthorizationNeeded {
@@ -448,38 +431,6 @@ impl App {
                 self.session_mgr.sessions[self.session_mgr.active]
                     .spinner_state
                     .set_token_count(current_tokens);
-                // compact 被完全禁用
-                if std::env::var("DISABLE_COMPACT").is_ok() {
-                    return (true, false, false);
-                }
-                // 从 settings.json 获取 CompactConfig
-                let compact_config = self.get_compact_config();
-                // auto-compact 被禁用
-                if !compact_config.auto_compact_enabled {
-                    return (true, false, false);
-                }
-                // circuit breaker: 连续失败达到上限后不再自动触发
-                if self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .auto_compact_failures
-                    < compact_config.max_consecutive_failures
-                {
-                    let budget = peri_agent::agent::token::ContextBudget::new(
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .context_window,
-                    )
-                    .with_auto_compact_threshold(compact_config.auto_compact_threshold);
-                    if budget.should_auto_compact(
-                        &self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .session_token_tracker,
-                    ) {
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .needs_auto_compact = true;
-                    }
-                }
                 (true, false, false)
             }
             AgentEvent::ToolStart {
@@ -679,51 +630,6 @@ impl App {
                         .agent
                         .agent_rx = None;
                 }
-                // Auto-compact 两级策略
-                // 中断后不触发 compact（Interrupted 已清除 needs_auto_compact），
-                // agent_replied 为 false 时也跳过（上下文极小，无需压缩）
-                // 后台任务运行时跳过 auto-compact：start_compact 会替换 agent_rx，
-                // 导致后台任务的 BackgroundTaskCompleted 事件发送到已关闭的旧通道而丢失。
-                // needs_auto_compact 标记保留，待后台任务完成后由 BackgroundTaskCompleted 处理器触发。
-                let has_bg_tasks =
-                    self.session_mgr.sessions[self.session_mgr.active].background_task_count > 0;
-                let should_check_compact = self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .agent_replied;
-                if should_check_compact
-                    && self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .needs_auto_compact
-                    && !has_bg_tasks
-                {
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .needs_auto_compact = false;
-                    tracing::info!(
-                        "auto-compact: context threshold reached, triggering full compact"
-                    );
-                    self.start_compact("auto".to_string());
-                    // Done 后 auto-compact 不应 resubmit：任务已结束，重新执行无意义
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .compact_should_resubmit = false;
-                    return (true, false, true);
-                } else if should_check_compact {
-                    let compact_config = self.get_compact_config();
-                    let budget = peri_agent::agent::token::ContextBudget::new(
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .context_window,
-                    )
-                    .with_warning_threshold(compact_config.micro_compact_threshold);
-                    if budget.should_warn(
-                        &self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .session_token_tracker,
-                    ) {
-                        self.start_micro_compact();
-                    }
-                }
                 // 清理残留弹窗状态
                 self.session_mgr.sessions[self.session_mgr.active]
                     .agent
@@ -772,11 +678,6 @@ impl App {
                 {
                     return (false, false, false);
                 }
-                // 中断后不应触发 auto-compact（上下文可能还很充裕），
-                // 清除标记，防止紧随其后的 Done 事件误触发
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .needs_auto_compact = false;
                 // Pipeline：finalize 当前状态
                 let actions = self.session_mgr.sessions[self.session_mgr.active]
                     .messages
@@ -1102,10 +1003,13 @@ impl App {
                 self.request_rebuild();
                 (true, false, false)
             }
-            AgentEvent::CompactDone {
+            AgentEvent::CompactCompleted {
                 summary,
-                new_thread_id: _,
-            } => self.handle_compact_done(summary),
+                files,
+                skills,
+                micro_cleared,
+            } => self.handle_compact_completed(summary, files, skills, micro_cleared),
+            AgentEvent::CompactStarted => self.handle_compact_started(),
             AgentEvent::CompactError(msg) => self.handle_compact_error(msg),
             AgentEvent::LlmRetrying {
                 attempt,

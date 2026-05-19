@@ -359,7 +359,8 @@ impl MessagePipeline {
             AgentEvent::Error(_)
             | AgentEvent::InteractionRequest { .. }
             | AgentEvent::TodoUpdate(_)
-            | AgentEvent::CompactDone { .. }
+            | AgentEvent::CompactStarted
+            | AgentEvent::CompactCompleted { .. }
             | AgentEvent::CompactError(_)
             | AgentEvent::TokenUsageUpdate { .. }
             | AgentEvent::LlmRetrying { .. }

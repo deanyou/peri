@@ -42,10 +42,14 @@ pub enum AgentEvent {
     TodoUpdate(Vec<TodoItem>),
     /// Agent 执行结束后的消息快照（用于多轮对话续接）
     StateSnapshot(Vec<peri_agent::messages::BaseMessage>),
-    /// 上下文压缩成功，携带摘要文本和新 Thread ID
-    CompactDone {
+    /// Compact 开始（来自 executor 或手动 /compact）
+    CompactStarted,
+    /// 上下文压缩完成，携带摘要、保留的文件和 skill 信息
+    CompactCompleted {
         summary: String,
-        new_thread_id: String,
+        files: Vec<peri_agent::agent::events::CompactFileInfo>,
+        skills: Vec<String>,
+        micro_cleared: usize,
     },
     /// 上下文压缩失败，携带错误信息
     CompactError(String),

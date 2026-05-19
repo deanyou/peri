@@ -212,26 +212,6 @@ impl App {
                 .agent
                 .pending_bg_continuation = Some(display_notification);
 
-            // 后台任务运行期间被延迟的 auto-compact：现在通道已安全关闭，可以触发。
-            // compact 完成后（loading = false），poll_agent 会在下一帧处理
-            // pending_bg_continuation 并通过 submit_message 自动提交 continuation。
-            if self.session_mgr.sessions[self.session_mgr.active]
-                .agent
-                .needs_auto_compact
-            {
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .needs_auto_compact = false;
-                tracing::info!(
-                    "auto-compact: deferred from Done (background tasks were running), triggering now"
-                );
-                self.start_compact("auto".to_string());
-                // Done 后 auto-compact 不应 resubmit：任务已结束
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .compact_should_resubmit = false;
-                return (true, false, true);
-            }
             return (true, false, true);
         } else if !self.session_mgr.sessions[self.session_mgr.active]
             .agent

@@ -168,11 +168,20 @@ pub(crate) fn map_executor_event(event: ExecutorEvent, cwd: &str) -> Option<Agen
             result,
             is_error,
         },
-        // Other lifecycle events — not yet handled in TUI, ignore
-        ExecutorEvent::SessionEnded
-        | ExecutorEvent::CompactStarted
-        | ExecutorEvent::CompactCompleted { .. }
-        | ExecutorEvent::CompactError { .. } => return None,
+        ExecutorEvent::CompactStarted => AgentEvent::CompactStarted,
+        ExecutorEvent::CompactCompleted {
+            summary,
+            files,
+            skills,
+            micro_cleared,
+        } => AgentEvent::CompactCompleted {
+            summary,
+            files,
+            skills,
+            micro_cleared,
+        },
+        ExecutorEvent::CompactError { message } => AgentEvent::CompactError(message),
+        ExecutorEvent::SessionEnded => return None,
     })
 }
 
@@ -348,9 +357,11 @@ pub async fn compact_task(
     .await;
 
     if tx
-        .send(super::AgentEvent::CompactDone {
+        .send(super::AgentEvent::CompactCompleted {
             summary: combined_summary,
-            new_thread_id: String::new(),
+            files: vec![],
+            skills: vec![],
+            micro_cleared: 0,
         })
         .await
         .is_err()
