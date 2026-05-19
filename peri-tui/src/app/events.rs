@@ -63,17 +63,21 @@ pub enum AgentEvent {
         agent_name: String,
         started: bool,
     },
-    /// SubAgent 开始执行（由 Agent ToolStart 映射而来）
+    /// SubAgent 开始执行（由 SubagentStarted 映射而来，携带唯一实例 ID）
     SubAgentStart {
         agent_id: String,
+        /// 唯一实例标识符（并发同类型 SubAgent 路由用）
+        instance_id: String,
         task_preview: String,
         is_background: bool,
     },
-    /// SubAgent 执行结束（由 Agent ToolEnd 映射而来）
+    /// SubAgent 执行结束
     SubAgentEnd {
         result: String,
         is_error: bool,
         agent_id: Option<String>,
+        /// 唯一实例标识符
+        instance_id: Option<String>,
     },
     /// Token 使用量更新（从核心层 LlmCallEnd 映射而来）
     TokenUsageUpdate {

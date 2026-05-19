@@ -267,6 +267,7 @@ fn test_subagent_parallel_same_tool_matches_by_call_id() {
     // 启动 SubAgent
     let _ = pipeline.handle_event(AgentEvent::SubAgentStart {
         agent_id: "test-agent".into(),
+        instance_id: "test-instance".into(),
         task_preview: "parallel reads".into(),
         is_background: false,
     });
@@ -347,11 +348,13 @@ fn test_concurrent_subagents_route_by_source_agent_id() {
     // 启动两个并发 SubAgent
     let _ = pipeline.handle_event(AgentEvent::SubAgentStart {
         agent_id: "agent-a".into(),
+        instance_id: "test-instance".into(),
         task_preview: "task a".into(),
         is_background: false,
     });
     let _ = pipeline.handle_event(AgentEvent::SubAgentStart {
         agent_id: "agent-b".into(),
+        instance_id: "test-instance".into(),
         task_preview: "task b".into(),
         is_background: false,
     });
@@ -479,11 +482,13 @@ fn test_concurrent_subagents_route_by_source_agent_id() {
     // SubAgentEnd 带 agent_id 精确匹配
     let _ = pipeline.handle_event(AgentEvent::SubAgentEnd {
         agent_id: Some("agent-a".into()),
+        instance_id: None,
         result: "done a".into(),
         is_error: false,
     });
     let _ = pipeline.handle_event(AgentEvent::SubAgentEnd {
         agent_id: Some("agent-b".into()),
+        instance_id: None,
         result: "done b".into(),
         is_error: false,
     });
@@ -504,6 +509,7 @@ fn test_subagent_source_agent_id_none_fallback_to_last_mut() {
     // 启动单个 SubAgent（无 source_agent_id 时 last_mut() 回退生效）
     let _ = pipeline.handle_event(AgentEvent::SubAgentStart {
         agent_id: "legacy-agent".into(),
+        instance_id: "test-instance".into(),
         task_preview: "legacy task".into(),
         is_background: false,
     });
@@ -1201,11 +1207,13 @@ fn test_frozen_subagent_vms_cleared_on_begin_round() {
     // ── 轮次 1：并发 2 个 SubAgent ──
     pipeline.handle_event(AgentEvent::SubAgentStart {
         agent_id: "sa1".into(),
+        instance_id: "test-instance".into(),
         task_preview: "task one".into(),
         is_background: false,
     });
     pipeline.handle_event(AgentEvent::SubAgentStart {
         agent_id: "sa2".into(),
+        instance_id: "test-instance".into(),
         task_preview: "task two".into(),
         is_background: false,
     });
@@ -1213,11 +1221,13 @@ fn test_frozen_subagent_vms_cleared_on_begin_round() {
         result: "result sa1".into(),
         is_error: false,
         agent_id: Some("sa1".into()),
+        instance_id: None,
     });
     pipeline.handle_event(AgentEvent::SubAgentEnd {
         result: "result sa2".into(),
         is_error: false,
         agent_id: Some("sa2".into()),
+        instance_id: None,
     });
 
     // 验证轮次 1 的 frozen_subagent_vms 包含 2 个冻结 VM
@@ -1249,6 +1259,7 @@ fn test_frozen_subagent_vms_cleared_on_begin_round() {
     // ── 轮次 2：单个 SubAgent sa3 ──
     pipeline.handle_event(AgentEvent::SubAgentStart {
         agent_id: "sa3".into(),
+        instance_id: "test-instance".into(),
         task_preview: "task three".into(),
         is_background: false,
     });
@@ -1256,6 +1267,7 @@ fn test_frozen_subagent_vms_cleared_on_begin_round() {
         result: "result sa3".into(),
         is_error: false,
         agent_id: None,
+        instance_id: None,
     });
 
     assert_eq!(
@@ -1327,6 +1339,7 @@ fn test_no_duplicate_subagent_state_on_tool_start_plus_subagent_start() {
     // 2. SubAgentStart — 创建 SubAgentState
     let _ = pipeline.handle_event(AgentEvent::SubAgentStart {
         agent_id: "code-reviewer".into(),
+        instance_id: "test-instance".into(),
         task_preview: "review code".into(),
         is_background: false,
     });
@@ -1342,6 +1355,7 @@ fn test_no_duplicate_subagent_state_on_tool_start_plus_subagent_start() {
     // 3. SubAgentEnd — 冻结
     let _ = pipeline.handle_event(AgentEvent::SubAgentEnd {
         agent_id: Some("code-reviewer".into()),
+        instance_id: None,
         result: "review done".into(),
         is_error: false,
     });

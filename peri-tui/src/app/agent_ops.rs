@@ -198,6 +198,7 @@ impl App {
         match event {
             AgentEvent::SubAgentStart {
                 agent_id,
+                instance_id,
                 task_preview,
                 is_background,
             } => {
@@ -229,6 +230,7 @@ impl App {
                     .pipeline
                     .handle_event(AgentEvent::SubAgentStart {
                         agent_id,
+                        instance_id,
                         task_preview,
                         is_background,
                     });
@@ -268,6 +270,7 @@ impl App {
                 result,
                 is_error,
                 agent_id,
+                instance_id,
             } => {
                 self.session_mgr.sessions[self.session_mgr.active]
                     .agent
@@ -313,6 +316,7 @@ impl App {
                         result,
                         is_error,
                         agent_id,
+                        instance_id,
                     });
                 for action in actions {
                     self.apply_pipeline_action(action);

@@ -433,6 +433,7 @@ async fn test_subagent_group_basic() {
 
     app.push_agent_event(AgentEvent::SubAgentStart {
         agent_id: "code-reviewer".into(),
+        instance_id: "test-instance".into(),
         task_preview: "review the code".into(),
         is_background: false,
     });
@@ -456,6 +457,7 @@ async fn test_subagent_group_basic() {
         result: "All tests passed, no issues found".into(),
         is_error: false,
         agent_id: Some("code-reviewer".into()),
+        instance_id: None,
     });
     app.process_pending_events();
     app.flush_rebuild();
@@ -501,6 +503,7 @@ async fn test_subagent_group_sliding_window() {
 
     app.push_agent_event(AgentEvent::SubAgentStart {
         agent_id: "analyzer".into(),
+        instance_id: "test-instance".into(),
         task_preview: "analyze codebase".into(),
         is_background: false,
     });
@@ -518,6 +521,7 @@ async fn test_subagent_group_sliding_window() {
         result: "analysis complete".into(),
         is_error: false,
         agent_id: Some("analyzer".into()),
+        instance_id: None,
     });
     app.process_pending_events();
 
@@ -551,6 +555,7 @@ async fn test_subagent_group_assistant_chunk() {
 
     app.push_agent_event(AgentEvent::SubAgentStart {
         agent_id: "writer".into(),
+        instance_id: "test-instance".into(),
         task_preview: "write summary".into(),
         is_background: false,
     });
@@ -562,6 +567,7 @@ async fn test_subagent_group_assistant_chunk() {
         result: "Done writing".into(),
         is_error: false,
         agent_id: Some("writer".into()),
+        instance_id: None,
     });
     app.process_pending_events();
 
@@ -2965,6 +2971,7 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
     let n = handle.render_notify.notified();
     app.push_agent_event(AgentEvent::SubAgentStart {
         agent_id: "code-reviewer".into(),
+        instance_id: "test-instance".into(),
         task_preview: "review the code".into(),
         is_background: false,
     });
@@ -3001,6 +3008,7 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
         result: "review complete".into(),
         is_error: false,
         agent_id: Some("code-reviewer".into()),
+        instance_id: None,
     });
     app.process_pending_events();
     let _ = n;
@@ -3464,6 +3472,7 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
     // Step 2: SubAgentStart (background agent)
     app.push_agent_event(AgentEvent::SubAgentStart {
         agent_id: "code-reviewer".into(),
+        instance_id: "test-instance".into(),
         task_preview: "review the code".into(),
         is_background: true,
     });
@@ -3480,6 +3489,7 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
         result: "Background task bg-abc123 started.".into(),
         is_error: false,
         agent_id: None,
+        instance_id: None,
     });
     app.process_pending_events();
     bg_diag_print_vms(&app, "Step 3: After SubAgentEnd");
@@ -3661,7 +3671,8 @@ async fn test_diagnostic_fork_plus_background_subagent_group() {
     // map_executor_event 从 input 中读取 run_in_background=true，设置 is_background=true
     // 但 invoke_fork 是同步的，不会产生 BackgroundTaskCompleted
     app.push_agent_event(AgentEvent::SubAgentStart {
-        agent_id: "fork".into(), // fork 模式 agent_id 为 "fork"
+        agent_id: "fork".into(),
+        instance_id: "test-fork-bg".into(),
         task_preview: "do something in background".into(),
         is_background: true, // 关键：fork+background 时 is_background=true
     });
@@ -3680,6 +3691,7 @@ async fn test_diagnostic_fork_plus_background_subagent_group() {
         result: "[Sub-agent executed 3 tool calls: Read, Bash, Grep]\n\nDone.".into(),
         is_error: false,
         agent_id: None,
+        instance_id: None,
     });
     app.process_pending_events();
     bg_diag_print_vms(

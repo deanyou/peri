@@ -26,27 +26,8 @@ pub(crate) fn map_executor_event(event: ExecutorEvent, cwd: &str) -> Option<Agen
             chunk: text,
             source_agent_id,
         },
-        // Agent ToolStart → SubAgentStart（在通用 ToolStart 分支之前）
-        ExecutorEvent::ToolStart { name, input, .. } if name == "Agent" => {
-            let agent_id = input
-                .get("subagent_type")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("fork")
-                .to_string();
-            let task_preview = input["prompt"]
-                .as_str()
-                .unwrap_or("")
-                .chars()
-                .take(40)
-                .collect();
-            let is_background = input["run_in_background"].as_bool().unwrap_or(false);
-            AgentEvent::SubAgentStart {
-                agent_id,
-                task_preview,
-                is_background,
-            }
-        }
+        // Agent ToolStart → 走普通 ToolStart 分支（注册 pending_tool）
+        // SubAgentState 由后续的 SubagentStarted 事件创建（携带唯一 instance_id）
         ExecutorEvent::ToolStart {
             tool_call_id,
             name,
@@ -154,21 +135,24 @@ pub(crate) fn map_executor_event(event: ExecutorEvent, cwd: &str) -> Option<Agen
             warnings,
             files_with_errors,
         },
-        // SubAgent 生命周期事件 → 触发 spinner 更新 + 刷新显示
+        // SubAgent 生命周期事件：SubagentStarted 创建 SubAgentState（携带唯一 instance_id）
         ExecutorEvent::SubagentStarted {
             agent_name,
-            instance_id: _,
-        } => AgentEvent::SubagentLifecycle {
-            agent_name,
-            started: true,
+            instance_id,
+        } => AgentEvent::SubAgentStart {
+            agent_id: agent_name.clone(),
+            instance_id,
+            task_preview: String::new(),
+            is_background: false,
         },
         ExecutorEvent::SubagentStopped {
             agent_name,
             result,
             is_error,
-            instance_id: _,
+            instance_id,
         } => AgentEvent::SubAgentEnd {
             agent_id: Some(agent_name),
+            instance_id: Some(instance_id),
             result,
             is_error,
         },

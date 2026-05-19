@@ -82,7 +82,10 @@ fn parse_bg_hash(result: &str) -> Option<String> {
 
 /// 活跃 SubAgent 执行状态
 pub(crate) struct SubAgentState {
+    /// subagent_type，仅用于显示
     agent_id: String,
+    /// 唯一实例标识符，用于路由
+    instance_id: String,
     task_preview: String,
     total_steps: usize,
     /// 流式期间的内部消息（不持久化）
@@ -285,36 +288,33 @@ impl MessagePipeline {
             }
             AgentEvent::SubAgentStart {
                 agent_id,
+                instance_id,
                 task_preview,
                 is_background,
             } => {
                 let input =
                     serde_json::json!({"subagent_type": &agent_id, "prompt": &task_preview});
-                let tc_id = format!("subagent_{}", agent_id);
-                self.tool_start_internal(&tc_id, "Agent", input, is_background);
+                self.tool_start_internal(&instance_id, "Agent", input, is_background);
                 vec![PipelineAction::None]
             }
             AgentEvent::SubAgentEnd {
                 result,
                 is_error,
-                agent_id,
+                agent_id: _,
+                instance_id,
             } => {
-                let tc_id = if let Some(ref aid) = agent_id {
-                    // 按 agent_id 查找 RUNNING 的 SubAgent（同名 SubAgent 场景：
-                    // 第一个完成后 is_running=false，第二个 match 会命中下一个 running 的）
+                let tc_id = if let Some(ref iid) = instance_id {
+                    // 按 instance_id 精确查找 RUNNING 的 SubAgent
                     self.subagent_stack
                         .iter()
-                        .find(|s| s.agent_id == *aid && s.is_running)
-                        .or_else(|| self.subagent_stack.iter().find(|s| s.agent_id == *aid))
-                        .map(|s| format!("subagent_{}", s.agent_id))
+                        .find(|s| s.instance_id == *iid && s.is_running)
+                        .map(|s| s.instance_id.clone())
                         .unwrap_or_else(|| "subagent_end".to_string())
                 } else {
-                    // 防御性回退：agent_id=None 仅当 SubagentStopped→SubAgentEnd 映射
-                    // 未生效时到达（如旧版事件），此时无法确定目标 SubAgent，冻结 last()。
-                    // 此路径应极少触发——SubagentStopped 总是携带 agent_name。
+                    // 防御性回退：instance_id=None 仅当旧版事件到达
                     self.subagent_stack
                         .last()
-                        .map(|s| format!("subagent_{}", s.agent_id))
+                        .map(|s| s.instance_id.clone())
                         .unwrap_or_else(|| "subagent_end".to_string())
                 };
                 self.tool_end_internal(&tc_id, "Agent", &result, is_error);
@@ -414,6 +414,7 @@ impl MessagePipeline {
                 .collect();
             self.subagent_stack.push(SubAgentState {
                 agent_id: agent_id.clone(),
+                instance_id: tool_call_id.to_string(),
                 task_preview: task_preview.clone(),
                 total_steps: 0,
                 recent_messages: Vec::new(),
@@ -457,14 +458,11 @@ impl MessagePipeline {
             .unwrap_or(serde_json::Value::Null);
 
         if name == "Agent" {
-            // 从 tool_call_id 中提取 agent_id 用于匹配。
-            // 优先匹配 is_running 的 SubAgent（同名 SubAgent 场景：第一个完成后
-            // is_running=false，后续调用跳过它，命中下一个 running 的）。
-            let target_agent_id = tool_call_id.strip_prefix("subagent_").unwrap_or("");
+            // tool_call_id 现在就是 instance_id，直接精确匹配
             if let Some(sub) = self
                 .subagent_stack
                 .iter_mut()
-                .find(|s| s.agent_id == target_agent_id && s.is_running)
+                .find(|s| s.instance_id == tool_call_id && s.is_running)
             {
                 if sub.is_background {
                     // 后台 agent 路径：不冻结，保持 is_running=true，解析 bg_hash
@@ -573,11 +571,11 @@ impl MessagePipeline {
         }
     }
 
-    /// 根据 agent_id 查找 subagent_stack 中正在运行的 SubAgent
-    fn find_running_subagent_mut(&mut self, agent_id: &str) -> Option<&mut SubAgentState> {
+    /// 根据 instance_id 查找 subagent_stack 中正在运行的 SubAgent
+    fn find_running_subagent_mut(&mut self, instance_id: &str) -> Option<&mut SubAgentState> {
         self.subagent_stack
             .iter_mut()
-            .find(|s| s.agent_id == agent_id && s.is_running)
+            .find(|s| s.instance_id == instance_id && s.is_running)
     }
 
     /// 标记当前 AI 轮次结束
