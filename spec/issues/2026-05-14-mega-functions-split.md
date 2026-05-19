@@ -1,8 +1,9 @@
 # 超长函数拆分：event.rs 和 agent_ops.rs 各有 1000+ 行单函数
 
-**状态**：Open
+**状态**：Closed
 **优先级**：高
 **创建日期**：2026-05-14
+**关闭日期**：2026-05-19
 
 ## 问题描述
 
@@ -43,3 +44,23 @@
 - `peri-tui/src/app/panel_ops.rs`（1084 行）—— open_plugin_panel 所在文件
 - `peri-agent/src/llm/anthropic.rs`（1983 行）—— invoke 所在文件
 - `peri-tui/src/app/agent.rs`（797 行）—— run_universal_agent 所在文件
+
+## 实施（2026-05-19）
+
+基于 slop scan 大文件分析，对 5 个最大文件进行了系统性拆分（分支 `refactor/split-large-files`）：
+
+| # | 原文件 | 前大小 | 后 | 方法 |
+|---|--------|-------|-----|------|
+| 1 | `event.rs` | 1447 | `event/` (mouse.rs 175 + keyboard.rs 746 + mod.rs 576) | `handle_event` 拆分为 Key→keyboard::handle_key_event / Mouse→内联 / Paste→内联 |
+| 2 | `plugin_panel.rs` | 1817 | `plugin_panel/` (types.rs 205 + handlers.rs 841 + mod.rs 812) | 类型/处理器/协调三向拆分 |
+| 3 | `agent_ops.rs` | 1385 | 1053 + `agent_ops_interaction.rs` 247 | `handle_agent_event` 的 7 个 arm 提取为独立函数，3 处清理代码统一为 `cleanup_agent_state()` |
+| 4 | `panel_ops.rs` | 1190 | ~140 + 8 个 `panel_*.rs` 文件 | 按面板类型垂直拆分 |
+| 5 | `main.rs` | 952 | 497 + `acp_stdio.rs` 462 | `run_acp_stdio()` 及相关类型提取 |
+
+**已解决**：`handle_event`（完成拆分）、`handle_agent_event`（减至 ~360 行分发器）、`open_plugin_panel`（面板文件拆分后函数自然定位）。
+
+**遗留**：
+- `peri-agent/src/llm/anthropic.rs` 的 `invoke`（~300 行）—— 未处理
+- `peri-tui/src/app/agent.rs` 的 `run_universal_agent`（~500 行）—— 未处理
+
+总计减少量：6791 行→19 个文件。Build/525 tests/clippy/fmt 全部通过。
