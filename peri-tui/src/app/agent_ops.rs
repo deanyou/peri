@@ -1,7 +1,5 @@
 use super::message_pipeline::PipelineAction;
 use super::*;
-use peri_acp::transport::types::RequestId;
-use peri_middlewares::hitl::BatchItem;
 use tracing::debug;
 
 impl App {
@@ -52,145 +50,404 @@ impl App {
         }
     }
 
-    /// Handle ACP RequestPermission: create HITL approval dialog.
-    fn handle_acp_request_permission(
-        &mut self,
-        id: RequestId,
-        params: serde_json::Value,
-    ) -> (bool, bool, bool) {
-        use agent_client_protocol::schema::RequestPermissionRequest;
-        use tokio::sync::oneshot;
+    // ─── Shared cleanup ────────────────────────────────────────────────────
 
-        let req = match serde_json::from_value::<RequestPermissionRequest>(params) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to parse RequestPermissionRequest");
-                return (false, false, false);
+    /// Shared agent state teardown for Done, Error, and Disconnected paths.
+    /// Ends the Langfuse trace, sets loading=false, clears interaction state,
+    /// and records task duration. Callers handle bg task channel logic separately.
+    fn cleanup_agent_state(&mut self, langfuse_error: Option<&str>) {
+        {
+            let s = &mut self.session_mgr.sessions[self.session_mgr.active];
+
+            // End Langfuse trace
+            let tracer = s.langfuse.langfuse_tracer.take();
+            if let Some(ref t) = tracer {
+                s.langfuse.langfuse_flush_handle = Some(t.lock().on_trace_end(langfuse_error));
             }
-        };
+            s.langfuse.langfuse_tracer = None;
 
-        let tool_name = req
-            .tool_call
-            .fields
-            .title
-            .unwrap_or_else(|| "unknown".to_string());
-        let tool_input = req
-            .tool_call
-            .fields
-            .raw_input
-            .unwrap_or(serde_json::Value::Null);
+            // Clear interaction state
+            s.agent.interaction_prompt = None;
+            s.agent.pending_hitl_items = None;
+            s.agent.pending_ask_user = None;
 
-        let batch_items = vec![BatchItem {
-            tool_name,
-            input: tool_input,
-        }];
-
-        // Create oneshot bridge — the confirm() handler will call bridge_tx.send(decisions)
-        let (bridge_tx, _bridge_rx) = oneshot::channel::<Vec<HitlDecision>>();
-
-        // Store ACP request id for response dispatch in hitl_ops.rs
-        self.session_mgr.sessions[self.session_mgr.active]
-            .agent
-            .pending_acp_request_id = Some(id);
-
-        let prompt = HitlBatchPrompt::new(batch_items, bridge_tx);
-        self.session_mgr.sessions[self.session_mgr.active]
-            .agent
-            .interaction_prompt = Some(InteractionPrompt::Approval(prompt));
-
-        (true, true, false) // pause event consumption, wait for user confirmation
-    }
-
-    /// Handle ACP elicitation/create: create AskUser dialog.
-    fn handle_acp_elicitation(
-        &mut self,
-        id: RequestId,
-        params: serde_json::Value,
-    ) -> (bool, bool, bool) {
-        use agent_client_protocol_schema::{CreateElicitationRequest, ElicitationMode};
-        use peri_middlewares::ask_user::{AskUserBatchRequest, AskUserOption, AskUserQuestionData};
-        use tokio::sync::oneshot;
-
-        let req = match serde_json::from_value::<CreateElicitationRequest>(params) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to parse CreateElicitationRequest");
-                return (false, false, false);
-            }
-        };
-
-        let mut questions = Vec::new();
-
-        if let ElicitationMode::Form(form) = req.mode {
-            for (prop_id, prop) in &form.requested_schema.properties {
-                let (title, description, is_multi, options) = match prop {
-                    agent_client_protocol_schema::ElicitationPropertySchema::String(s) => (
-                        s.title.clone(),
-                        s.description.clone(),
-                        false,
-                        s.one_of
-                            .as_ref()
-                            .map(|opts| {
-                                opts.iter()
-                                    .map(|o| AskUserOption {
-                                        label: o.title.clone(),
-                                        description: None,
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                    ),
-                    agent_client_protocol_schema::ElicitationPropertySchema::Array(a) => (
-                        a.title.clone(),
-                        a.description.clone(),
-                        true,
-                        match &a.items {
-                            agent_client_protocol_schema::MultiSelectItems::Titled(t) => t
-                                .options
-                                .iter()
-                                .map(|o| AskUserOption {
-                                    label: o.title.clone(),
-                                    description: None,
-                                })
-                                .collect(),
-                            _ => vec![],
-                        },
-                    ),
-                    _ => continue,
-                };
-                questions.push(AskUserQuestionData {
-                    tool_call_id: prop_id.clone(),
-                    question: description.unwrap_or_default(),
-                    header: title.unwrap_or_default(),
-                    multi_select: is_multi,
-                    options,
-                });
+            // Record task duration
+            if let Some(start) = s.agent.task_start_time {
+                s.agent.last_task_duration = Some(start.elapsed());
             }
         }
+        self.set_loading(false);
+    }
 
-        // Create oneshot bridge — confirm() handler will call bridge_tx.send(answers)
-        let (bridge_tx, _bridge_rx) = oneshot::channel::<Vec<String>>();
+    // ─── Event arm handlers ────────────────────────────────────────────────
 
-        // Store ACP request id for response dispatch in ask_user_ops.rs
+    fn handle_token_usage_update(
+        &mut self,
+        usage: peri_agent::llm::types::TokenUsage,
+    ) -> (bool, bool, bool) {
+        // SubAgent 的 TokenUsageUpdate 不应污染父 agent 的 tracker
+        if self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .subagent_depth
+            > 0
+        {
+            return (true, false, false);
+        }
+
+        // 累积到会话追踪器
         self.session_mgr.sessions[self.session_mgr.active]
             .agent
-            .pending_acp_request_id = Some(id);
+            .session_token_tracker
+            .accumulate(&usage);
+
+        // 缓存率检查：当次命中率低于 80% 时显示黄色提示
+        let rate = self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .session_token_tracker
+            .cache_hit_rate();
+        if rate < 0.8 {
+            let tracker = &self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .session_token_tracker;
+            tracing::warn!(
+                input = tracker.total_input_tokens,
+                cache_read = tracker.total_cache_read_tokens,
+                rate_pct = rate * 100.0,
+                "prompt cache hit rate below threshold"
+            );
+            let percentage = (rate * 100.0) as u32;
+            let req_id = tracker.last_request_id.as_deref().unwrap_or("-");
+            let msg = format!(
+                "⚠ {}",
+                self.services.lc.tr_args(
+                    "app-prompt-cache-low",
+                    &[
+                        ("rate".into(), (percentage as i64).into()),
+                        ("req".into(), req_id.to_string().into()),
+                    ]
+                )
+            );
+            let vm = MessageViewModel::system(msg);
+            self.apply_pipeline_action(PipelineAction::AddMessage(vm));
+        }
+        // 更新 spinner 的 token 显示（仅当次调用的 token，不累计）
+        let current_tokens = usage.input_tokens as usize + usage.output_tokens as usize;
+        self.session_mgr.sessions[self.session_mgr.active]
+            .spinner_state
+            .set_token_count(current_tokens);
+        (true, false, false)
+    }
+
+    fn handle_subagent_start(
+        &mut self,
+        agent_id: String,
+        instance_id: String,
+        task_preview: String,
+        is_background: bool,
+    ) -> (bool, bool, bool) {
+        if is_background {
+            self.session_mgr.sessions[self.session_mgr.active].background_task_count += 1;
+        }
         self.session_mgr.sessions[self.session_mgr.active]
             .agent
-            .pending_ask_user = Some(false);
+            .subagent_depth += 1;
+        // 跨切面：Langfuse
+        if let Some(ref tracer) = self.session_mgr.sessions[self.session_mgr.active]
+            .langfuse
+            .langfuse_tracer
+        {
+            let _lock_start = std::time::Instant::now();
+            tracer.lock().on_subagent_start(&agent_id, &task_preview);
+            let _wait = _lock_start.elapsed();
+            if _wait.as_millis() > 50 {
+                tracing::warn!(
+                    "[DEADLOCK] TUI: tracer lock held {:?} for SubAgentStart({})",
+                    _wait,
+                    agent_id
+                );
+            }
+        }
+        // Pipeline：创建 SubAgentGroup VM
+        let actions = self.session_mgr.sessions[self.session_mgr.active]
+            .messages
+            .pipeline
+            .handle_event(AgentEvent::SubAgentStart {
+                agent_id,
+                instance_id,
+                task_preview,
+                is_background,
+            });
+        for action in actions {
+            self.apply_pipeline_action(action);
+        }
+        self.request_rebuild();
+        (true, false, false)
+    }
 
-        let (batch_req, _) = AskUserBatchRequest::new(questions);
-        let batch_req_bridged = AskUserBatchRequest {
-            questions: batch_req.questions,
-            response_tx: bridge_tx,
-        };
+    fn handle_done(&mut self) -> (bool, bool, bool) {
+        // Child agent Done during tool execution — ignore
+        let in_sub = self.session_mgr.sessions[self.session_mgr.active]
+            .messages
+            .pipeline
+            .in_subagent();
+        debug!(
+            in_subagent = in_sub,
+            active = self.session_mgr.active,
+            "AgentEvent::Done — checking in_subagent"
+        );
+        if in_sub {
+            return (false, false, false);
+        }
         self.session_mgr.sessions[self.session_mgr.active]
             .agent
-            .interaction_prompt = Some(InteractionPrompt::Questions(
-            AskUserBatchPrompt::from_request(batch_req_bridged),
-        ));
+            .retry_status = None;
+        // Pipeline：finalize 当前 AI 消息
+        let actions = self.session_mgr.sessions[self.session_mgr.active]
+            .messages
+            .pipeline
+            .handle_event(AgentEvent::Done);
+        for action in actions {
+            self.apply_pipeline_action(action);
+        }
+        // 跳过已由 Interrupted/Error 处理器完成的 reconcile
+        if !self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .reconcile_already_done
+        {
+            self.request_rebuild();
+        } else {
+            if let Some(MessageViewModel::AssistantBubble { is_streaming, .. }) =
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
+                    .view_messages
+                    .last_mut()
+            {
+                *is_streaming = false;
+            }
+            self.render_rebuild();
+        }
+        // 后台任务：保持通道存活
+        if self.session_mgr.sessions[self.session_mgr.active].background_task_count > 0 {
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .agent_done_pending_bg = true;
+            tracing::info!(
+                count = self.session_mgr.sessions[self.session_mgr.active].background_task_count,
+                "agent done but background tasks still running, keeping channel alive"
+            );
+        } else {
+            // 竞态修复：处理暂存的后台任务完成通知
+            if !self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .pre_done_bg_completions
+                .is_empty()
+            {
+                let notifications: Vec<String> = self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .pre_done_bg_completions
+                    .drain(..)
+                    .collect();
+                let combined = notifications.join("\n");
+                tracing::info!(
+                    count = notifications.len(),
+                    "Done: processing pre-done background task completions, setting continuation"
+                );
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .pending_bg_continuation = Some(combined);
+            }
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .agent_rx = None;
+        }
+        self.cleanup_agent_state(None);
+        // circuit breaker 渐进恢复：每轮成功对话将 failure 计数减半
+        if self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .auto_compact_failures
+            > 0
+        {
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .auto_compact_failures /= 2;
+        }
+        // 检查缓冲消息，合并发送
+        if !self.session_mgr.sessions[self.session_mgr.active]
+            .messages
+            .pending_messages
+            .is_empty()
+        {
+            self.flush_pending_messages();
+        }
+        (true, false, true)
+    }
 
-        (true, true, false) // pause event consumption, wait for user input
+    fn handle_interrupted(&mut self) -> (bool, bool, bool) {
+        // Child agent interrupted during tool execution — ignore
+        if self.session_mgr.sessions[self.session_mgr.active]
+            .messages
+            .pipeline
+            .in_subagent()
+        {
+            return (false, false, false);
+        }
+        // Pipeline：finalize 当前状态
+        let actions = self.session_mgr.sessions[self.session_mgr.active]
+            .messages
+            .pipeline
+            .handle_event(AgentEvent::Interrupted);
+        for action in actions {
+            self.apply_pipeline_action(action);
+        }
+
+        let agent_replied = self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .agent_replied;
+        if !agent_replied {
+            // Agent 尚未回复，恢复用户文本到输入框
+            if let Some(text) = self.session_mgr.sessions[self.session_mgr.active]
+                .messages
+                .last_submitted_text
+                .take()
+            {
+                let round_start = self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
+                    .round_start_vm_idx;
+                // 截断 view_messages（移除本轮 Human 消息）
+                self.apply_pipeline_action(PipelineAction::RebuildAll {
+                    prefix_len: round_start,
+                    tail_vms: vec![],
+                });
+                // 截断 agent_state_messages（回滚 StateSnapshot 扩展的内容）
+                let pre_len = self.session_mgr.sessions[self.session_mgr.active]
+                    .metadata
+                    .pre_submit_state_len;
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .agent_state_messages
+                    .truncate(pre_len);
+                // 恢复文本到输入框
+                let mut ta = crate::app::build_textarea(false);
+                ta.insert_str(text.clone());
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .ui
+                    .textarea = ta;
+                // 清除 pending 缓冲
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
+                    .pending_messages
+                    .clear();
+                // 清除 sticky header
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .metadata
+                    .last_human_message = None;
+                // 清除 pipeline 状态（completed 中含本轮 Human 消息）
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
+                    .pipeline
+                    .done();
+                let restored = self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .agent_state_messages
+                    .clone();
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .messages
+                    .pipeline
+                    .restore_completed(restored);
+                let vm = MessageViewModel::system(self.services.lc.tr("app-interrupted-resumed"));
+                self.apply_pipeline_action(PipelineAction::AddMessage(vm));
+            } else {
+                let vm = MessageViewModel::system(self.services.lc.tr("app-interrupt-done"));
+                self.apply_pipeline_action(PipelineAction::AddMessage(vm));
+            }
+        } else {
+            self.request_rebuild();
+            let vm = MessageViewModel::system(self.services.lc.tr("app-interrupt-done"));
+            self.apply_pipeline_action(PipelineAction::AddMessage(vm));
+            // 标记 reconcile 已完成，防止后续 Done 事件重复 RebuildAll 覆盖通知消息
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .reconcile_already_done = true;
+        }
+        (true, false, false)
+    }
+
+    fn handle_error(&mut self, error_msg: &str) -> (bool, bool, bool) {
+        // Child agent error during tool execution — ignore
+        if self.session_mgr.sessions[self.session_mgr.active]
+            .messages
+            .pipeline
+            .in_subagent()
+        {
+            return (false, false, false);
+        }
+        self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .retry_status = None;
+        // 清理 pipeline 状态（残留 SubAgent 栈等），防止下一个任务 UI 损坏
+        self.session_mgr.sessions[self.session_mgr.active]
+            .messages
+            .pipeline
+            .done();
+
+        let mut vm = MessageViewModel::tool_block(
+            "error".to_string(),
+            "Agent Error".to_string(),
+            None,
+            true,
+        );
+        if let MessageViewModel::ToolBlock {
+            content, collapsed, ..
+        } = &mut vm
+        {
+            *content = error_msg.to_string();
+            *collapsed = false;
+        }
+        self.apply_pipeline_action(PipelineAction::AddMessage(vm));
+        // 标记 reconcile 已完成，防止后续 Done 事件重复 RebuildAll 覆盖错误消息
+        self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .reconcile_already_done = true;
+        // 后台任务：保持通道存活
+        if self.session_mgr.sessions[self.session_mgr.active].background_task_count > 0 {
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .agent_done_pending_bg = true;
+        } else {
+            if !self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .pre_done_bg_completions
+                .is_empty()
+            {
+                let notifications: Vec<String> = self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .pre_done_bg_completions
+                    .drain(..)
+                    .collect();
+                let combined = notifications.join("\n");
+                tracing::info!(
+                    count = notifications.len(),
+                    "Error: processing pre-done background task completions, setting continuation"
+                );
+                self.session_mgr.sessions[self.session_mgr.active]
+                    .agent
+                    .pending_bg_continuation = Some(combined);
+            }
+            self.session_mgr.sessions[self.session_mgr.active]
+                .agent
+                .agent_rx = None;
+        }
+        let err_label = format!("ERROR: {}", error_msg);
+        self.cleanup_agent_state(Some(&err_label));
+        // 检查缓冲消息，合并发送
+        if !self.session_mgr.sessions[self.session_mgr.active]
+            .messages
+            .pending_messages
+            .is_empty()
+        {
+            self.flush_pending_messages();
+        }
+        (true, false, true)
     }
 
     /// 处理单个 AgentEvent，返回 `(updated, should_break, should_return)`
@@ -201,45 +458,7 @@ impl App {
                 instance_id,
                 task_preview,
                 is_background,
-            } => {
-                if is_background {
-                    self.session_mgr.sessions[self.session_mgr.active].background_task_count += 1;
-                }
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .subagent_depth += 1;
-                // 跨切面：Langfuse
-                if let Some(ref tracer) = self.session_mgr.sessions[self.session_mgr.active]
-                    .langfuse
-                    .langfuse_tracer
-                {
-                    let _lock_start = std::time::Instant::now();
-                    tracer.lock().on_subagent_start(&agent_id, &task_preview);
-                    let _wait = _lock_start.elapsed();
-                    if _wait.as_millis() > 50 {
-                        tracing::warn!(
-                            "[DEADLOCK] TUI: tracer lock held {:?} for SubAgentStart({})",
-                            _wait,
-                            agent_id
-                        );
-                    }
-                }
-                // Pipeline：创建 SubAgentGroup VM
-                let actions = self.session_mgr.sessions[self.session_mgr.active]
-                    .messages
-                    .pipeline
-                    .handle_event(AgentEvent::SubAgentStart {
-                        agent_id,
-                        instance_id,
-                        task_preview,
-                        is_background,
-                    });
-                for action in actions {
-                    self.apply_pipeline_action(action);
-                }
-                self.request_rebuild();
-                (true, false, false)
-            }
+            } => self.handle_subagent_start(agent_id, instance_id, task_preview, is_background),
             AgentEvent::SubagentLifecycle {
                 agent_name,
                 started,
@@ -383,60 +602,7 @@ impl App {
             AgentEvent::TokenUsageUpdate {
                 usage,
                 model: _model,
-            } => {
-                // SubAgent 的 TokenUsageUpdate 不应污染父 agent 的 tracker
-                // （SubAgent 上下文远小于父 agent，会覆盖 last_usage 导致 ctx 突降）
-                if self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .subagent_depth
-                    > 0
-                {
-                    return (true, false, false);
-                }
-
-                // 累积到会话追踪器
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .session_token_tracker
-                    .accumulate(&usage);
-
-                // 缓存率检查：当次命中率低于 80% 时显示黄色提示
-                let rate = self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .session_token_tracker
-                    .cache_hit_rate();
-                if rate < 0.8 {
-                    let tracker = &self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .session_token_tracker;
-                    tracing::warn!(
-                        input = tracker.total_input_tokens,
-                        cache_read = tracker.total_cache_read_tokens,
-                        rate_pct = rate * 100.0,
-                        "prompt cache hit rate below threshold"
-                    );
-                    let percentage = (rate * 100.0) as u32;
-                    let req_id = tracker.last_request_id.as_deref().unwrap_or("-");
-                    let msg = format!(
-                        "⚠ {}",
-                        self.services.lc.tr_args(
-                            "app-prompt-cache-low",
-                            &[
-                                ("rate".into(), (percentage as i64).into()),
-                                ("req".into(), req_id.to_string().into()),
-                            ]
-                        )
-                    );
-                    let vm = MessageViewModel::system(msg);
-                    self.apply_pipeline_action(PipelineAction::AddMessage(vm));
-                }
-                // 更新 spinner 的 token 显示（仅当次调用的 token，不累计）
-                let current_tokens = usage.input_tokens as usize + usage.output_tokens as usize;
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .spinner_state
-                    .set_token_count(current_tokens);
-                (true, false, false)
-            }
+            } => self.handle_token_usage_update(usage),
             AgentEvent::ToolStart {
                 tool_call_id,
                 name,
@@ -535,449 +701,11 @@ impl App {
                 }
                 (true, false, false)
             }
-            AgentEvent::Done => {
-                // Child agent Done during tool execution — ignore to prevent
-                // TUI from treating it as parent completion (setting agent_rx=None,
-                // loading=false, etc.). The parent ReAct loop is still blocked in
-                // the tool call and will continue after it returns.
-                let in_sub = self.session_mgr.sessions[self.session_mgr.active]
-                    .messages
-                    .pipeline
-                    .in_subagent();
-                debug!(
-                    in_subagent = in_sub,
-                    active = self.session_mgr.active,
-                    "AgentEvent::Done — checking in_subagent"
-                );
-                if in_sub {
-                    return (false, false, false);
-                }
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .retry_status = None;
-                // Pipeline：finalize 当前 AI 消息
-                let actions = self.session_mgr.sessions[self.session_mgr.active]
-                    .messages
-                    .pipeline
-                    .handle_event(AgentEvent::Done);
-                for action in actions {
-                    self.apply_pipeline_action(action);
-                }
-                // 跳过已由 Interrupted/Error 处理器完成的 reconcile，
-                // 防止 RebuildAll 覆盖它们添加的通知消息
-                if !self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .reconcile_already_done
-                {
-                    self.request_rebuild();
-                } else {
-                    // Interrupted/Error 已完成 reconcile，清除 streaming 标志并重建
-                    if let Some(MessageViewModel::AssistantBubble { is_streaming, .. }) =
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .messages
-                            .view_messages
-                            .last_mut()
-                    {
-                        *is_streaming = false;
-                    }
-                    self.render_rebuild();
-                }
-                // 跨切面：Langfuse
-                let langfuse_tracer = self.session_mgr.sessions[self.session_mgr.active]
-                    .langfuse
-                    .langfuse_tracer
-                    .take();
-                if let Some(ref tracer) = langfuse_tracer {
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .langfuse
-                        .langfuse_flush_handle = Some(tracer.lock().on_trace_end(None));
-                }
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .langfuse
-                    .langfuse_tracer = None;
-                debug!("AgentEvent::Done — calling set_loading(false)");
-                self.set_loading(false);
-                // 如果仍有后台任务在运行，保持 agent_rx 存活以接收 BackgroundTaskCompleted 事件
-                if self.session_mgr.sessions[self.session_mgr.active].background_task_count > 0 {
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .agent_done_pending_bg = true;
-                    tracing::info!(
-                        count = self.session_mgr.sessions[self.session_mgr.active]
-                            .background_task_count,
-                        "agent done but background tasks still running, keeping channel alive"
-                    );
-                } else {
-                    // 竞态修复：检查是否有暂存的后台任务完成通知
-                    // （BackgroundTaskCompleted 在 Done 之前被消费的情况）
-                    if !self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .pre_done_bg_completions
-                        .is_empty()
-                    {
-                        let notifications: Vec<String> = self.session_mgr.sessions
-                            [self.session_mgr.active]
-                            .agent
-                            .pre_done_bg_completions
-                            .drain(..)
-                            .collect();
-                        let combined = notifications.join("\n");
-                        tracing::info!(
-                            count = notifications.len(),
-                            "Done: processing pre-done background task completions, setting continuation"
-                        );
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .pending_bg_continuation = Some(combined);
-                    }
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .agent_rx = None;
-                }
-                // 清理残留弹窗状态
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .interaction_prompt = None;
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .pending_hitl_items = None;
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .pending_ask_user = None;
-                // circuit breaker 渐进恢复：每轮成功对话将 failure 计数减半
-                if self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .auto_compact_failures
-                    > 0
-                {
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .auto_compact_failures /= 2;
-                }
-                if let Some(start) = self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .task_start_time
-                {
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .last_task_duration = Some(start.elapsed());
-                }
-                // 检查缓冲消息，合并发送
-                if !self.session_mgr.sessions[self.session_mgr.active]
-                    .messages
-                    .pending_messages
-                    .is_empty()
-                {
-                    self.flush_pending_messages();
-                }
-                (true, false, true)
-            }
-            AgentEvent::Interrupted => {
-                // Child agent interrupted during tool execution — ignore;
-                // parent tool call will handle the result when it returns.
-                if self.session_mgr.sessions[self.session_mgr.active]
-                    .messages
-                    .pipeline
-                    .in_subagent()
-                {
-                    return (false, false, false);
-                }
-                // Pipeline：finalize 当前状态
-                let actions = self.session_mgr.sessions[self.session_mgr.active]
-                    .messages
-                    .pipeline
-                    .handle_event(AgentEvent::Interrupted);
-                for action in actions {
-                    self.apply_pipeline_action(action);
-                }
-
-                let agent_replied = self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .agent_replied;
-                if !agent_replied {
-                    // Agent 尚未回复，恢复用户文本到输入框
-                    // 不走 reconcile_tail（它会从 completed 中找到 Human 消息并重新渲染），
-                    // 直接截断到 round_start 并清除 pipeline。
-                    if let Some(text) = self.session_mgr.sessions[self.session_mgr.active]
-                        .messages
-                        .last_submitted_text
-                        .take()
-                    {
-                        let round_start = self.session_mgr.sessions[self.session_mgr.active]
-                            .messages
-                            .round_start_vm_idx;
-                        // 截断 view_messages（移除本轮 Human 消息）
-                        self.apply_pipeline_action(PipelineAction::RebuildAll {
-                            prefix_len: round_start,
-                            tail_vms: vec![],
-                        });
-                        // 截断 agent_state_messages（回滚 StateSnapshot 扩展的内容）
-                        let pre_len = self.session_mgr.sessions[self.session_mgr.active]
-                            .metadata
-                            .pre_submit_state_len;
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .agent_state_messages
-                            .truncate(pre_len);
-                        // 恢复文本到输入框
-                        let mut ta = crate::app::build_textarea(false);
-                        ta.insert_str(text.clone());
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .ui
-                            .textarea = ta;
-                        // 清除 pending 缓冲
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .messages
-                            .pending_messages
-                            .clear();
-                        // 清除 sticky header
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .metadata
-                            .last_human_message = None;
-                        // 清除 pipeline 状态（completed 中含本轮 Human 消息）
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .messages
-                            .pipeline
-                            .done();
-                        let restored = self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .agent_state_messages
-                            .clone();
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .messages
-                            .pipeline
-                            .restore_completed(restored);
-                        let vm = MessageViewModel::system(
-                            self.services.lc.tr("app-interrupted-resumed"),
-                        );
-                        self.apply_pipeline_action(PipelineAction::AddMessage(vm));
-                    } else {
-                        let vm =
-                            MessageViewModel::system(self.services.lc.tr("app-interrupt-done"));
-                        self.apply_pipeline_action(PipelineAction::AddMessage(vm));
-                    }
-                } else {
-                    self.request_rebuild();
-                    let vm = MessageViewModel::system(self.services.lc.tr("app-interrupt-done"));
-                    self.apply_pipeline_action(PipelineAction::AddMessage(vm));
-                    // 标记 reconcile 已完成，防止后续 Done 事件重复 RebuildAll 覆盖通知消息
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .reconcile_already_done = true;
-                }
-                (true, false, false)
-            }
-            AgentEvent::Error(ref e) => {
-                // Child agent error during tool execution — ignore;
-                // the error is captured in the tool result string that
-                // invoke_fork/invoke_normal returns to the parent.
-                if self.session_mgr.sessions[self.session_mgr.active]
-                    .messages
-                    .pipeline
-                    .in_subagent()
-                {
-                    return (false, false, false);
-                }
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .retry_status = None;
-                // 清理 pipeline 状态（残留 SubAgent 栈等），防止下一个任务 UI 损坏
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .messages
-                    .pipeline
-                    .done();
-
-                let mut vm = MessageViewModel::tool_block(
-                    "error".to_string(),
-                    "Agent Error".to_string(),
-                    None,
-                    true,
-                );
-                // 将完整错误信息放入 content，并默认展开，确保用户能看到
-                if let MessageViewModel::ToolBlock {
-                    content, collapsed, ..
-                } = &mut vm
-                {
-                    *content = e.clone();
-                    *collapsed = false;
-                }
-                self.apply_pipeline_action(PipelineAction::AddMessage(vm));
-                // 标记 reconcile 已完成，防止后续 Done 事件重复 RebuildAll 覆盖错误消息
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .reconcile_already_done = true;
-                // Langfuse：错误路径也需结束 Trace
-                let langfuse_tracer = self.session_mgr.sessions[self.session_mgr.active]
-                    .langfuse
-                    .langfuse_tracer
-                    .take();
-                if let Some(ref tracer) = langfuse_tracer {
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .langfuse
-                        .langfuse_flush_handle =
-                        Some(tracer.lock().on_trace_end(Some(&format!("ERROR: {}", e))));
-                }
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .langfuse
-                    .langfuse_tracer = None;
-                self.set_loading(false);
-                // Error 路径同样需要保持通道给后台任务
-                if self.session_mgr.sessions[self.session_mgr.active].background_task_count > 0 {
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .agent_done_pending_bg = true;
-                } else {
-                    // 竞态修复：检查是否有暂存的后台任务完成通知
-                    if !self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .pre_done_bg_completions
-                        .is_empty()
-                    {
-                        let notifications: Vec<String> = self.session_mgr.sessions
-                            [self.session_mgr.active]
-                            .agent
-                            .pre_done_bg_completions
-                            .drain(..)
-                            .collect();
-                        let combined = notifications.join("\n");
-                        tracing::info!(
-                            count = notifications.len(),
-                            "Error: processing pre-done background task completions, setting continuation"
-                        );
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .pending_bg_continuation = Some(combined);
-                    }
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .agent_rx = None;
-                }
-                // Agent 出错时清理残留弹窗状态，避免 UI 卡在弹窗
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .interaction_prompt = None;
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .pending_hitl_items = None;
-                self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .pending_ask_user = None;
-                if let Some(start) = self.session_mgr.sessions[self.session_mgr.active]
-                    .agent
-                    .task_start_time
-                {
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .last_task_duration = Some(start.elapsed());
-                }
-                // 检查缓冲消息，合并发送
-                if !self.session_mgr.sessions[self.session_mgr.active]
-                    .messages
-                    .pending_messages
-                    .is_empty()
-                {
-                    self.flush_pending_messages();
-                }
-                (true, false, true)
-            }
+            AgentEvent::Done => self.handle_done(),
+            AgentEvent::Interrupted => self.handle_interrupted(),
+            AgentEvent::Error(ref e) => self.handle_error(e),
             AgentEvent::InteractionRequest { ctx, response_tx } => {
-                use peri_agent::interaction::{
-                    ApprovalDecision, InteractionContext, InteractionResponse, QuestionAnswer,
-                };
-                use peri_middlewares::ask_user::{
-                    AskUserBatchRequest, AskUserOption, AskUserQuestionData,
-                };
-                use tokio::sync::oneshot;
-
-                match ctx {
-                    InteractionContext::Approval { items } => {
-                        let batch_items: Vec<BatchItem> = items
-                            .iter()
-                            .map(|i| BatchItem {
-                                tool_name: i.tool_name.clone(),
-                                input: i.tool_input.clone(),
-                            })
-                            .collect();
-                        let (bridge_tx, bridge_rx) = oneshot::channel::<Vec<HitlDecision>>();
-                        tokio::spawn(async move {
-                            if let Ok(decisions) = bridge_rx.await {
-                                let approval_decisions: Vec<ApprovalDecision> = decisions
-                                    .into_iter()
-                                    .map(|d| match d {
-                                        HitlDecision::Approve => ApprovalDecision::Approve,
-                                        HitlDecision::Reject => ApprovalDecision::Reject {
-                                            reason: "User rejected".to_string(),
-                                        },
-                                        HitlDecision::Edit(v) => {
-                                            ApprovalDecision::Edit { new_input: v }
-                                        }
-                                        HitlDecision::Respond(msg) => {
-                                            ApprovalDecision::Respond { message: msg }
-                                        }
-                                    })
-                                    .collect();
-                                let _ = response_tx
-                                    .send(InteractionResponse::Decisions(approval_decisions));
-                            }
-                        });
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .interaction_prompt = Some(InteractionPrompt::Approval(
-                            HitlBatchPrompt::new(batch_items, bridge_tx),
-                        ));
-                        (true, true, false) // 暂停消费，等待用户确认
-                    }
-                    InteractionContext::Questions { requests } => {
-                        let ask_questions: Vec<AskUserQuestionData> = requests
-                            .iter()
-                            .map(|q| AskUserQuestionData {
-                                tool_call_id: q.id.clone(),
-                                question: q.question.clone(),
-                                header: q.header.clone(),
-                                multi_select: q.multi_select,
-                                options: q
-                                    .options
-                                    .iter()
-                                    .map(|o| AskUserOption {
-                                        label: o.label.clone(),
-                                        description: o.description.clone(),
-                                    })
-                                    .collect(),
-                            })
-                            .collect();
-                        let (bridge_tx, bridge_rx) = oneshot::channel::<Vec<String>>();
-                        let ids: Vec<String> = requests.iter().map(|q| q.id.clone()).collect();
-                        tokio::spawn(async move {
-                            if let Ok(answers) = bridge_rx.await {
-                                let question_answers: Vec<QuestionAnswer> = ids
-                                    .into_iter()
-                                    .zip(answers)
-                                    .map(|(id, answer)| QuestionAnswer {
-                                        id,
-                                        selected: vec![answer.clone()],
-                                        text: Some(answer),
-                                    })
-                                    .collect();
-                                let _ = response_tx
-                                    .send(InteractionResponse::Answers(question_answers));
-                            }
-                        });
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .pending_ask_user = Some(false);
-                        let (batch_req, _) = AskUserBatchRequest::new(ask_questions);
-                        let batch_req_bridged = AskUserBatchRequest {
-                            questions: batch_req.questions,
-                            response_tx: bridge_tx,
-                        };
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .interaction_prompt = Some(InteractionPrompt::Questions(
-                            AskUserBatchPrompt::from_request(batch_req_bridged),
-                        ));
-                        (true, true, false) // 暂停消费，等待用户输入
-                    }
-                }
+                self.handle_interaction_request(ctx, response_tx)
             }
             AgentEvent::TodoUpdate(todos) => {
                 self.session_mgr.sessions[self.session_mgr.active].todo_items = todos;
@@ -1220,36 +948,7 @@ impl App {
                         self.session_mgr.sessions[self.session_mgr.active]
                             .agent
                             .agent_rx = None;
-                        let langfuse_tracer = self.session_mgr.sessions[self.session_mgr.active]
-                            .langfuse
-                            .langfuse_tracer
-                            .take();
-                        if let Some(ref tracer) = langfuse_tracer {
-                            self.session_mgr.sessions[self.session_mgr.active]
-                                .langfuse
-                                .langfuse_flush_handle = Some(tracer.lock().on_trace_end(None));
-                        }
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .langfuse
-                            .langfuse_tracer = None;
-                        self.set_loading(false);
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .interaction_prompt = None;
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .pending_hitl_items = None;
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .pending_ask_user = None;
-                        if let Some(start) = self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .task_start_time
-                        {
-                            self.session_mgr.sessions[self.session_mgr.active]
-                                .agent
-                                .last_task_duration = Some(start.elapsed());
-                        }
+                        self.cleanup_agent_state(None);
                         return true;
                     }
 
@@ -1260,43 +959,12 @@ impl App {
                         true,
                     );
                     self.apply_pipeline_action(PipelineAction::AddMessage(vm));
-                    let langfuse_tracer = self.session_mgr.sessions[self.session_mgr.active]
-                        .langfuse
-                        .langfuse_tracer
-                        .take();
-                    if let Some(ref tracer) = langfuse_tracer {
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .langfuse
-                            .langfuse_flush_handle =
-                            Some(tracer.lock().on_trace_end(Some(
-                                "ERROR: agent channel disconnected unexpectedly",
-                            )));
-                    }
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .langfuse
-                        .langfuse_tracer = None;
-                    self.set_loading(false);
                     self.session_mgr.sessions[self.session_mgr.active]
                         .agent
                         .agent_rx = None;
-                    // 清理残留弹窗状态，避免 UI 卡在弹窗
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .interaction_prompt = None;
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .pending_hitl_items = None;
-                    self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .pending_ask_user = None;
-                    if let Some(start) = self.session_mgr.sessions[self.session_mgr.active]
-                        .agent
-                        .task_start_time
-                    {
-                        self.session_mgr.sessions[self.session_mgr.active]
-                            .agent
-                            .last_task_duration = Some(start.elapsed());
-                    }
+                    self.cleanup_agent_state(Some(
+                        "ERROR: agent channel disconnected unexpectedly",
+                    ));
                     return true;
                 }
             }
