@@ -150,23 +150,28 @@ Stdio 路径:
 | `peri-acp/src/session/state_builders.rs` | ACP 协议状态构建器：modes/models/configOptions |
 | `peri-acp/src/` | ACP 服务层：transport trait、agent builder、event mapper、broker、prompt、provider、session、langfuse、hooks、lsp |
 | `peri-tui/src/acp_server.rs` | TUI ACP Server 主循环：接收请求 → 委托 executor 执行 → 推送通知（re-export state builders） |
-| `peri-tui/src/acp_client/client.rs` | `AcpTuiClient`：TUI 端 ACP 封装，提供 `new_session()`/`prompt()`/`set_model()`/`set_mode()`/`cancel()`/`send_response()` |
+| `peri-tui/src/acp_client/client.rs` | `AcpTuiClient`：TUI 端 ACP 封装，提供 `new_session()`/`prompt()`/`compact()`/`set_model()`/`set_mode()`/`cancel()`/`send_response()` |
 | `peri-tui/src/app/agent_ops.rs` | `handle_acp_notification()`：将 `AcpNotification` 桥接为 `AgentEvent`，复用现有 UI 处理逻辑 |
 | `peri-tui/src/app/agent_submit.rs` | `submit_message()`：通过 `acp_client.new_session()` + `acp_client.prompt()` 提交用户输入 |
-| `peri-tui/src/app/agent.rs` | `map_executor_event()`：`ExecutorEvent` → `AgentEvent` 映射（由 ACP bridge 调用）；`compact_task()` |
+| `peri-tui/src/app/agent.rs` | `map_executor_event()`：`ExecutorEvent` → `AgentEvent` 映射（由 ACP bridge 调用）；`compact_task()`（遗留代码，auto-compact 已迁移到 executor） |
 
 **AcpNotification 变体**（`acp_client/client.rs`）：
 - `AgentEvent { event }` — 携带 `ExecutorEvent` JSON，由 `map_executor_event()` 转换为 TUI `AgentEvent`
+- `AgentDone { session_id }` — Agent 执行完成通知
 - `RequestPermission { id, params }` — HITL 审批请求
 - `Elicitation { id, params }` — AskUser 问答请求
 - `SessionUpdate { .. }` — 标准 ACP SessionUpdate（保留给外部 IDE client）
+- `Peri { method, params }` — `peri/*` 自定义通知（compact/session 生命周期等）
 - `Other { msg }` — 未识别的通知
 
 **ACP Server 请求处理**（`acp_server.rs`）：
 - `session/new` → 创建 session state，分配 session_id
 - `session/prompt` → 构建 Agent，执行，推送 `notifications/agent_event`
+- `session/compact` → 手动 compact，调用 `compact_runner::run_full_compact()`
 - `session/set_model` → 模型切换（通过 peri_config.alias）
 - `session/set_mode` → 权限模式切换
+- `session/set_config_option` → 统一配置选项（mode/model/thinking_effort）
+- `session/set_thinking` → 推理模式配置
 - `$/cancel_request` → 取消当前 session 的 Agent 执行
 
 **Transitional Note**: TUI 当前保留 `AgentEvent` 枚举和 `handle_agent_event()` 处理器（`agent_ops.rs:handle_agent_event`）以复用战验过的 UI 逻辑。Config/LlmProvider 类型已统一（TUI re-export `peri-acp` 的定义）。Agent 执行逻辑已通过 `EventSink` trait + `executor::execute_prompt()` 统一到 `peri-acp`，TUI 和 stdio 各自提供 EventSink 实现。`peri-tui/Cargo.toml` 仍保留 `peri-agent`/`peri-middlewares` 直接依赖（用于 UI 渲染所需的 `BaseMessage`/`ContentBlock` 等类型和中间件组件初始化）。
@@ -195,11 +200,7 @@ Stdio 路径:
 | `peri-acp/src/session/executor.rs` | auto-compact 循环：执行后检查阈值 → compact → resubmit |
 | `peri-tui/src/app/agent_compact.rs` | TUI 侧 compact 事件处理：pipeline 清理 + UI 通知 |
 
-**[TRAP]** `handle_compact_completed` 必须三步清理：① `pipeline.clear()` 清空内部 completed 列表和流式状态 ② `pipeline.restore_completed(messages)` 用压缩后消息重建 pipeline 内部状态 ③ `RebuildAll { prefix_len: 0 }` 清空 view_messages 只渲染 compact 通知。缺少前两步会导致 resubmit 的 StateSnapshot 与旧 completed reconcile 时旧消息残留。`restore_completed` 不能省——没有它 pipeline 的 `completed` 为空，新一轮 reconcile 会从零开始重建所有 view model。
-
-**[TRAP]** `CompactCompleted` 事件必须携带 `messages: Vec<BaseMessage>`（压缩后的消息列表），TUI 用它更新 `agent_state_messages` 和 pipeline 内部状态。没有 `messages` 字段，TUI 无法用压缩后的内容替换旧状态。
-
-**[TRAP]** 禁止在 TUI 层直接触发 auto-compact。auto-compact 的触发判断（`needs_auto_compact`、token 阈值检查）全部在 executor 内部处理。TUI 的 `ContextWarning`、`TokenUsageUpdate`、`Done`、`BackgroundTaskCompleted` 处理器不再设置 `needs_auto_compact` 标记。新增 compact 触发点只能在 executor 中。
+**[TRAP]** `handle_compact_completed` 必须三步清理：① `pipeline.clear()` ② `pipeline.restore_completed(messages)` ③ `RebuildAll { prefix_len: 0 }`。缺少任一步都会导致旧消息残留或 system 消息泄漏到显示。`CompactCompleted` 事件必须携带 `messages: Vec<BaseMessage>`，TUI 用它更新 `agent_state_messages` 和 pipeline。禁止在 TUI 层触发 auto-compact——所有触发判断在 executor 内部。
 
 **[TRAP]** `restore_completed(messages)` 会把 messages 中的 system 消息放入 pipeline 的 completed 列表。compact 后的 messages 以 `BaseMessage::system(summary)` 开头——这是内部状态，不应被渲染。pipeline 的 reconcile 逻辑通过 `build_tail_vms()` 只渲染非 system 类型的消息，但 `round_start_vm_idx` 和 `completed_len_at_round_start` 必须正确设置，否则 view_messages 会泄漏 system 消息。
 
