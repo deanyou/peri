@@ -245,8 +245,8 @@ impl PanelComponent for ModelPanel {
                 }
                 ROW_1M_CONTEXT => {
                     self.buf_context_1m = !self.buf_context_1m;
-                    Self::apply_and_close(self, ctx);
-                    EventResult::ClosePanel
+                    ModelPanel::apply_1m_context(self, ctx);
+                    EventResult::Consumed
                 }
                 _ => EventResult::Consumed,
             },
@@ -260,8 +260,8 @@ impl PanelComponent for ModelPanel {
                     EventResult::Consumed
                 } else if self.cursor() == ROW_1M_CONTEXT {
                     self.buf_context_1m = !self.buf_context_1m;
-                    Self::apply_and_close(self, ctx);
-                    EventResult::ClosePanel
+                    ModelPanel::apply_1m_context(self, ctx);
+                    EventResult::Consumed
                 } else {
                     self.cycle_effort(false);
                     EventResult::Consumed
@@ -274,8 +274,8 @@ impl PanelComponent for ModelPanel {
                     EventResult::Consumed
                 } else if self.cursor() == ROW_1M_CONTEXT {
                     self.buf_context_1m = !self.buf_context_1m;
-                    Self::apply_and_close(self, ctx);
-                    EventResult::ClosePanel
+                    ModelPanel::apply_1m_context(self, ctx);
+                    EventResult::Consumed
                 } else {
                     self.cycle_effort(true);
                     EventResult::Consumed
@@ -289,8 +289,8 @@ impl PanelComponent for ModelPanel {
                     EventResult::Consumed
                 } else if self.cursor() == ROW_1M_CONTEXT {
                     self.buf_context_1m = !self.buf_context_1m;
-                    Self::apply_and_close(self, ctx);
-                    EventResult::ClosePanel
+                    ModelPanel::apply_1m_context(self, ctx);
+                    EventResult::Consumed
                 } else {
                     self.cycle_effort(false);
                     EventResult::Consumed
@@ -378,7 +378,39 @@ impl ModelPanel {
                 ],
             ));
 
-        // 1M 上下文模式切换提示
+        if let Err(e) = App::save_config(cfg, ctx.services.config_path_override.as_deref()) {
+            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                .messages
+                .push_system_note(ctx.services.lc.tr_args(
+                    "app-config-save-failed",
+                    &[("error".into(), e.to_string().into())],
+                ));
+        }
+
+        if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
+            ctx.services.provider_name = p.display_name().to_string();
+            ctx.services.model_name = p.model_name().to_string();
+
+            // 同步 context_window 到 TUI 状态（agent.context_window 用于 status line 显示）
+            let mut cw = p.context_window();
+            if panel.buf_context_1m {
+                cw = 1_000_000;
+            }
+            if cw > 0 {
+                ctx.session_mgr.sessions[ctx.session_mgr.active]
+                    .agent
+                    .context_window = cw;
+            }
+        }
+    }
+
+    /// 即时应用 1M 上下文开关（不关闭面板）
+    fn apply_1m_context(panel: &ModelPanel, ctx: &mut PanelContext<'_>) {
+        let Some(cfg) = ctx.services.peri_config.as_mut() else {
+            return;
+        };
+        cfg.config.context_1m = Some(panel.buf_context_1m);
+
         if panel.buf_context_1m {
             ctx.session_mgr.sessions[ctx.session_mgr.active]
                 .messages
@@ -394,11 +426,8 @@ impl ModelPanel {
                 ));
         }
 
+        // 同步 context_window 到 TUI 状态
         if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
-            ctx.services.provider_name = p.display_name().to_string();
-            ctx.services.model_name = p.model_name().to_string();
-
-            // 同步 context_window 到 TUI 状态（agent.context_window 用于 status line 显示）
             let mut cw = p.context_window();
             if panel.buf_context_1m {
                 cw = 1_000_000;

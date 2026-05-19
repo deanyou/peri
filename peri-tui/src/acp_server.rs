@@ -13,16 +13,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use serde_json::{json, Value};
-use tracing::{debug, error, info};
+use serde_json::Value;
+use tracing::{debug, info};
 
 use peri_acp::broker::AcpTransportBroker;
-use peri_acp::event::{map_executor_to_peri_notifications, map_executor_to_updates};
-use peri_acp::prompt::{build_system_prompt, PromptFeatures};
+use peri_acp::session::event_sink::TransportEventSink;
+use peri_acp::session::executor;
 use peri_acp::transport::types::{AcpError, IncomingMessage};
-use peri_agent::agent::events::{AgentEvent as ExecutorEvent, AgentEventHandler, FnEventHandler};
-use peri_agent::agent::react::AgentInput;
-use peri_agent::agent::state::AgentState;
 use peri_agent::agent::AgentCancellationToken;
 use peri_agent::messages::BaseMessage;
 use peri_middlewares::prelude::*;
@@ -337,13 +334,7 @@ async fn execute_prompt(
         .unwrap_or("")
         .to_string();
 
-    let agent_input = AgentInput::text(content.clone());
-
-    // Event channel: ExecutorEvent → SessionUpdate notifications.
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
-    let event_tx = Arc::new(std::sync::Mutex::new(Some(event_tx)));
-
-    // Create cancel token and register it in sessions so $/cancel_request can find it.
+    // Create cancel token and register in sessions.
     let cancel = AgentCancellationToken::new();
     {
         let mut sessions = sessions.lock().await;
@@ -352,21 +343,6 @@ async fn execute_prompt(
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         state.cancel_token = Some(cancel.clone());
     }
-
-    let event_handler: Arc<dyn AgentEventHandler> = Arc::new(FnEventHandler({
-        let event_tx = event_tx.clone();
-        move |event: ExecutorEvent| {
-            if let Some(tx) = event_tx.lock().unwrap().as_ref() {
-                let _ = tx.send(event);
-            }
-        }
-    }));
-
-    let broker: Arc<dyn peri_agent::interaction::UserInteractionBroker> =
-        Arc::new(AcpTransportBroker::new(
-            Arc::clone(transport) as Arc<dyn peri_acp::transport::AcpTransport>,
-            session_id.clone().into(),
-        ));
 
     // Read session data under lock, then release immediately.
     let (cwd, history, is_empty) = {
@@ -381,137 +357,45 @@ async fn execute_prompt(
         )
     };
 
-    let features = PromptFeatures::detect();
-    let system_prompt = build_system_prompt(None, &cwd, features, plugin_agent_dirs);
-
-    let context_window = provider.read().context_window();
+    let broker: Arc<dyn peri_agent::interaction::UserInteractionBroker> = Arc::new(
+        AcpTransportBroker::new(Arc::clone(transport), session_id.clone().into()),
+    );
+    let event_sink = Arc::new(TransportEventSink::new(Arc::clone(transport)));
 
     let provider_snapshot = provider.read().clone();
-    let peri_config_snapshot = peri_config.read().clone();
-    let agent_output = build_agent_bridge(
+    let peri_config_snapshot = Arc::new(peri_config.read().clone());
+
+    let result = executor::execute_prompt(
         &provider_snapshot,
+        peri_config_snapshot,
         &cwd,
-        system_prompt,
-        event_handler,
-        cancel.clone(),
+        content,
+        history,
+        is_empty,
         permission_mode.clone(),
-        Arc::new(peri_config_snapshot),
-        cron_scheduler,
-        session_id.clone(),
+        event_sink,
+        cancel,
         broker,
         plugin_skill_dirs.to_vec(),
         plugin_agent_dirs.to_vec(),
         hook_groups.to_vec(),
-        is_empty,
+        cron_scheduler,
+        session_id.clone(),
         mcp_pool,
         tool_search_index,
         shared_tools,
         plugin_lsp_servers.to_vec(),
-    );
-
-    let context_window_u32 = context_window;
-
-    // Background task: pump events to notifications.
-    let transport_clone = Arc::clone(transport);
-    let sid = session_id.clone();
-    let (pump_done_tx, pump_done_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let mut event_count: u64 = 0;
-        while let Some(exec_event) = event_rx.recv().await {
-            event_count += 1;
-
-            let event_value = match serde_json::to_value(&exec_event) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(event_count = event_count, error = %e, "ACP pump: serialize failed");
-                    continue;
-                }
-            };
-            let agent_event_params = json!({
-                "sessionId": sid,
-                "event": event_value,
-            });
-            if let Err(e) = transport_clone
-                .send_notification("peri/agent_event", agent_event_params)
-                .await
-            {
-                error!(event_count = event_count, error = %e, "ACP pump: send agent_event failed");
-                break;
-            }
-
-            let peri_notifs = map_executor_to_peri_notifications(&exec_event);
-            for (method, mut payload) in peri_notifs {
-                if let serde_json::Value::Object(ref mut map) = payload {
-                    map.insert("sessionId".to_string(), json!(sid));
-                }
-                let _ = transport_clone.send_notification(method, payload).await;
-            }
-
-            let updates = map_executor_to_updates(&exec_event, context_window_u32);
-            for update in updates {
-                let mut payload = match serde_json::to_value(&update) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!(error = %e, "ACP pump: serialize SessionUpdate failed");
-                        continue;
-                    }
-                };
-                if let serde_json::Value::Object(ref mut map) = payload {
-                    map.insert("sessionId".to_string(), json!(sid));
-                }
-                let _ = transport_clone
-                    .send_notification("session/update", payload)
-                    .await;
-            }
-        }
-        debug!(session_id = %sid, event_count = event_count, "ACP pump: sending agent_event_done");
-        let send_result = transport_clone
-            .send_notification(
-                "peri/agent_event_done",
-                json!({
-                    "sessionId": sid,
-                }),
-            )
-            .await;
-        if let Err(e) = send_result {
-            error!(session_id = %sid, error = %e, "ACP pump: agent_event_done send failed")
-        }
-        let _ = pump_done_tx.send(());
-    });
-
-    // Execute agent with fresh state
-    let mut agent_state = AgentState::with_messages(cwd, history);
-    let result = agent_output
-        .executor
-        .execute(agent_input, &mut agent_state, Some(cancel.clone()))
-        .await;
-    drop(agent_output);
-    {
-        let mut tx_guard = event_tx.lock().unwrap();
-        *tx_guard = None;
-    }
-
-    match pump_done_rx.await {
-        Ok(()) => debug!(session_id = %session_id, "ACP pump: done"),
-        Err(_) => {
-            error!(session_id = %session_id, "ACP pump done channel closed unexpectedly")
-        }
-    }
+    )
+    .await;
 
     // Update session history and clear cancel token.
     {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&session_id) {
-            match result {
-                Ok(_output) => {
-                    state.history = agent_state.into_messages();
-                    info!(session_id = %session_id, messages = state.history.len(), "Agent execution completed");
-                }
-                Err(e) => {
-                    error!(session_id = %session_id, error = %e, "Agent execution failed");
-                    state.history = agent_state.into_messages();
-                }
+            if result.ok {
+                info!(session_id = %session_id, messages = result.messages.len(), "Agent execution completed");
             }
+            state.history = result.messages;
             state.cancel_token = None;
         }
     }

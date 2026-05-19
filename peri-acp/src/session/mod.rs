@@ -4,6 +4,7 @@
 //! Each session owns a ThreadStore entry, an Agent instance, and associated state.
 
 pub mod event_sink;
+pub mod executor;
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
