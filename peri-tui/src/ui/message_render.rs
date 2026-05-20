@@ -201,7 +201,10 @@ pub fn render_view_model(
                         if is_diff {
                             for l in raw.lines() {
                                 let diff_spans =
-                                    peri_widgets::message_block::highlight::highlight_diff_line(l);
+                                    peri_widgets::message_block::highlight::highlight_diff_line(
+                                        l,
+                                        &peri_widgets::DarkTheme,
+                                    );
                                 lines.push(Line::from(diff_spans));
                             }
                         } else {
