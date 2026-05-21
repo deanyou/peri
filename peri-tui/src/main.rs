@@ -349,6 +349,7 @@ fn main() -> Result<()> {
 // ─── TUI 模式 ──────────────────────────────────────────────────────────────
 
 /// TUI 模式启动选项
+#[allow(dead_code)]
 struct TuiOptions {
     approve: bool,
     permission_mode: Option<String>,

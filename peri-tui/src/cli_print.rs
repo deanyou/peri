@@ -7,6 +7,7 @@ use anyhow::Result;
 use crate::cli_args::OutputFormat;
 
 /// -p 模式执行入口
+#[allow(clippy::too_many_arguments)]
 pub async fn run_print(
     prompt: Option<String>,
     output_format: Option<String>,

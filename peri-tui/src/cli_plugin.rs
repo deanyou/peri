@@ -61,13 +61,13 @@ pub fn run_plugin_list(json: bool) -> Result<()> {
     } else if entries.is_empty() {
         println!("未安装任何插件。");
     } else {
-        println!("{:<40} {:<10} {:<15} {}", "ID", "版本", "市场", "状态");
+        println!("{:<40} {:<10} {:<15} 状态", "ID", "版本", "市场");
         println!("{}", "-".repeat(80));
         for e in &entries {
             let status = if e.enabled { "已启用" } else { "已禁用" };
             println!(
-                "{:<40} {:<10} {:<15} {}",
-                e.id, e.version, e.marketplace, status
+                "{:<40} {:<10} {:<15} {status}",
+                e.id, e.version, e.marketplace,
             );
         }
     }

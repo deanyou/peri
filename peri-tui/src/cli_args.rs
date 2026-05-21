@@ -31,6 +31,7 @@ impl FromStr for OutputFormat {
 
 /// 推理强度等级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub enum EffortLevel {
     Low,
     #[default]
@@ -96,6 +97,7 @@ impl From<PluginScope> for peri_middlewares::plugin::InstallScope {
 // ─── RunOptions ───────────────────────────────────────────────────────────
 
 /// 运行时选项（非 print 模式 / print 模式共用）
+#[allow(dead_code)]
 pub struct RunOptions {
     pub permission_mode: Option<String>,
     pub skip_permissions: bool,
@@ -118,6 +120,7 @@ pub struct RunOptions {
 // ─── validate_args ────────────────────────────────────────────────────────
 
 /// 校验 RunOptions，返回警告消息列表
+#[allow(dead_code)]
 pub fn validate_args(opts: &RunOptions, is_print_mode: bool) -> Vec<String> {
     let mut warnings = Vec::new();
 
