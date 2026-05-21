@@ -95,6 +95,30 @@ impl BaseTool for EditFileTool {
             Err(e) => return Err(e.into()),
         };
 
+        let old_lines = old_string.lines().count();
+        let new_lines = new_string.lines().count();
+        let line_diff = new_lines as i64 - old_lines as i64;
+        let rel = resolved
+            .strip_prefix(&self.cwd)
+            .unwrap_or(&resolved)
+            .display()
+            .to_string();
+
+        // 构建行数变化描述
+        let diff_desc = match line_diff.cmp(&0) {
+            std::cmp::Ordering::Greater => format!(
+                "Added {} line{}",
+                line_diff,
+                if line_diff == 1 { "" } else { "s" }
+            ),
+            std::cmp::Ordering::Less => format!(
+                "Removed {} line{}",
+                -line_diff,
+                if -line_diff == 1 { "" } else { "s" }
+            ),
+            std::cmp::Ordering::Equal => "Replaced text (same line count)".to_string(),
+        };
+
         if replace_all {
             if !content.contains(old_string) {
                 return Ok(format!(
@@ -103,14 +127,18 @@ impl BaseTool for EditFileTool {
                 ));
             }
             let new_content = content.replace(old_string, new_string);
+            let occurrences = content.matches(old_string).count();
             // 原子写入：先写临时文件再 rename
             let tmp_ext = format!("tmp.{}", uuid::Uuid::now_v7());
             let tmp_path = resolved.with_extension(tmp_ext);
             std::fs::write(&tmp_path, &new_content)?;
             match std::fs::rename(&tmp_path, &resolved) {
                 Ok(_) => Ok(format!(
-                    "File {} has been edited successfully. Replaced all occurrences of old_string.",
-                    resolved.display()
+                    "{} to {} (replaced {} occurrence{})",
+                    diff_desc,
+                    rel,
+                    occurrences,
+                    if occurrences == 1 { "" } else { "s" }
                 )),
                 Err(e) => {
                     let _ = std::fs::remove_file(&tmp_path);
@@ -139,10 +167,7 @@ impl BaseTool for EditFileTool {
             let tmp_path = resolved.with_extension(tmp_ext);
             std::fs::write(&tmp_path, &new_content)?;
             match std::fs::rename(&tmp_path, &resolved) {
-                Ok(_) => Ok(format!(
-                    "File {} has been edited successfully. Replaced single occurrence of old_string.",
-                    resolved.display()
-                )),
+                Ok(_) => Ok(format!("{} to {}", diff_desc, rel)),
                 Err(e) => {
                     let _ = std::fs::remove_file(&tmp_path);
                     Err(format!("Error renaming temp file: {e}").into())

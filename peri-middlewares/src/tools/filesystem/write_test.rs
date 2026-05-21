@@ -48,7 +48,21 @@
             .await
             .unwrap();
         assert!(
-            result.contains("written successfully"),
+            result.contains("Wrote 1 line"),
+            "unexpected message: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_file_multiline_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool::new(dir.path().to_str().unwrap());
+        let result = tool
+            .invoke(serde_json::json!({"file_path": "multi.txt", "content": "a\nb\nc"}))
+            .await
+            .unwrap();
+        assert!(
+            result.contains("Wrote 3 lines"),
             "unexpected message: {result}"
         );
     }

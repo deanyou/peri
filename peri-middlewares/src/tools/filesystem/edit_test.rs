@@ -9,8 +9,9 @@
             )
             .await
             .unwrap();
+        // "foo" → "bar": same line count, one occurrence
         assert!(
-            result.contains("edited successfully"),
+            result.contains("Replaced text"),
             "unexpected: {result}"
         );
         let content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();

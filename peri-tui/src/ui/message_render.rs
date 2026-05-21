@@ -268,12 +268,13 @@ pub fn render_view_model(
                 peri_widgets::ToolCallStatus::Completed
             };
 
-            // Write 工具完成后默认展开（显示写入结果）
-            let effective_collapsed = if !is_running && tool_name == "Write" {
-                false
-            } else {
-                *collapsed
-            };
+            // Write/Edit 工具完成后默认展开（显示写入/编辑结果摘要）
+            let effective_collapsed =
+                if !is_running && (tool_name == "Write" || tool_name == "Edit") {
+                    false
+                } else {
+                    *collapsed
+                };
             let mut state = peri_widgets::ToolCallState::new(display_name.clone(), theme::TEXT);
             state.status = status;
             state.collapsed = effective_collapsed;

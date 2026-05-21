@@ -67,6 +67,7 @@ impl BaseTool for WriteFileTool {
             .ok_or("Missing content parameter")?;
 
         let resolved = resolve_path(&self.cwd, file_path);
+        let line_count = content.lines().count();
 
         if let Some(parent) = resolved.parent() {
             if !parent.exists() {
@@ -82,10 +83,15 @@ impl BaseTool for WriteFileTool {
             return Err(format!("Error writing file: {e}").into());
         }
         match std::fs::rename(&tmp_path, &resolved) {
-            Ok(_) => Ok(format!(
-                "File {} has been written successfully.",
-                resolved.display()
-            )),
+            Ok(_) => {
+                let rel = resolved
+                    .strip_prefix(&self.cwd)
+                    .unwrap_or(&resolved)
+                    .display()
+                    .to_string();
+                let lines_label = if line_count == 1 { "line" } else { "lines" };
+                Ok(format!("Wrote {} {} {}", line_count, lines_label, rel))
+            }
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp_path);
                 Err(format!("Error renaming temp file: {e}").into())

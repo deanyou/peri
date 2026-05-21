@@ -348,6 +348,17 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
+        "session/clear" => {
+            let session_id = extract_session_id(params, "");
+            if let Some(state) = sessions.get_mut(session_id) {
+                state.history.clear();
+                info!(session_id = %session_id, "Session history cleared");
+            }
+            let resp = serde_json::json!({ "ok": true });
+            serde_json::to_value(resp)
+                .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+        }
+
         "session/resume" => {
             let req_session_id = params
                 .get("sessionId")

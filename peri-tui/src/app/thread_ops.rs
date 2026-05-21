@@ -332,6 +332,16 @@ impl App {
             .messages
             .render_tx
             .send(RenderEvent::Clear);
+
+        // 通知 ACP Server 清空会话历史
+        if let Some(ref acp_client) = self.acp_client {
+            let client = acp_client.clone();
+            tokio::spawn(async move {
+                if let Err(e) = client.clear().await {
+                    tracing::warn!(error = %e, "Failed to clear ACP session history");
+                }
+            });
+        }
     }
 
     /// 打开 thread 浏览面板（通过命令触发）
