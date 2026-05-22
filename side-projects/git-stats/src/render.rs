@@ -21,6 +21,7 @@ pub fn render_table(stats: &[PersonStats]) {
             cell_bold("+Lines"),
             cell_bold("-Lines"),
             cell_bold("Files"),
+            cell_bold("Co-Authored"),
             cell_bold("Feat"),
             cell_bold("Fix"),
             cell_bold("Refactor"),
@@ -28,7 +29,6 @@ pub fn render_table(stats: &[PersonStats]) {
             cell_bold("Docs"),
             cell_bold("Test"),
             cell_bold("Other"),
-            cell_bold("Co-Authored"),
         ]);
 
     for s in stats {
@@ -44,6 +44,7 @@ pub fn render_table(stats: &[PersonStats]) {
             Cell::new(s.added_lines).fg(comfy_table::Color::Green),
             Cell::new(s.deleted_lines).fg(comfy_table::Color::Red),
             Cell::new(s.files_touched),
+            Cell::new(co_authored_str),
             Cell::new(s.feat).fg(comfy_table::Color::Green),
             Cell::new(s.fix).fg(comfy_table::Color::Magenta),
             Cell::new(s.refactor_).fg(comfy_table::Color::Blue),
@@ -51,7 +52,6 @@ pub fn render_table(stats: &[PersonStats]) {
             Cell::new(s.docs),
             Cell::new(s.test),
             Cell::new(s.other),
-            Cell::new(co_authored_str),
         ]);
     }
 

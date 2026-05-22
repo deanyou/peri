@@ -1,12 +1,12 @@
 # Peri
 
-Peri is built the **Nobody Coding** way: my open-source partners **DeepSeek-V4-Pro** and **GLM-5.1** write the code, I write the spec. Peri is compatible with Claude Code — your `.claude/` config just works. It grew out of [OpenLangGraphServer](https://github.com/konghayao/open-langgraph-server) and [Zen Code](https://github.com/konghayao/zen-code). Built in Rust, runs on my little RISC-V dev board.
+Peri is a terminal coding agent, built the **Nobody Coding** way — powered by **DeepSeek-V4-Pro** and **GLM-5.1**. Peri is compatible with Claude Code — your `.claude/` config just works. It grew out of [OpenLangGraphServer](https://github.com/konghayao/open-langgraph-server) and [Zen Code](https://github.com/konghayao/zen-code). Built in Rust, runs on my little RISC-V dev board.
 
 > The git log tells the story — recent commits are almost entirely DeepSeek and GLM. Claude was just there in the beginning.
 
 ## Why Peri
 
-- **Rust, not Node.js or Bun.** Fast startup, ~50MB memory footprint, no runtime overhead.
+- **Rust, not Node.js or Bun.** Fast startup, ~50MB memory footprint, no runtime overhead. Won't sneak up to 1GB while you're not looking.
 - **Context optimized.** System prompt frozen at session start, dynamic content isolated behind a boundary marker, tool definitions stable across rounds.
   - 95-99% prompt cache hit rate — minimal token waste.
   - No agent memory / auto-dream / extra calls to waste your tokens.
@@ -19,7 +19,10 @@ Peri is built the **Nobody Coding** way: my open-source partners **DeepSeek-V4-P
   - Auto compact — long sessions stay fast and cheap.
 - **Streaming Markdown.** Full Markdown rendering as the agent types — code blocks, tables, diffs, all live.
 - **IDE-ready via [ACP](https://github.com/Azure/agent-client-protocol).** Connects to [Zed](https://zed.dev) and other ACP clients out of the box. We're also building a "Cloud Code" platform where any ACP-compatible agent can plug in and go.
-- Unchecked but ready: built-in LSP (go-to-definition, references, diagnostics), built-in split screen.
+- **Unchecked but ready.**
+  - Built-in LSP.
+  - Built-in split screen.
+  - Background agents: fork work to sub-agents that run while you keep going.
 
 ## Install
 
@@ -35,7 +38,7 @@ irm https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.ps1 | 
 
 ## How We Built Peri with Nobody Coding
 
-**Nobody Coding** means exactly what it sounds like. No human wrote a single line of Peri — not the architecture, not the TUI, not the harness tuning that makes open-source models reliable in a ReAct loop. Humans decide *what*. AI figures out *how*. You're not pair programming — you're product managing an engineer that never sleeps. 99% of Peri was built this way.
+**Nobody Coding** means exactly what it sounds like. No human wrote a single line of Peri — not the architecture, not the TUI, not the harness tuning that makes open-source models reliable in a Agent loop. Humans decide *what*. AI figures out *how*. You're not pair programming — you're product managing an engineer that never sleeps. 99% of Peri was built this way.
 
 A typical pipeline:
 
