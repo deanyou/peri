@@ -73,16 +73,6 @@ pub fn aggregate(commits: &[ParsedCommit]) -> Vec<PersonStats> {
             people.push((ca.name.clone(), ca.email.clone()));
         }
 
-        // Record co-author relationships for the author
-        let author_email = &commit.author_email;
-        for ca in &commit.co_authors {
-            if let Some(author_stats) = map.get_mut(author_email) {
-                if !author_stats.co_authored_with.contains(&ca.name) {
-                    author_stats.co_authored_with.push(ca.name.clone());
-                }
-            }
-        }
-
         // Each person gets full credit
         for (name, email) in &people {
             let entry = map
@@ -95,11 +85,20 @@ pub fn aggregate(commits: &[ParsedCommit]) -> Vec<PersonStats> {
                 entry.name = name.clone();
             }
         }
+
+        // Record co-author relationships for the author (after insertion)
+        for ca in &commit.co_authors {
+            if let Some(author_stats) = map.get_mut(&commit.author_email) {
+                if !author_stats.co_authored_with.contains(&ca.name) {
+                    author_stats.co_authored_with.push(ca.name.clone());
+                }
+            }
+        }
     }
 
     let mut stats: Vec<PersonStats> = map.into_values().collect();
     // Sort by commits descending
-    stats.sort_by(|a, b| b.commits.cmp(&a.commits));
+    stats.sort_by_key(|b| std::cmp::Reverse(b.commits));
     stats
 }
 
@@ -180,5 +179,27 @@ mod tests {
         let stats = aggregate(&commits);
         assert_eq!(stats[0].email, "bob@x.com");
         assert_eq!(stats[1].email, "alice@x.com");
+    }
+
+    #[test]
+    fn test_co_author_relationship_recorded_on_first_commit() {
+        let commits = vec![make_commit(
+            "Alice",
+            "alice@x.com",
+            "feat: a",
+            vec![CoAuthor {
+                name: "Bob".into(),
+                email: "bob@x.com".into(),
+            }],
+        )];
+        let stats = aggregate(&commits);
+        let alice = stats
+            .iter()
+            .find(|s| s.email == "alice@x.com")
+            .unwrap();
+        assert!(
+            alice.co_authored_with.contains(&"Bob".to_string()),
+            "Alice's co_authored_with should contain Bob even on first commit"
+        );
     }
 }
