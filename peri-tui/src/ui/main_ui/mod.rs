@@ -308,10 +308,18 @@ fn render_session_column(
 
 /// 计算底部展开区所需高度（无激活面板时返回 0）
 fn active_panel_height(app: &App, screen_height: u16, screen_width: u16) -> u16 {
-    // plugin 面板可以占 70%，其他面板最多 60%
+    // plugin 面板可以占 70%，AskUser 弹窗允许 75%（选项多/文字长需要更多空间），其他最多 60%
     let is_plugin_panel = app.global_panels.is_active(crate::app::PanelKind::Plugin);
+    let has_ask_user = matches!(
+        &app.session_mgr.sessions[app.session_mgr.active]
+            .agent
+            .interaction_prompt,
+        Some(crate::app::InteractionPrompt::Questions(_))
+    );
     let max_h = if is_plugin_panel {
         screen_height * 70 / 100
+    } else if has_ask_user {
+        screen_height * 3 / 4
     } else {
         screen_height * 3 / 5
     };
