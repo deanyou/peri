@@ -1,4 +1,7 @@
 use anyhow::Result;
+
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use clap::{Parser, Subcommand};
 use ratatui::{
     crossterm::{
@@ -482,9 +485,25 @@ async fn run_app(
         }
     }
 
-    // 会话恢复骨架
-    if tui_opts.continue_session || tui_opts.resume_session.is_some() {
-        tracing::info!("会话恢复功能尚未完全实现");
+    // 会话恢复：-c 恢复当前目录最近会话，-r <id> 恢复指定会话
+    if let Some(ref session_id) = tui_opts.resume_session {
+        tracing::info!(session_id = %session_id, "-r: 恢复指定会话");
+        app.open_thread(session_id.clone());
+    } else if tui_opts.continue_session {
+        let store = app.services.thread_store.clone();
+        let cwd = app.services.cwd.clone();
+        let thread_id = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let threads = store.list_threads().await.ok()?;
+                threads.into_iter().find(|t| t.cwd == cwd).map(|t| t.id)
+            })
+        });
+        if let Some(tid) = thread_id {
+            tracing::info!(thread_id = %tid, "-c: 恢复最近会话");
+            app.open_thread(tid);
+        } else {
+            tracing::info!("-c: 当前目录无历史会话，创建新会话");
+        }
     }
 
     // 检测是否需要 Setup 向导

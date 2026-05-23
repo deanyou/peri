@@ -339,6 +339,7 @@ pub(crate) async fn handle_request(
             let session_id = extract_session_id(params, "");
             if let Some(state) = sessions.get_mut(session_id) {
                 state.history.clear();
+                state.history.shrink_to_fit();
                 info!(session_id = %session_id, "Session history cleared");
             }
             let resp = serde_json::json!({ "ok": true });

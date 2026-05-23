@@ -645,6 +645,18 @@ impl MessagePipeline {
         self.active_batch = None;
     }
 
+    /// 清空并释放所有内部 buffer 的 capacity
+    pub fn shrink_to_fit(&mut self) {
+        self.completed.shrink_to_fit();
+        self.current_ai_text.shrink_to_fit();
+        self.current_ai_reasoning.shrink_to_fit();
+        self.current_ai_tool_calls.shrink_to_fit();
+        self.pending_tools.shrink_to_fit();
+        self.completed_tools.shrink_to_fit();
+        self.subagent_stack.shrink_to_fit();
+        self.frozen_subagent_vms.shrink_to_fit();
+    }
+
     /// 当前 AI 消息是否有可见内容
     pub fn has_streaming_content(&self) -> bool {
         !self.current_ai_text.trim().is_empty() || !self.current_ai_reasoning.is_empty()

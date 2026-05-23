@@ -1,5 +1,33 @@
 use super::*;
 
+/// 通知 jemalloc 将空闲内存页归还给 OS。
+/// 在 `/clear`、`/compact`、切换会话等大块内存释放后调用。
+/// 注：仅释放 jemalloc 管理的 Rust 堆内存，SQLite/tokio 等非 Rust 分配不受影响。
+pub(crate) fn jemalloc_decay() {
+    // Advance epoch to refresh internal stats
+    if let Err(e) = tikv_jemalloc_ctl::epoch::advance() {
+        tracing::debug!(error = %e, "jemalloc epoch advance failed");
+        return;
+    }
+    let narenas: usize = match tikv_jemalloc_ctl::arenas::narenas::read() {
+        Ok(n) => n as usize,
+        Err(e) => {
+            tracing::debug!(error = %e, "jemalloc narenas read failed");
+            return;
+        }
+    };
+    for i in 0..narenas {
+        let mut key = format!("arena.{}.purge", i);
+        key.push(0 as char);
+        unsafe {
+            let _: u8 = match tikv_jemalloc_ctl::raw::read(key.as_bytes()) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+        }
+    }
+}
+
 impl App {
     /// 获取或新建当前 thread id（同步，block_in_place）
     #[allow(dead_code)]
@@ -249,6 +277,9 @@ impl App {
                     .view_messages
                     .clone(),
             ));
+
+        // 切换会话时旧数据已释放，归还内存页给 OS
+        jemalloc_decay();
     }
 
     pub fn open_thread_with_feedback(&mut self, thread_id: ThreadId) {
@@ -292,6 +323,10 @@ impl App {
             .clear();
         self.session_mgr.sessions[self.session_mgr.active]
             .messages
+            .view_messages
+            .shrink_to_fit();
+        self.session_mgr.sessions[self.session_mgr.active]
+            .messages
             .ephemeral_notes
             .clear();
         self.session_mgr.sessions[self.session_mgr.active]
@@ -299,9 +334,17 @@ impl App {
             .agent_state_messages
             .clear();
         self.session_mgr.sessions[self.session_mgr.active]
+            .agent
+            .agent_state_messages
+            .shrink_to_fit();
+        self.session_mgr.sessions[self.session_mgr.active]
             .messages
             .pipeline
             .clear();
+        self.session_mgr.sessions[self.session_mgr.active]
+            .messages
+            .pipeline
+            .shrink_to_fit();
         self.session_mgr.sessions[self.session_mgr.active].current_thread_id = None;
         self.session_mgr.sessions[self.session_mgr.active]
             .todo_items
@@ -342,6 +385,9 @@ impl App {
                 }
             });
         }
+
+        // 归还已释放内存页给 OS（jemalloc arena decay）
+        jemalloc_decay();
     }
 
     /// 打开 thread 浏览面板（通过命令触发）
