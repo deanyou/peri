@@ -147,65 +147,129 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                 .insert_str(&text);
         }
         Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                let panel_area = app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .panel_area;
-                if let Some(area) = panel_area {
-                    if mouse::mouse_in_rect(&mouse, area) {
-                        // Session panel takes priority
-                        let sp = &app.session_mgr.sessions[app.session_mgr.active].session_panels;
-                        if sp.is_any_open() {
-                            let result = with_session_panels!(app, |sp, ctx| {
-                                sp.dispatch_scroll(-3, &mut ctx)
-                            });
-                            if result == EventResult::Consumed {
-                                return Ok(Some(Action::Redraw));
-                            }
-                        }
-                        // Global panel
-                        if app.global_panels.is_any_open() {
-                            let result = with_global_panels!(app, |pm, ctx| {
-                                pm.dispatch_scroll(-3, &mut ctx)
-                            });
-                            if result == EventResult::Consumed {
+            // ── AskUser 弹窗鼠标交互（优先于面板/消息区） ────────────────────────
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                {
+                    let sessions = &app.session_mgr.sessions;
+                    let active = app.session_mgr.active;
+                    if let Some(crate::app::InteractionPrompt::Questions(_)) =
+                        sessions[active].agent.interaction_prompt
+                    {
+                        if let Some(area) = sessions[active].ui.panel_area {
+                            if mouse::mouse_in_rect(&mouse, area) {
+                                let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                                    -3
+                                } else {
+                                    3
+                                };
+                                app.ask_user_scroll(delta);
                                 return Ok(Some(Action::Redraw));
                             }
                         }
                     }
                 }
-                app.scroll_up();
-            }
-            MouseEventKind::ScrollDown => {
-                let panel_area = app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .panel_area;
-                if let Some(area) = panel_area {
-                    if mouse::mouse_in_rect(&mouse, area) {
-                        // Session panel takes priority
-                        let sp = &app.session_mgr.sessions[app.session_mgr.active].session_panels;
-                        if sp.is_any_open() {
-                            let result = with_session_panels!(app, |sp, ctx| {
-                                sp.dispatch_scroll(3, &mut ctx)
-                            });
-                            if result == EventResult::Consumed {
-                                return Ok(Some(Action::Redraw));
+                // 正常滚动处理
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        let panel_area = app.session_mgr.sessions[app.session_mgr.active]
+                            .ui
+                            .panel_area;
+                        if let Some(area) = panel_area {
+                            if mouse::mouse_in_rect(&mouse, area) {
+                                // Session panel takes priority
+                                let sp = &app.session_mgr.sessions[app.session_mgr.active]
+                                    .session_panels;
+                                if sp.is_any_open() {
+                                    let result = with_session_panels!(app, |sp, ctx| {
+                                        sp.dispatch_scroll(-3, &mut ctx)
+                                    });
+                                    if result == EventResult::Consumed {
+                                        return Ok(Some(Action::Redraw));
+                                    }
+                                }
+                                // Global panel
+                                if app.global_panels.is_any_open() {
+                                    let result = with_global_panels!(app, |pm, ctx| {
+                                        pm.dispatch_scroll(-3, &mut ctx)
+                                    });
+                                    if result == EventResult::Consumed {
+                                        return Ok(Some(Action::Redraw));
+                                    }
+                                }
                             }
                         }
-                        // Global panel
-                        if app.global_panels.is_any_open() {
-                            let result = with_global_panels!(app, |pm, ctx| {
-                                pm.dispatch_scroll(3, &mut ctx)
-                            });
-                            if result == EventResult::Consumed {
-                                return Ok(Some(Action::Redraw));
-                            }
-                        }
+                        app.scroll_up();
                     }
+                    MouseEventKind::ScrollDown => {
+                        let panel_area = app.session_mgr.sessions[app.session_mgr.active]
+                            .ui
+                            .panel_area;
+                        if let Some(area) = panel_area {
+                            if mouse::mouse_in_rect(&mouse, area) {
+                                // Session panel takes priority
+                                let sp = &app.session_mgr.sessions[app.session_mgr.active]
+                                    .session_panels;
+                                if sp.is_any_open() {
+                                    let result = with_session_panels!(app, |sp, ctx| {
+                                        sp.dispatch_scroll(3, &mut ctx)
+                                    });
+                                    if result == EventResult::Consumed {
+                                        return Ok(Some(Action::Redraw));
+                                    }
+                                }
+                                // Global panel
+                                if app.global_panels.is_any_open() {
+                                    let result = with_global_panels!(app, |pm, ctx| {
+                                        pm.dispatch_scroll(3, &mut ctx)
+                                    });
+                                    if result == EventResult::Consumed {
+                                        return Ok(Some(Action::Redraw));
+                                    }
+                                }
+                            }
+                        }
+                        app.scroll_down();
+                    }
+                    _ => unreachable!(),
                 }
-                app.scroll_down();
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // ── AskUser 弹窗滚动条点击（优先于面板滚动条） ──────────────────
+                {
+                    let sessions = &app.session_mgr.sessions;
+                    let active = app.session_mgr.active;
+                    if let Some(crate::app::InteractionPrompt::Questions(ref p)) =
+                        sessions[active].agent.interaction_prompt
+                    {
+                        if let Some(metrics) = p.scrollbar_metrics {
+                            if mouse.column >= metrics.bar_area.x
+                                && mouse.column < metrics.bar_area.x + metrics.bar_area.width
+                                && mouse.row >= metrics.bar_area.y
+                                && mouse.row < metrics.bar_area.bottom()
+                                && metrics.max_offset > 0
+                            {
+                                let bar_inner_height = metrics.bar_area.height.saturating_sub(2);
+                                if bar_inner_height > 0 {
+                                    let rel_y = (mouse.row.saturating_sub(metrics.bar_area.y + 1))
+                                        .min(bar_inner_height);
+                                    let new_offset = ((rel_y as f64 / bar_inner_height as f64)
+                                        * metrics.max_offset as f64)
+                                        as u16;
+                                    let new_offset = new_offset.min(metrics.max_offset);
+                                    if let Some(crate::app::InteractionPrompt::Questions(p)) =
+                                        app.session_mgr.sessions[app.session_mgr.active]
+                                            .agent
+                                            .interaction_prompt
+                                            .as_mut()
+                                    {
+                                        p.scroll_offset = new_offset;
+                                    }
+                                }
+                                return Ok(Some(Action::Redraw));
+                            }
+                        }
+                    }
+                }
                 // Panel scrollbar: ▲/▼ buttons and bar click/drag
                 // Must be checked BEFORE dispatch_mouse so scrollbar clicks
                 // aren't consumed by panel content area handlers.
