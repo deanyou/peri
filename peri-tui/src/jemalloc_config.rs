@@ -16,6 +16,9 @@
 /// Must be called **before** creating the tokio runtime, ideally at the
 /// very start of `main()`. Writes are best-effort — missing keys or
 /// unsupported platforms are silently ignored.
+// Called from main.rs (bin target) via peri_tui::jemalloc_config::configure_jemalloc().
+// Clippy's dead_code lint fires on lib targets even when used by the bin target.
+#[allow(dead_code)]
 #[cfg(not(target_os = "windows"))]
 pub fn configure_jemalloc() {
     use tracing::{debug, warn};
