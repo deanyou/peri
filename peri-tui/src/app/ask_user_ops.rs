@@ -37,6 +37,39 @@ impl App {
         }
     }
 
+    /// 页面级滚动（Ctrl+U 上翻 / Ctrl+D 下翻 / 鼠标滚轮）
+    pub fn ask_user_scroll(&mut self, lines: i16) {
+        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
+            [self.session_mgr.active]
+            .agent
+            .interaction_prompt
+            .as_mut()
+        {
+            if lines > 0 {
+                p.scroll_offset = p.scroll_offset.saturating_add(lines as u16);
+            } else {
+                p.scroll_offset = p.scroll_offset.saturating_sub((-lines) as u16);
+            }
+            // 钳位到最大偏移
+            if let Some(m) = p.scrollbar_metrics {
+                p.scroll_offset = p.scroll_offset.min(m.max_offset);
+            }
+            // 同步光标位置到可见区域
+            let visible_h = p
+                .scrollbar_metrics
+                .map(|m| m.bar_area.height)
+                .unwrap_or(10);
+            let cursor_row = p.current().option_cursor.max(0) as u16;
+            if cursor_row < p.scroll_offset {
+                p.current().option_cursor = (p.scroll_offset as isize)
+                    .min(p.current().total_rows() - 1);
+            } else if cursor_row >= p.scroll_offset + visible_h {
+                let new_cursor = (p.scroll_offset + visible_h.saturating_sub(1)) as isize;
+                p.current().option_cursor = new_cursor.min(p.current().total_rows() - 1);
+            }
+        }
+    }
+
     pub fn ask_user_toggle(&mut self) {
         if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
             [self.session_mgr.active]

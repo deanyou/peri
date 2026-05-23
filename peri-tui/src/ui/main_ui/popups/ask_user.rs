@@ -174,9 +174,18 @@ pub(crate) fn render_ask_user_popup(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let mut scroll_state = ScrollState::with_offset(prompt.scroll_offset);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_scrollbar_metrics = ScrollableArea::new(Text::from(lines))
+    let metrics = ScrollableArea::new(Text::from(lines))
         .scrollbar_style(Style::default().fg(theme::MUTED))
         .render(f, content_area, &mut scroll_state);
+    app.session_mgr.sessions[app.session_mgr.active]
+        .ui
+        .panel_scrollbar_metrics = metrics;
+    if let Some(crate::app::InteractionPrompt::Questions(p)) = app.session_mgr.sessions
+        [app.session_mgr.active]
+        .agent
+        .interaction_prompt
+        .as_mut()
+    {
+        p.scrollbar_metrics = metrics;
+    }
 }

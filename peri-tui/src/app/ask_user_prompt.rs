@@ -25,7 +25,7 @@ impl QuestionState {
         }
     }
 
-    fn total_rows(&self) -> isize {
+    pub fn total_rows(&self) -> isize {
         self.data.options.len() as isize + 1
     }
 
@@ -96,6 +96,8 @@ pub struct AskUserBatchPrompt {
     pub response_tx: tokio::sync::oneshot::Sender<Vec<String>>,
     /// 内容滚动偏移
     pub scroll_offset: u16,
+    /// 渲染时存储的滚动条几何信息���供事件交互使用
+    pub scrollbar_metrics: Option<peri_widgets::ScrollbarMetrics>,
 }
 
 impl AskUserBatchPrompt {
@@ -108,6 +110,7 @@ impl AskUserBatchPrompt {
             confirmed: vec![false; len],
             response_tx: req.response_tx,
             scroll_offset: 0,
+            scrollbar_metrics: None,
         }
     }
 
