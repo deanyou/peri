@@ -46,15 +46,21 @@ impl BackgroundTaskRegistry {
             .count()
     }
 
-    /// 注册新任务，超出上限返回 Err
+    /// 注册新任务，超出上限返回 Err。
+    /// 单次持锁完成计数检查 + 插入，消除 concurrent register 的 TOCTOU 窗口。
     pub fn register(&self, task: BackgroundTask) -> Result<(), String> {
-        if self.active_count() >= self.max_concurrent {
+        let mut tasks = self.tasks.lock();
+        let active = tasks
+            .values()
+            .filter(|t| matches!(t.status, BackgroundTaskStatus::Running))
+            .count();
+        if active >= self.max_concurrent {
             return Err(format!(
                 "Maximum {} concurrent background tasks reached",
                 self.max_concurrent
             ));
         }
-        self.tasks.lock().insert(task.id.clone(), task);
+        tasks.insert(task.id.clone(), task);
         Ok(())
     }
 

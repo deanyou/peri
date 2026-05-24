@@ -56,6 +56,12 @@ impl EventSink for TransportEventSink {
                 return;
             }
         };
+        if matches!(event, ExecutorEvent::BackgroundTaskCompleted(_)) {
+            tracing::info!(
+                event_json_len = event_json.len(),
+                "[bg-diag] EventSink: serialized BackgroundTaskCompleted, sending via transport"
+            );
+        }
         let agent_event_params = json!({
             "sessionId": session_id,
             "event_json": event_json,

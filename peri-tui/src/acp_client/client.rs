@@ -120,6 +120,17 @@ impl AcpTuiClient {
                                     session_id = %session_id,
                                     "ACP client pump: received agent_event"
                                 );
+                                if matches!(
+                                    &event,
+                                    peri_agent::agent::events::AgentEvent::BackgroundTaskCompleted(
+                                        _
+                                    )
+                                ) {
+                                    tracing::info!(
+                                        event_count = event_count,
+                                        "[bg-diag] client-pump: deserialized BackgroundTaskCompleted, sending to TUI"
+                                    );
+                                }
                                 let _ = notification_tx
                                     .send(AcpNotification::AgentEvent { session_id, event });
                             }

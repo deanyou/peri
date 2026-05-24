@@ -427,15 +427,6 @@ impl SubAgentTool {
         )
         .await;
 
-        // 通知 TUI background agent 启动（递增 background_task_count）
-        if let Some(ref handler) = self.event_handler {
-            handler.on_event(AgentEvent::SubagentStarted {
-                agent_name: agent_name.clone(),
-                instance_id: task_id.clone(),
-                is_background: true,
-            });
-        }
-
         let handle = tokio::spawn(async move {
             let mut state = AgentState::new(&cwd);
             let start = std::time::Instant::now();
@@ -484,7 +475,19 @@ impl SubAgentTool {
 
             // 通过独立通道发送完成事件（不依赖 event_tx，不受 close_channel 影响）
             if let Some(ref sender) = spawn_bg_sender {
+                tracing::info!(
+                    task_id = %spawn_task_id,
+                    agent_name = %spawn_agent_name,
+                    success = result.success,
+                    "[bg-diag] bg-task sending BackgroundTaskCompleted via bg_event_tx"
+                );
                 let _ = sender.send(AgentEvent::BackgroundTaskCompleted(result));
+            } else {
+                tracing::warn!(
+                    task_id = %spawn_task_id,
+                    agent_name = %spawn_agent_name,
+                    "[bg-diag] bg-task spawn_bg_sender is None — NOT sent"
+                );
             }
         });
 
@@ -496,6 +499,16 @@ impl SubAgentTool {
             started_at: std::time::Instant::now(),
             abort_handle: handle,
         })?;
+
+        // 通知 TUI background agent 启动（递增 background_task_count）。
+        // 必须在 registry.register() 成功之后发送，防止注册失败留下幽灵计数。
+        if let Some(ref handler) = self.event_handler {
+            handler.on_event(AgentEvent::SubagentStarted {
+                agent_name: agent_name.clone(),
+                instance_id: task_id.clone(),
+                is_background: true,
+            });
+        }
 
         Ok(format!(
             "Background task {} started. You will be notified when it completes. \
@@ -554,15 +567,6 @@ impl SubAgentTool {
         )
         .await;
 
-        // 通知 TUI background agent 启动（递增 background_task_count）
-        if let Some(ref handler) = self.event_handler {
-            handler.on_event(AgentEvent::SubagentStarted {
-                agent_name: agent_name.clone(),
-                instance_id: task_id.clone(),
-                is_background: true,
-            });
-        }
-
         let handle = tokio::spawn(async move {
             let mut fork_state = AgentState::with_messages(cwd.clone(), parent_msgs);
             let start = std::time::Instant::now();
@@ -615,7 +619,19 @@ impl SubAgentTool {
 
             // 通过独立通道发送完成事件（不依赖 event_tx，不受 close_channel 影响）
             if let Some(ref sender) = spawn_bg_sender {
+                tracing::info!(
+                    task_id = %spawn_task_id,
+                    agent_name = %spawn_agent_name,
+                    success = result.success,
+                    "[bg-diag] bg-task sending BackgroundTaskCompleted via bg_event_tx"
+                );
                 let _ = sender.send(AgentEvent::BackgroundTaskCompleted(result));
+            } else {
+                tracing::warn!(
+                    task_id = %spawn_task_id,
+                    agent_name = %spawn_agent_name,
+                    "[bg-diag] bg-task spawn_bg_sender is None — NOT sent"
+                );
             }
         });
 
@@ -627,6 +643,16 @@ impl SubAgentTool {
             started_at: std::time::Instant::now(),
             abort_handle: handle,
         })?;
+
+        // 通知 TUI background agent 启动（递增 background_task_count）。
+        // 必须在 registry.register() 成功之后发送，防止注册失败留下幽灵计数。
+        if let Some(ref handler) = self.event_handler {
+            handler.on_event(AgentEvent::SubagentStarted {
+                agent_name: agent_name.clone(),
+                instance_id: task_id.clone(),
+                is_background: true,
+            });
+        }
 
         Ok(format!(
             "Background task {} started. You will be notified when it completes. \

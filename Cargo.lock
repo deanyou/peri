@@ -3080,7 +3080,6 @@ dependencies = [
  "pulldown-cmark",
  "rand 0.10.1",
  "ratatui",
- "regex",
  "syntect",
  "unicode-width",
 ]

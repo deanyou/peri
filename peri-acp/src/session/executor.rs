@@ -348,9 +348,21 @@ pub async fn execute_prompt(
         let bg_session_id = session_id.clone();
         let bg_cw = effective_context_window;
         tokio::spawn(async move {
+            let mut bg_event_count: u64 = 0;
             while let Some(bg_event) = bg_event_rx.recv().await {
+                bg_event_count += 1;
+                if matches!(&bg_event, ExecutorEvent::BackgroundTaskCompleted(_)) {
+                    tracing::info!(
+                        count = bg_event_count,
+                        "[bg-diag] bg-event-pump: received BackgroundTaskCompleted"
+                    );
+                }
                 bg_sink.push_event(&bg_session_id, &bg_event, bg_cw).await;
             }
+            tracing::info!(
+                total_bg_events = bg_event_count,
+                "[bg-diag] bg-event-pump: channel closed, exiting"
+            );
         });
     }
 

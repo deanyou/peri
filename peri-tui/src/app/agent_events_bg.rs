@@ -64,6 +64,16 @@ impl App {
                 .background_task_count
                 .saturating_sub(1);
 
+        tracing::info!(
+            task_id = %task_id,
+            agent_name = %agent_name,
+            success = success,
+            bg_count_before = self.session_mgr.sessions[self.session_mgr.active].background_task_count + 1,
+            bg_count_after = self.session_mgr.sessions[self.session_mgr.active].background_task_count,
+            agent_done_pending = self.session_mgr.sessions[self.session_mgr.active].agent.agent_done_pending_bg,
+            "[bg-diag] TUI: handle_background_task_completed called"
+        );
+
         // 用于 LLM 上下文的纯文本通知
         let short_id = &task_id[..8.min(task_id.len())];
         let state_notification = if success {
@@ -104,11 +114,16 @@ impl App {
                 ));
         }
 
-        // 尝试在 view_messages 中找到匹配的 SubAgentGroup 并更新
+        // 尝试在 view_messages 中找到匹配的 SubAgentGroup 并更新。
+        // 对于同名并发 bg agent（同一 agent_name 的多个实例），优先选择
+        // final_result.is_none() 的组（尚未被之前的完成事件更新过），
+        // 避免第一个完成事件更新了第一个组后，第二个完成事件 break 在
+        // 已标记 is_running=false 的第一个组上而找不到第二个组。
         let short_id = &task_id[..8.min(task_id.len())];
         let mut found_and_updated = false;
         let session = &mut self.session_mgr.sessions[self.session_mgr.active];
 
+        // 第一遍：精确匹配——找 is_running && agent_id 匹配 && final_result 为空的目标
         for vm in &mut session.messages.view_messages {
             if let MessageViewModel::SubAgentGroup {
                 agent_id,
@@ -120,13 +135,41 @@ impl App {
                 ..
             } = vm
             {
-                // 匹配条件：后台 agent + 仍在运行 + agent_id 匹配
-                if *is_background && *is_running && agent_id == &agent_name {
+                if *is_background
+                    && *is_running
+                    && agent_id == &agent_name
+                    && final_result.is_none()
+                {
                     *is_running = false;
                     *final_result = Some(output.clone());
                     *is_error = !success;
                     found_and_updated = true;
                     break;
+                }
+            }
+        }
+
+        // 第二遍（兜底）：如果没有找到 final_result 为空的匹配项，
+        // 回退到原始逻辑——接受第一个 is_running && agent_id 匹配的组
+        if !found_and_updated {
+            for vm in &mut session.messages.view_messages {
+                if let MessageViewModel::SubAgentGroup {
+                    agent_id,
+                    is_running,
+                    is_background,
+                    bg_hash: _,
+                    final_result,
+                    is_error,
+                    ..
+                } = vm
+                {
+                    if *is_background && *is_running && agent_id == &agent_name {
+                        *is_running = false;
+                        *final_result = Some(output.clone());
+                        *is_error = !success;
+                        found_and_updated = true;
+                        break;
+                    }
                 }
             }
         }

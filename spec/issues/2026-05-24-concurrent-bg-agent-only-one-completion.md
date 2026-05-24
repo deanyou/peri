@@ -1,8 +1,9 @@
 # 并发 Background Agent 只收到一次完成通知，父 Agent 永久等待
 
-**状态**：Open
+**状态**：等待验证
 **优先级**：高
 **创建日期**：2026-05-24
+**修复日期**：2026-05-24
 
 ## 问题描述
 
@@ -47,3 +48,20 @@
 - `peri-tui/src/app/agent_events_bg.rs`（52-242 行）—— `handle_background_task_completed()`：递减 count、匹配 SubAgentGroup、设置 `pending_bg_continuation`
 - `peri-tui/src/app/agent_ops/lifecycle.rs`（97-129 行）—— `handle_done()`：`background_task_count > 0` 时设 `agent_done_pending_bg`
 - `peri-tui/src/app/agent_ops/polling.rs`（11-27 行）—— `poll_agent()`：消费 `pending_bg_continuation` 触发续接
+
+## 修复方案
+
+实施三项并发安全修复 + 全管线诊断 tracing：
+
+1. **TOCTOU 修复** (`background.rs`) —— `register()` 单次持锁完成计数检查+插入，消除两个 concurrent `invoke_background` 竞态窗口。
+2. **幽灵计数防御** (`define.rs`) —— `SubagentStarted` 事件移到 `registry.register()` 成功之后发送，注册失败不再留下永不递减的幽灵计数。
+3. **同名 agent 匹配修复** (`agent_events_bg.rs`) —— 两遍查找：优先匹配 `final_result.is_none()` 的目标，兜底回退到原始逻辑。
+
+另外在 5 个关键节点添加了 `[bg-diag]` tracing——sender、bg pump、EventSink 序列化、client pump 反序列化、TUI handler 入口——以便验证时精确诊断事件流。
+
+## 验证清单
+
+- [ ] TUI 触发 ≥2 个并发 background agent，确认两者都收到 `BackgroundTaskCompleted`
+- [ ] `background_task_count` 归零后自动触发续接，spinner 停止
+- [ ] 同名 background agent（如两个 `code-reviewer`）都有结果展示
+- [ ] `RUST_LOG=info` 下 `[bg-diag]` 日志完整覆盖 5 个阶段

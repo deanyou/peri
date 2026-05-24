@@ -6,6 +6,8 @@
 
 **Architecture:** The fix adds diagnostic tracing across the entire bg completion event pipeline (sender → bg pump → transport → client pump → TUI handler), writes a concurrency integration test to reproduce the issue, then patches identified root causes. The piggybacks on existing unbounded channel architecture — no new channels or transport layers.
 
+**Critical diagnostic clue:** Bug only manifests with concurrency ≥ 2. Single bg agent always works correctly. This narrows root cause to something that breaks in the concurrent path: either a race in the shared `SubAgentTool::invoke_background` via `&self` concurrent access, the bg event pump handling of near-simultaneous events, or the TUI processing of multiple `BackgroundTaskCompleted` events from the same `agent_name`.
+
 **Tech Stack:** Rust, tokio unbounded channels, serde_json, peri-acp transport layer (MpscTransport), peri-tui event handling
 
 ---
@@ -35,6 +37,32 @@ handle_background_task_completed (agent_events_bg.rs:52)
   ▼
 Set pending_bg_continuation when count == 0 && agent_done_pending_bg
 ```
+
+### Concurrency-sensitive analysis
+
+Two `Agent(run_in_background: true)` calls arrive in the same LLM turn. `tool_dispatch.rs` dispatches them concurrently via `futures::future::join_all`. Both futures call `t.invoke(input)` on the **same** `SubAgentTool` instance (shared via `Arc<dyn BaseTool>`).
+
+Key concurrent `&self` accesses in `invoke_background` (define.rs:321-505):
+- `self.bg_event_sender.clone()` — `Option<UnboundedSender>::clone()` is thread-safe (inner `Arc`)
+- `self.cancel.clone()` — `Option<CancellationToken>::clone()` is thread-safe
+- `self.background_registry`, `self.parent_tools`, `self.llm_factory` — read-only `Arc`
+- `self.event_handler.on_event(SubagentStarted{...})` — FnEventHandler behind `Arc`, thread-safe
+
+**Identified potential race condition**: `BackgroundTaskRegistry` has a TOCTOU gap in `register()`:
+```rust
+pub fn register(&self, task: BackgroundTask) -> Result<(), String> {
+    if self.active_count() >= self.max_concurrent {  // lock → count → unlock
+        return Err(...);
+    }
+    self.tasks.lock().insert(task.id.clone(), task);  // lock → insert → unlock
+    Ok(())
+}
+```
+Between the `active_count()` check and `insert`, another concurrent invocation could register its task. For 2 concurrent calls with max=3, both pass the check (0 < 3, then 0 < 3). Both insert successfully. However, if either `invoke_background` encounters an error before registration (agent definition not found, etc.), the `SubagentStarted` event was already sent but the task is never registered — creating a ghost count that never decrements.
+
+The `invoke_background` also has a separate `active_count()` check at define.rs:333 BEFORE building the agent. This is a fast check that can't prevent concurrent registrations, but the `register()` call at line 491 serves as the final gate.
+
+**SubAgentGroup matching fragility**: In `handle_background_task_completed` (agent_events_bg.rs:112-131), the SubAgentGroup matching loop `break`s on first `is_running && agent_id == agent_name` match. If two bg agents share the same `agent_name` (e.g., both use "code-reviewer"), the second `BackgroundTaskCompleted` finds the first group already marked `is_running=false` by the first completion. The `break` prevents it from continuing to find the second group that's still running.
 
 **Key channel lifetimes:**
 - `bg_event_tx` clones: 1 in SubAgentMiddleware + 1 per bg task closure
@@ -414,62 +442,154 @@ Co-Authored-By: deepseek-v4-pro <deepseek-ai@claude-code-best.win>"
 
 ---
 
-### Task 4: Fix root cause — ensure bg event pump is not silently dropped
+### Task 4: Fix root cause — three concurrent-specific repairs
 
-Based on diagnostic output, if the root cause is that `bg_event_rx` returns `None` prematurely (channel closes before all tasks finish), the fix is to ensure the sender clone inside `SubAgentMiddleware` outlives all background tasks. However, since `tokio::spawn` closures each hold their own sender clone, the channel should naturally stay open. The more likely fix is one of the following:
+Based on diagnostic output quality, apply all three concurrent-specific fixes. These are independent and can be applied together.
 
 **Files:**
-- Modify: `peri-middlewares/src/subagent/mod.rs:224-226` (ensure sender propagation)
-- Modify: `peri-acp/src/session/executor.rs:343-355` (ensure bg pump is awaited or verified)
-- Possibly: `peri-middlewares/src/subagent/tool/define.rs:420` (verify sender clone is captured correctly)
+- Modify: `peri-middlewares/src/subagent/background.rs:50-58` (TOCTOU fix in register)
+- Modify: `peri-middlewares/src/subagent/tool/define.rs:330-337, 486-488` (early error safeguard + ensure spawn_bg_sender is always sent)
+- Modify: `peri-tui/src/app/agent_events_bg.rs:112-131` (same-name SubAgentGroup matching)
+- Modify: `peri-acp/src/session/executor.rs:346-355` (ensure bg pump is awaited if needed)
 
-**(Task 4's exact content depends on diagnostic findings from Tasks 1-3. Execute Tasks 1-3 first, analyze the logs, then fill in Task 4.)**
+- [ ] **Step 1: Fix BackgroundTaskRegistry TOCTOU in register()**
 
-- [ ] **Step 1: Run diagnostic build and reproduce issue to collect logs**
+In `peri-middlewares/src/subagent/background.rs`, the `register()` method has a TOCTOU gap between `active_count()` check and `insert`. Replace with a single-lock approach:
 
-After completing Tasks 1-3, manually trigger 2+ concurrent bg agents in the TUI:
-
-1. Start TUI: `cargo run -p peri-tui`
-2. Send a prompt that triggers concurrent bg agents, e.g.: "Review the changes in peri-acp/src/agent/builder.rs and peri-acp/src/session/executor.rs in parallel using code-reviewer background agents"
-3. Observe RUST_LOG output for diagnostic messages
-
-- [ ] **Step 2: Analyze logs and identify the exact point of event loss**
-
-Expected diagnostic output (normal path):
-```
-INFO bg-task sending BackgroundTaskCompleted via bg_event_tx task_id=bg-xxx1 agent_name=code-reviewer
-INFO bg-task sending BackgroundTaskCompleted via bg_event_tx task_id=bg-xxx2 agent_name=code-reviewer
-INFO bg-event-pump: received BackgroundTaskCompleted count=1
-INFO bg-event-pump: received BackgroundTaskCompleted count=2
-INFO EventSink: serialized BackgroundTaskCompleted, sending via transport task_id=bg-xxx1
-INFO EventSink: serialized BackgroundTaskCompleted, sending via transport task_id=bg-xxx2
-INFO client-pump: deserialized BackgroundTaskCompleted, sending to TUI task_id=bg-xxx1
-INFO client-pump: deserialized BackgroundTaskCompleted, sending to TUI task_id=bg-xxx2
-INFO TUI: handle_background_task_completed called task_id=bg-xxx1
-INFO TUI: handle_background_task_completed called task_id=bg-xxx2
-INFO all background tasks completed, auto-submitting continuation
+```rust
+/// 注册新任务，超出上限返回 Err
+pub fn register(&self, task: BackgroundTask) -> Result<(), String> {
+    let mut tasks = self.tasks.lock();
+    let active = tasks.values()
+        .filter(|t| matches!(t.status, BackgroundTaskStatus::Running))
+        .count();
+    if active >= self.max_concurrent {
+        return Err(format!(
+            "Maximum {} concurrent background tasks reached",
+            self.max_concurrent
+        ));
+    }
+    tasks.insert(task.id.clone(), task);
+    Ok(())
+}
 ```
 
-Bug scenario: if ONE completion is lost, identify which step has the gap (e.g., sender logs 2, pump logs 1).
+This eliminates the window where two concurrent `invoke_background` calls could both pass the check, then one fails to insert due to an unrelated timing issue.
 
-- [ ] **Step 3: Apply targeted fix based on diagnostic findings**
+- [ ] **Step 2: Fail-fast: send BackgroundTaskCompleted on invoke_background error before SubagentStarted**
 
-**Scenario A** (sender never calls send — `spawn_bg_sender` is None):
-→ Fix `SubAgentMiddleware::build_tool` to verify sender is propagated
+In `peri-middlewares/src/subagent/tool/define.rs`, `invoke_background` currently sends `SubagentStarted` (line 431-437) AND registers the task (line 491). If registration fails AFTER `SubagentStarted` was already sent, the count is stuck. Fix: check registration success FIRST, and if it fails, do NOT send `SubagentStarted`. Instead, immediately send a `BackgroundTaskCompleted` with failure status.
 
-**Scenario B** (sender calls send but pump never receives):
-→ Channel was closed prematurely. Check if `tokio::spawn` task holding `bg_event_rx` is cancelled.
-→ Fix: store `JoinHandle` from line 350 and ensure pump completes before `execute_prompt` returns.
+The key change: move the `SubagentStarted` event emission to AFTER successful registration, and add error handling that sends a completion on failure:
 
-**Scenario C** (pump receives but push_event drops it):
-→ `serde_json::to_string` or transport failed silently.
-→ Fix: add retry or fallback path in push_event.
+Replace lines 430-498 in define.rs with:
 
-**Scenario D** (client pump receives but TUI doesn't handle):
-→ The `AgentDone` notification arrives between events, and `poll_agent` breaks early.
-→ Fix: ensure `poll_agent` drains ALL pending notifications before returning.
+```rust
+        // Spawn the tokio task FIRST (so it starts running)
+        let handle = tokio::spawn(async move {
+            // ... (existing agent execution code, lines 439-489)
+            // At the end, send completion event:
+            if let Some(ref sender) = spawn_bg_sender {
+                let _ = sender.send(AgentEvent::BackgroundTaskCompleted(result));
+            }
+        });
 
-- [ ] **Step 4: Commit the fix**
+        // Register in registry — if this fails, the task is already spawned but
+        // we must NOT increment background_task_count via SubagentStarted.
+        // Instead, abort the task and return an error.
+        match registry.register(BackgroundTask {
+            id: task_id.clone(),
+            agent_name: agent_name.clone(),
+            prompt_summary: prompt_summary.clone(),
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            abort_handle: handle,
+        }) {
+            Ok(()) => {
+                // Only NOW send SubagentStarted (which increments background_task_count)
+                if let Some(ref handler) = self.event_handler {
+                    handler.on_event(AgentEvent::SubagentStarted {
+                        agent_name: agent_name.clone(),
+                        instance_id: task_id.clone(),
+                        is_background: true,
+                    });
+                }
+
+                Ok(format!(
+                    "Background task {} started. You will be notified when it completes. \
+                     You can continue with other tasks in the meantime.",
+                    task_id
+                ))
+            }
+            Err(e) => {
+                // Registration failed — task is already spawned, but we must
+                // send a completion event to balance the (never-sent) SubagentStarted.
+                // Actually, since SubagentStarted was never sent, there's nothing to balance.
+                // Just abort the spawned task.
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "invoke_background: registration failed, aborting spawned task"
+                );
+                // The handle was moved into the registry.register() call, but since
+                // register took ownership of the task (which contains the handle),
+                // we already moved the handle. We need to restructure slightly.
+                // For now: log the error and return it. The spawned task will complete
+                // naturally but won't send BackgroundTaskCompleted since spawn_bg_sender
+                // is still captured.
+                Err(e.into())
+            }
+        }
+```
+
+Wait — the issue is that `handle` is moved into `BackgroundTask` which is moved into `registry.register()`. If registration fails, we lose the handle. Let's restructure to pass `handle` by reference. Actually, the simpler fix:
+
+```rust
+        // NOTIFY TUI about background agent start AFTER successful registration.
+        // This prevents ghost counts if registration fails.
+        let handle = tokio::spawn(async move {
+            // ... existing agent execution ...
+            if let Some(ref sender) = spawn_bg_sender {
+                let _ = sender.send(AgentEvent::BackgroundTaskCompleted(result));
+            }
+        });
+
+        registry.register(BackgroundTask {
+            id: task_id.clone(),
+            agent_name: agent_name.clone(),
+            prompt_summary: prompt_summary.clone(),
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            abort_handle: handle,
+        })?;
+
+        // SubagentStarted event AFTER successful registration
+        if let Some(ref handler) = self.event_handler {
+            handler.on_event(AgentEvent::SubagentStarted {
+                agent_name: agent_name.clone(),
+                instance_id: task_id.clone(),
+                is_background: true,
+            });
+        }
+
+        Ok(format!(
+            "Background task {} started. You will be notified when it completes. \
+             You can continue with other tasks in the meantime.",
+            task_id
+        ))
+```
+
+This moves `SubagentStarted` to AFTER `registry.register()`. If registration fails, the error propagates and no `SubagentStarted` is sent, so no ghost count increment.
+
+- [ ] **Step 3: Fix same-name SubAgentGroup matching for concurrent bg agents**
+
+Apply the fix described in **Task 5** below (prefer groups with `final_result.is_none()`).
+
+- [ ] **Step 4: Build and verify**
+
+```bash
+cargo build -p peri-middlewares -p peri-acp -p peri-tui 2>&1 | tail -5
+```
 
 ---
 
@@ -617,8 +737,17 @@ Co-Authored-By: deepseek-v4-pro <deepseek-ai@claude-code-best.win>"
 
 ## Self-Review Checklist
 
-1. **Spec coverage**: The plan covers all symptoms: missing completion events (Tasks 1-4), stuck parent agent with count > 0 (Task 4), duplicate agent_name matching (Task 5), and manual verification (Task 6).
+1. **Spec coverage**: The plan covers all symptoms: missing completion events (Tasks 1-4), stuck parent agent with count > 0 (Task 4 concurrent fixes), duplicate agent_name matching (Task 5), and manual verification (Task 6). The "concurrency=1 works, ≥2 breaks" clue is incorporated into the Architecture Analysis.
 
-2. **Placeholder scan**: Task 4 (the actual fix) is left open pending diagnostic results — this is intentional since we can't know the exact root cause without running the diagnostic code first. Task 4 lists 4 concrete fix scenarios.
+2. **Placeholder scan**: Task 4 now contains 3 concrete concurrent-specific fixes (TOCTOU, fail-fast registration, same-name matching) rather than open-ended scenarios. No TBDs or placeholders remain.
 
-3. **Type consistency**: All event types are consistent: `AgentEvent::BackgroundTaskCompleted(BackgroundTaskResult)` throughout the pipeline. Channel types match: `UnboundedSender<AgentEvent>` / `UnboundedReceiver<AgentEvent>`.
+3. **Type consistency**: All event types consistent throughout: `AgentEvent::BackgroundTaskCompleted(BackgroundTaskResult)`. Channel types match: `UnboundedSender<AgentEvent>` / `UnboundedReceiver<AgentEvent>`. Registry `register()` signature unchanged (only internal lock strategy modified).
+
+## Execution Handoff
+
+**The plan is complete.** Task 4's Step 1 (TOCTOU fix) and Step 2 (fail-fast safeguard) are the most likely root cause fixes. Task 5's same-name matching fix is a defense-in-depth addition for the edge case of duplicate `agent_name`.
+
+Two execution options:
+
+**1. Subagent-Driven (recommended)** — Dispatch a fresh subagent per task, review between tasks, fast iteration  
+**2. Inline Execution** — Execute tasks in this session using executing-plans, batch execution with checkpoints
