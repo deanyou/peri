@@ -77,22 +77,6 @@ impl App {
         self.session_mgr.sessions[self.session_mgr.active]
             .agent
             .subagent_depth += 1;
-        // 跨切面：Langfuse
-        if let Some(ref tracer) = self.session_mgr.sessions[self.session_mgr.active]
-            .langfuse
-            .langfuse_tracer
-        {
-            let _lock_start = std::time::Instant::now();
-            tracer.lock().on_subagent_start(&agent_id, &task_preview);
-            let _wait = _lock_start.elapsed();
-            if _wait.as_millis() > 50 {
-                tracing::warn!(
-                    "[DEADLOCK] TUI: tracer lock held {:?} for SubAgentStart({})",
-                    _wait,
-                    agent_id
-                );
-            }
-        }
         // Pipeline：创建 SubAgentGroup VM
         let actions = self.session_mgr.sessions[self.session_mgr.active]
             .messages

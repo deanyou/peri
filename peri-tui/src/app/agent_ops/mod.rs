@@ -60,23 +60,6 @@ impl App {
                     .agent
                     .subagent_depth
                     .saturating_sub(1);
-                // 跨切面：Langfuse
-                if let Some(ref tracer) = self.session_mgr.sessions[self.session_mgr.active]
-                    .langfuse
-                    .langfuse_tracer
-                {
-                    let _lock_start = std::time::Instant::now();
-                    let agent_id_str = agent_id.as_deref().unwrap_or("?");
-                    tracer.lock().on_subagent_end(&result, is_error);
-                    let _wait = _lock_start.elapsed();
-                    if _wait.as_millis() > 50 {
-                        tracing::warn!(
-                            "[DEADLOCK] TUI: tracer lock held {:?} for SubAgentEnd({})",
-                            _wait,
-                            agent_id_str
-                        );
-                    }
-                }
                 // 如果所有 SubAgent 已完成，恢复 spinner 到思考模式
                 if self.session_mgr.sessions[self.session_mgr.active]
                     .agent
