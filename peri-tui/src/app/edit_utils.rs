@@ -18,88 +18,13 @@ pub fn ensure_cursor_visible(cursor_row: u16, scroll_offset: u16, visible_height
     }
 }
 
-/// 找到 word 左边界的字符索引。cjk 字符视为独立 word。
-/// cursor: 当前字符索引（不含），从 cursor-1 向前扫描。
-/// 规则：
-///   - 跳过 whitespace
-///   - 同类字符连续作为同一个 word（alphanumeric 一类，其他符号各自独立但同类合并）
-pub fn find_word_start(chars: &[char], cursor: usize) -> usize {
-    if cursor == 0 {
-        return 0;
-    }
-    let len = chars.len();
-    if cursor > len {
-        return len;
-    }
-    let mut pos = cursor;
-    // 跳过空白
-    while pos > 0 && chars[pos - 1].is_whitespace() {
-        pos -= 1;
-    }
-    if pos == 0 {
-        return 0;
-    }
-    let cat = char_category(chars[pos - 1]);
-    // 向前扫描同类字符
-    while pos > 0 {
-        let prev = chars[pos - 1];
-        if prev.is_whitespace() {
-            return pos;
-        }
-        if char_category(prev) != cat {
-            return pos;
-        }
-        pos -= 1;
-    }
-    pos
-}
-
-/// 找到 word 右边界的字符索引。
-/// cursor: 当前字符索引（含），从 cursor 向后扫描。
-pub fn find_word_end(chars: &[char], cursor: usize) -> usize {
-    let len = chars.len();
-    if cursor >= len {
-        return len;
-    }
-    let mut pos = cursor;
-    // 跳过空白
-    while pos < len && chars[pos].is_whitespace() {
-        pos += 1;
-    }
-    if pos >= len {
-        return len;
-    }
-    let cat = char_category(chars[pos]);
-    while pos < len {
-        if chars[pos].is_whitespace() {
-            return pos;
-        }
-        if char_category(chars[pos]) != cat {
-            return pos;
-        }
-        pos += 1;
-    }
-    pos
-}
-
-/// 字符类别：alphanumeric / other。用于 word 边界判断。
-fn char_category(c: char) -> u8 {
-    if c.is_alphanumeric() || c == '_' {
-        0
-    } else {
-        1
-    }
-}
-
 // ─── 公共单行文本编辑辅助 ────────────────────────────────────────────────────
 
 /// 对单行 `String` + 光标位置统一处理编辑按键。
 /// 返回 `true` 表示该按键已被消费（调用方应停止 match）。
 ///
 /// 支持的按键：Char、Backspace、Delete、Left、Right、Home、End、
-/// Ctrl+A(Home)、Ctrl+E(End)、Ctrl+K(kill to end)、Ctrl+U(kill to start)、
-/// Ctrl+Left(word left)、Ctrl+Right(word right)、Ctrl+W(delete word backward)、
-/// Alt+Backspace(delete word backward)
+/// Ctrl+A(Home)、Ctrl+E(End)、Ctrl+K(kill to end)、Ctrl+U(kill to start)
 pub fn handle_edit_key(buf: &mut String, cursor: &mut usize, input: tui_textarea::Input) -> bool {
     use tui_textarea::Key;
     match input {
@@ -126,7 +51,6 @@ pub fn handle_edit_key(buf: &mut String, cursor: &mut usize, input: tui_textarea
         // ── Backspace：删除光标前一个字符 ──────────────────────────────────
         tui_textarea::Input {
             key: Key::Backspace,
-            alt: false,
             ..
         } => {
             let char_count = buf.chars().count();
@@ -236,74 +160,6 @@ pub fn handle_edit_key(buf: &mut String, cursor: &mut usize, input: tui_textarea
             }
             true
         }
-        // ── Ctrl+Left：跳词到左边界 ──────────────────────────────────────
-        tui_textarea::Input {
-            key: Key::Left,
-            ctrl: true,
-            ..
-        } => {
-            let chars: Vec<char> = buf.chars().collect();
-            *cursor = find_word_start(&chars, *cursor);
-            true
-        }
-        // ── Ctrl+Right：跳词到右边界 ─────────────────────────────────────
-        tui_textarea::Input {
-            key: Key::Right,
-            ctrl: true,
-            ..
-        } => {
-            let chars: Vec<char> = buf.chars().collect();
-            *cursor = find_word_end(&chars, *cursor);
-            true
-        }
-        // ── Ctrl+W：删除光标前一个 word ──────────────────────────────────
-        tui_textarea::Input {
-            key: Key::Char('w'),
-            ctrl: true,
-            ..
-        } => {
-            let char_count = buf.chars().count();
-            if *cursor > char_count {
-                *cursor = char_count;
-            }
-            if *cursor > 0 {
-                let chars: Vec<char> = buf.chars().collect();
-                let start = find_word_start(&chars, *cursor);
-                let byte_start = buf.char_indices().nth(start).map(|(i, _)| i).unwrap_or(0);
-                let byte_end = buf
-                    .char_indices()
-                    .nth(*cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(buf.len());
-                buf.drain(byte_start..byte_end);
-                *cursor = start;
-            }
-            true
-        }
-        // ── Alt+Backspace：删除光标前一个 word ──────────────────────────
-        tui_textarea::Input {
-            key: Key::Backspace,
-            alt: true,
-            ..
-        } => {
-            let char_count = buf.chars().count();
-            if *cursor > char_count {
-                *cursor = char_count;
-            }
-            if *cursor > 0 {
-                let chars: Vec<char> = buf.chars().collect();
-                let start = find_word_start(&chars, *cursor);
-                let byte_start = buf.char_indices().nth(start).map(|(i, _)| i).unwrap_or(0);
-                let byte_end = buf
-                    .char_indices()
-                    .nth(*cursor)
-                    .map(|(i, _)| i)
-                    .unwrap_or(buf.len());
-                buf.drain(byte_start..byte_end);
-                *cursor = start;
-            }
-            true
-        }
         _ => false,
     }
 }
@@ -343,7 +199,3 @@ fn build_textarea_with_hint(_disabled: bool, hint: &str) -> TextArea<'static> {
     ta.set_block(block);
     ta
 }
-
-#[cfg(test)]
-#[path = "edit_utils_test.rs"]
-mod tests;

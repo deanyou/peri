@@ -162,87 +162,17 @@ impl PluginPanel {
                 }
                 EventResult::Consumed
             }
-            // ── 字符输入 ────────────────────────────────────────────────
-            Input {
-                key: Key::Char(ch),
-                ctrl: false,
-                alt: false,
-                ..
-            } => {
-                self.add_marketplace_input.insert(ch);
-                EventResult::Consumed
-            }
-            // ── 光标移动 ────────────────────────────────────────────────
-            Input {
-                key: Key::Left,
-                ctrl: false,
-                ..
-            } => {
-                self.add_marketplace_input.cursor_left();
-                EventResult::Consumed
-            }
-            Input {
-                key: Key::Right,
-                ctrl: false,
-                shift: false,
-                ..
-            } => {
-                self.add_marketplace_input.cursor_right();
-                EventResult::Consumed
-            }
-            Input {
-                key: Key::Home, ..
-            } => {
-                self.add_marketplace_input.cursor_home();
-                EventResult::Consumed
-            }
-            Input { key: Key::End, .. } => {
-                self.add_marketplace_input.cursor_end();
-                EventResult::Consumed
-            }
-            // ── 跳词 ────────────────────────────────────────────────────
-            Input {
-                key: Key::Left,
-                ctrl: true,
-                ..
-            } => {
-                self.add_marketplace_input.cursor_word_left();
-                EventResult::Consumed
-            }
-            Input {
-                key: Key::Right,
-                ctrl: true,
-                ..
-            } => {
-                self.add_marketplace_input.cursor_word_right();
-                EventResult::Consumed
-            }
-            // ── 删除 ────────────────────────────────────────────────────
             Input {
                 key: Key::Backspace,
-                alt: false,
                 ..
             } => {
                 self.add_marketplace_input.backspace();
                 EventResult::Consumed
             }
             Input {
-                key: Key::Backspace,
-                alt: true,
-                ..
-            }
-            | Input {
-                key: Key::Char('w'),
-                ctrl: true,
-                ..
+                key: Key::Char(ch), ..
             } => {
-                self.add_marketplace_input.delete_word_backward();
-                EventResult::Consumed
-            }
-            Input {
-                key: Key::Delete, ..
-            } => {
-                self.add_marketplace_input.delete();
+                self.add_marketplace_input.insert(ch);
                 EventResult::Consumed
             }
             _ => EventResult::Consumed,
