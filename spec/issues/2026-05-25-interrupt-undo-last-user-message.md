@@ -112,6 +112,14 @@ ExecutorEvent::AgentExecutionFailed { message } => {
 
 **修复**（commit `f742246`）：用 `rposition` 直接在 `view_messages` 中搜索最后一个 `UserBubble`，免疫 Pipeline 重建导致的索引漂移。
 
+### Layer 5: ephemeral_notes 回插 — 排除 UserBubble
+
+**文件**：`peri-tui/src/app/agent_render.rs`
+
+**问题**（commit `0d09f68`）：`AddMessage` 将所有 VM（包括 UserBubble）推入 `ephemeral_notes`。`RebuildAll` 的 drain 之后，保存的 ephemeral_notes 被重新插入 `view_messages`。当 `prefix_len=0` 时所有 notes 都被保存并重插，UserBubble 被 drain 后又立即被 ephemeral_notes 回插，形成 no-op。
+
+**修复**：`RebuildAll` 保存 ephemeral_notes 时过滤掉 `UserBubble` 变体——UserBubble 不是 ephemeral VM，应能被彻底移除。
+
 ### 涉及文件（实际）
 
 | 文件 | 变更 |
@@ -120,6 +128,7 @@ ExecutorEvent::AgentExecutionFailed { message } => {
 | `peri-tui/src/app/agent.rs` | Layer 2：事件路由 |
 | `peri-tui/src/app/agent_ops/lifecycle.rs` | Layer 3+4：行为分叉 + VM 定位 |
 | `peri-tui/src/app/mod.rs` | Layer 4：强制清理路径同步修复 |
+| `peri-tui/src/app/agent_render.rs` | Layer 5：RebuildAll 排除 UserBubble |
 | `peri-tui/src/app/agent_test.rs` | 新增事件路由测试用例 |
 
 ### Commits
@@ -130,3 +139,4 @@ ExecutorEvent::AgentExecutionFailed { message } => {
 | `8a77f15` | fix(tui): route cancel-originated AgentExecutionFailed to Interrupted instead of Error |
 | `d43934b` | fix(tui): only undo user message on interrupt when no tool calls were made |
 | `f742246` | fix(tui): locate UserBubble by rposition instead of stale round_start_vm_idx |
+| `0d09f68` | fix(tui): exclude UserBubble from ephemeral_notes save in RebuildAll |
