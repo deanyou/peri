@@ -169,3 +169,39 @@ fn test_fork_subagent_identity() {
         "fork"
     );
 }
+
+// === Test 9: 并发 SubAgent 独立上下文 ===
+#[tokio::test]
+async fn test_concurrent_subagents_independent_context() {
+    let mut tracer = make_tracer();
+    let main_id = tracer.agent_observation_id.clone();
+
+    // 启动第一个 subagent
+    tracer.on_tool_start("tc-1", "Agent", &agent_tool_input("explorer", "find files"));
+    assert_eq!(tracer.subagent_stack.len(), 1);
+    let sub1_id = tracer.current_agent_id();
+
+    // 启动第二个 subagent（嵌套场景，flat model 下是兄弟关系）
+    tracer.on_tool_start(
+        "tc-2",
+        "Agent",
+        &agent_tool_input("code-reviewer", "review"),
+    );
+    assert_eq!(tracer.subagent_stack.len(), 2);
+    let sub2_id = tracer.current_agent_id();
+
+    // 两个 subagent 彼此不同，也不同于 main agent
+    assert_ne!(sub1_id, main_id);
+    assert_ne!(sub2_id, main_id);
+    assert_ne!(sub1_id, sub2_id);
+
+    // 第二个 subagent 结束后回到第一个
+    tracer.on_tool_end("tc-2", "review done", false);
+    assert_eq!(tracer.subagent_stack.len(), 1);
+    assert_eq!(tracer.current_agent_id(), sub1_id);
+
+    // 第一个 subagent 结束后回到 main agent
+    tracer.on_tool_end("tc-1", "found 5 files", false);
+    assert!(tracer.subagent_stack.is_empty());
+    assert_eq!(tracer.current_agent_id(), main_id);
+}

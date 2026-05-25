@@ -58,6 +58,10 @@ pub(crate) struct SubAgentContext {
     pub(crate) observation_id: String,
     /// SubAgent 的 agent_id（如 "code-reviewer"）
     pub(crate) agent_id: String,
+    /// SubAgent 开始时间（延迟到 end_subagent 时与 ObservationCreate 一起发送）
+    pub(crate) start_time: String,
+    /// SubAgent 输入（prompt 预览）
+    pub(crate) input: serde_json::Value,
     /// 当前 subagent 下的 tools batch 信息
     pub(crate) tools_batch_span_id: Option<String>,
     pub(crate) tools_batch_start_time: Option<String>,
@@ -140,11 +144,11 @@ impl LangfuseTracer {
             .unwrap_or_else(|| "fork".to_string())
     }
 
-    /// 创建 SubAgent observation 并将上下文压入 subagent_stack
+    /// 创建 SubAgent 上下文并压入 subagent_stack
     ///
-    /// parent_observation_id 应为 Agent 工具调用的 Tool span_id，
-    /// 这样 SubAgent 作为 Tool 的子节点出现在 Langfuse 树中。
-    fn begin_subagent(&mut self, parent_tool_span_id: &str, input: &serde_json::Value) {
+    /// Observation 延迟到 end_subagent 时发送，确保与 Tools batch 在同一批次，
+    /// 避免周期性 flush 导致 parent 缺失引发 Langfuse 重复 trace。
+    fn begin_subagent(&mut self, input: &serde_json::Value) {
         let agent_id = Self::subagent_identity(input);
         let task_preview: String = input
             .get("prompt")
@@ -155,34 +159,11 @@ impl LangfuseTracer {
         let observation_id = uuid::Uuid::now_v7().to_string();
         let start_time = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-        let body = ObservationBody {
-            id: Some(observation_id.clone()),
-            trace_id: Some(self.trace_id.clone()),
-            r#type: ObservationType::Agent,
-            name: Some(format!("subagent:{}", agent_id)),
-            start_time: Some(start_time.clone()),
-            parent_observation_id: Some(parent_tool_span_id.to_string()),
-            input: Some(serde_json::json!(task_preview)),
-            version: Some(VERSION.to_string()),
-            session_id: Some(self.session_id.clone()),
-            ..Default::default()
-        };
-        let event = IngestionEvent::ObservationCreate {
-            id: uuid::Uuid::now_v7().to_string(),
-            timestamp: start_time,
-            body,
-            metadata: None,
-        };
-        if let Err(e) = self.session.batcher.try_add(event) {
-            tracing::warn!(
-                error = %e, trace_id = %self.trace_id, subagent = %agent_id,
-                "langfuse: subagent observation create 入队失败（背压丢弃）"
-            );
-        }
-
         self.subagent_stack.push(SubAgentContext {
             observation_id,
             agent_id,
+            start_time,
+            input: serde_json::json!(task_preview),
             tools_batch_span_id: None,
             tools_batch_start_time: None,
             tools_batch_end_time: None,
@@ -190,51 +171,61 @@ impl LangfuseTracer {
         });
     }
 
-    /// 完成当前 SubAgent observation：flush 工具批次，弹出栈，发送 ObservationUpdate
+    /// 完成当前 SubAgent Observation（Span 类型）：先发 ObservationCreate（确保 parent 先入队），
+    /// 再 flush 工具批次，最后弹出栈。
     ///
     /// 必须在 `subagent_stack.pop()` 之前调用 `flush_tools_batch()`，
     /// 否则 subagent 的工具批次会 flush 到错误的 parent。
     fn end_subagent(&mut self, result: &str, is_error: bool) {
-        // flush subagent 下的 tools batch（pop 前）
-        self.flush_tools_batch();
-
-        let (subagent_id, subagent_name) = match self.subagent_stack.pop() {
-            Some(ctx) => (ctx.observation_id, ctx.agent_id),
-            None => {
-                tracing::warn!("langfuse: end_subagent 调用时 subagent_stack 为空，忽略");
-                return;
-            }
-        };
-
-        let end_time = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        // 先发 SubAgent ObservationCreate，再 flush Tools batch
+        // 确保 Tools SpanCreate 的 parent（subagent observation）先于它入队
         let status_message = if is_error {
             Some("error".to_string())
         } else {
             None
         };
+        let end_time = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-        let obs_body = ObservationBody {
-            id: Some(subagent_id.clone()),
-            trace_id: Some(self.trace_id.clone()),
-            r#type: ObservationType::Agent,
-            name: Some(format!("subagent:{}", subagent_name)),
-            output: Some(serde_json::json!(result)),
-            end_time: Some(end_time.clone()),
-            status_message,
-            version: Some(VERSION.to_string()),
-            ..Default::default()
-        };
-        let obs_event = IngestionEvent::ObservationUpdate {
-            id: uuid::Uuid::now_v7().to_string(),
-            timestamp: end_time,
-            body: obs_body,
-            metadata: None,
-        };
-        if let Err(e) = self.session.batcher.try_add(obs_event) {
-            tracing::warn!(
-                error = %e, trace_id = %self.trace_id, subagent = %subagent_name,
-                "langfuse: subagent observation update 入队失败（背压丢弃）"
-            );
+        if let Some(ctx) = self.subagent_stack.last() {
+            let obs_body = ObservationBody {
+                id: Some(ctx.observation_id.clone()),
+                trace_id: Some(self.trace_id.clone()),
+                r#type: ObservationType::Agent,
+                name: Some(format!("subagent:{}", ctx.agent_id)),
+                start_time: Some(ctx.start_time.clone()),
+                end_time: Some(end_time.clone()),
+                completion_start_time: None,
+                parent_observation_id: None,
+                input: Some(ctx.input.clone()),
+                output: Some(serde_json::json!(result)),
+                metadata: None,
+                model: None,
+                model_parameters: None,
+                level: None,
+                status_message,
+                version: Some(VERSION.to_string()),
+                environment: None,
+                session_id: Some(self.session_id.clone()),
+            };
+            let obs_event = IngestionEvent::ObservationCreate {
+                id: uuid::Uuid::now_v7().to_string(),
+                timestamp: end_time,
+                body: obs_body,
+                metadata: None,
+            };
+            if let Err(e) = self.session.batcher.try_add(obs_event) {
+                tracing::warn!(
+                    error = %e, trace_id = %self.trace_id, subagent = %ctx.agent_id,
+                    "langfuse: subagent observation create 入队失败（背压丢弃）"
+                );
+            }
+        }
+
+        // flush subagent 下的 tools batch（pop 前）
+        self.flush_tools_batch();
+
+        if self.subagent_stack.pop().is_none() {
+            tracing::warn!("langfuse: end_subagent 调用时 subagent_stack 为空，忽略");
         }
     }
 
@@ -445,9 +436,9 @@ impl LangfuseTracer {
             );
         } // 可变借用在此释放
 
-        // Agent 工具：创建 SubAgent observation，push 到栈
+        // Agent 工具：创建 SubAgent Span，push 到栈
         if is_agent {
-            self.begin_subagent(&tool_span_id, input);
+            self.begin_subagent(input);
         }
     }
 
