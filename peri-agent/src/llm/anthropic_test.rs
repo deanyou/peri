@@ -727,3 +727,138 @@ fn test_parse_and_reserialize_thinking_with_tool_use() {
     assert_eq!(content[0]["thinking"], "I need to check the file first");
     assert_eq!(content[0]["signature"], "sig_12345");
 }
+
+/// 验证 AtMentionMiddleware/SkillPreloadMiddleware 注入的 fake Read 工具消息
+/// 经过 messages_to_anthropic 后格式正确（不会导致 API 400）
+#[test]
+fn test_preload_fake_read_tool_messages_anthropic_format() {
+    // 模拟 AtMentionMiddleware 注入后的 state.messages
+    let messages = vec![
+        BaseMessage::human("请看 @test.rs"),
+        BaseMessage::ai_from_blocks(vec![ContentBlock::tool_use(
+            "call_abc123".to_string(),
+            "Read",
+            json!({ "file_path": "test.rs" }),
+        )]),
+        BaseMessage::tool_result("call_abc123".to_string(), "fn main() {}"),
+    ];
+
+    let (msgs, _system) = ChatAnthropic::messages_to_anthropic(&messages);
+
+    // 验证 messages 数组结构
+    assert_eq!(
+        msgs.len(),
+        3,
+        "应有 3 条消息: user + assistant + user(tool_result)"
+    );
+
+    // messages[0] = user（原始 Human 消息）
+    assert_eq!(msgs[0]["role"], "user");
+    let content0 = msgs[0]["content"].as_array().unwrap();
+    // 不应包含 tool_result block
+    assert!(
+        content0.iter().all(|b| b["type"] != "tool_result"),
+        "第一条消息不应包含 tool_result: {:?}",
+        content0
+    );
+
+    // messages[1] = assistant（包含 tool_use）
+    assert_eq!(msgs[1]["role"], "assistant");
+    let content1 = msgs[1]["content"].as_array().unwrap();
+    assert!(
+        content1.iter().any(|b| b["type"] == "tool_use"),
+        "assistant 消息应包含 tool_use"
+    );
+
+    // messages[2] = user（包含 tool_result，引用前一条 assistant 的 tool_use）
+    assert_eq!(msgs[2]["role"], "user");
+    let content2 = msgs[2]["content"].as_array().unwrap();
+    assert!(
+        content2.iter().any(|b| b["type"] == "tool_result"),
+        "应有 tool_result block"
+    );
+
+    // 验证 tool_use_id 引用正确
+    let tool_result = content2
+        .iter()
+        .find(|b| b["type"] == "tool_result")
+        .unwrap();
+    assert_eq!(tool_result["tool_use_id"], "call_abc123");
+}
+
+/// 验证两轮对话中 preload 消息保留在 history 时格式仍然正确
+/// 模拟用户场景：第一轮 @file 有匹配 → 注入 Ai+Tool → LLM 回复 →
+/// 第二轮 history 包含上一轮 preload 消息 + 新 Human → 不应 400
+#[test]
+fn test_preload_messages_preserved_in_second_round_history() {
+    // 第一轮结束后的 history（包含 preload 注入的 fake Read）
+    let round1_history = vec![
+        BaseMessage::human("@test.rs"), // 用户消息
+        BaseMessage::ai_from_blocks(vec![
+            // AtMentionMiddleware 注入
+            ContentBlock::tool_use(
+                "call_round1_read".to_string(),
+                "Read",
+                json!({ "file_path": "test.rs" }),
+            ),
+        ]),
+        BaseMessage::tool_result(
+            // AtMentionMiddleware 注入
+            "call_round1_read".to_string(),
+            "fn main() {}",
+        ),
+        BaseMessage::ai("Here is the file content..."), // LLM 回复
+    ];
+
+    // 第二轮：history + 新 Human 消息
+    let round2_messages = {
+        let mut msgs = round1_history;
+        msgs.push(BaseMessage::human("thanks, now help me with the code"));
+        msgs
+    };
+
+    let (msgs, _system) = ChatAnthropic::messages_to_anthropic(&round2_messages);
+
+    // 验证结构
+    assert!(
+        msgs.len() >= 4,
+        "至少 4 条消息: user, assistant(tool_use), user(tool_result), assistant, user"
+    );
+
+    // messages[0] 必须是 user 且不含 tool_result
+    assert_eq!(msgs[0]["role"], "user");
+    let c0 = msgs[0]["content"].as_array().unwrap();
+    assert!(
+        c0.iter().all(|b| b["type"] != "tool_result"),
+        "messages[0] 不应包含 tool_result: {:?}",
+        c0
+    );
+
+    // messages[1] = assistant(tool_use)
+    assert_eq!(msgs[1]["role"], "assistant");
+
+    // messages[2] = user(tool_result)
+    assert_eq!(msgs[2]["role"], "user");
+}
+
+/// 验证 history 以 Tool 消息开头时的错误场景（排查 messages.0 问题）
+/// 如果 history 不当丢失了 Human 消息，Tool 消息会变成 messages[0]
+#[test]
+fn test_tool_message_as_first_in_history_is_invalid() {
+    // 模拟 history 中 Human 消息丢失，Tool 消息成为第一条
+    let bad_history = vec![
+        BaseMessage::tool_result("call_orphan".to_string(), "orphan content"),
+        BaseMessage::ai("response"),
+    ];
+
+    let (msgs, _system) = ChatAnthropic::messages_to_anthropic(&bad_history);
+
+    // 这种情况 messages[0] 会变成 {user, [tool_result]} — 这就是 400 的根因
+    assert_eq!(msgs[0]["role"], "user");
+    let c0 = msgs[0]["content"].as_array().unwrap();
+    // 这个测试验证了问题场景：messages[0].content[0] 是 tool_result
+    assert_eq!(
+        c0[0]["type"], "tool_result",
+        "确认：Tool 作为第一条消息时，会被转为 user(tool_result) 作为 messages[0]"
+    );
+}
