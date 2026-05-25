@@ -994,6 +994,7 @@ pub fn handle_key_event(
 }
 
 /// 检测 textarea 中 @ 提及模式，更新状态并触发搜索
+/// 使用缓存 + 300ms 节流避免频繁 glob
 fn update_at_mention_detection(app: &mut App) {
     let textarea = &app.session_mgr.sessions[app.session_mgr.active].ui.textarea;
     let text = textarea.lines().join("\n");
@@ -1016,9 +1017,24 @@ fn update_at_mention_detection(app: &mut App) {
         if at.active && at.query == query {
             return; // 未变化
         }
-        at.activate(query, start);
+        at.activate(query.clone(), start);
+
+        // 尝试从缓存获取结果（零 IO）
+        if let Some(cached) = at.try_filter_from_cache(&query) {
+            at.update_candidates(cached);
+            return;
+        }
+
+        // 节流：距离上次 glob 不到 300ms 时，保留旧结果不搜索
+        if !at.should_search_now() && !at.candidates.is_empty() {
+            return;
+        }
+
+        // 执行 glob 搜索
         let cwd = app.services.cwd.clone();
-        let candidates = crate::app::at_mention::file_search::search_files(&cwd, &at.query);
+        let candidates = crate::app::at_mention::file_search::search_files(&cwd, &query);
+        at.cache_result(&query, candidates.clone());
+        at.set_last_glob_query(&query);
         at.update_candidates(candidates);
     } else if at.active {
         at.close();

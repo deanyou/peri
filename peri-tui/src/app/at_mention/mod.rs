@@ -1,10 +1,18 @@
 pub mod file_search;
 pub mod popup;
 
+use std::collections::HashMap;
+use std::time::Instant;
+
 use file_search::FileCandidate;
 use tokio_util::sync::CancellationToken;
 
-/// @ 提及状态：管理���件搜索候选、选择和弹窗
+/// 搜索节流间隔（毫秒）
+const SEARCH_DEBOUNCE_MS: u64 = 300;
+/// 缓存上限：超过后清空重建
+const CACHE_MAX_ENTRIES: usize = 64;
+
+/// @ 提及状态：管理文件搜索候选、选择和弹窗
 pub struct AtMentionState {
     pub active: bool,
     pub query: String,
@@ -13,10 +21,14 @@ pub struct AtMentionState {
     pub candidates: Vec<FileCandidate>,
     pub selected: usize,
     pub scroll_offset: usize,
-    /// 防抖 oneshot sender：新搜索启动时 cancel 上一次
-    pub debounce_tx: Option<tokio::sync::oneshot::Sender<()>>,
     /// 异步搜索取消令牌
     pub cancel_token: Option<CancellationToken>,
+    /// 缓存：query → 搜索结果（避免重复 glob）
+    search_cache: HashMap<String, Vec<FileCandidate>>,
+    /// 上次 glob 搜索的时间戳：节流用
+    last_search_time: Option<Instant>,
+    /// 上次触发 glob 的 query 前缀（query 变长时从缓存过滤，无需重新 IO）
+    last_glob_query: String,
 }
 
 impl Default for AtMentionState {
@@ -34,8 +46,10 @@ impl AtMentionState {
             candidates: Vec::new(),
             selected: 0,
             scroll_offset: 0,
-            debounce_tx: None,
             cancel_token: None,
+            search_cache: HashMap::new(),
+            last_search_time: None,
+            last_glob_query: String::new(),
         }
     }
 
@@ -84,9 +98,6 @@ impl AtMentionState {
         self.candidates.clear();
         self.selected = 0;
         self.scroll_offset = 0;
-        if let Some(tx) = self.debounce_tx.take() {
-            let _ = tx.send(());
-        }
         if let Some(token) = self.cancel_token.take() {
             token.cancel();
         }
@@ -98,6 +109,47 @@ impl AtMentionState {
         self.candidates = candidates;
         if self.selected >= len && len > 0 {
             self.selected = len - 1;
+        }
+    }
+
+    /// 判断当前 query 是否需要执行 glob 搜索。
+    /// 返回 Some(candidates) 表示可以从缓存/过滤得到结果，None 表示需要 glob。
+    pub fn try_filter_from_cache(&self, query: &str) -> Option<Vec<FileCandidate>> {
+        // 精确缓存命中
+        if let Some(cached) = self.search_cache.get(query) {
+            return Some(cached.clone());
+        }
+
+        // query 是上次 glob query 的延续（变长）：从上次结果中过滤
+        if query.starts_with(&self.last_glob_query) && !self.last_glob_query.is_empty() {
+            if let Some(base_results) = self.search_cache.get(&self.last_glob_query) {
+                let filtered = file_search::filter_candidates(base_results, query);
+                return Some(filtered);
+            }
+        }
+
+        None
+    }
+
+    /// 缓存搜索结果并记录时间戳
+    pub fn cache_result(&mut self, query: &str, candidates: Vec<FileCandidate>) {
+        if self.search_cache.len() >= CACHE_MAX_ENTRIES {
+            self.search_cache.clear();
+        }
+        self.search_cache.insert(query.to_string(), candidates);
+        self.last_search_time = Some(Instant::now());
+    }
+
+    /// 记录本次 glob 对应的 query 前缀
+    pub fn set_last_glob_query(&mut self, query: &str) {
+        self.last_glob_query = query.to_string();
+    }
+
+    /// 判断是否应该执行 glob（节流）
+    pub fn should_search_now(&self) -> bool {
+        match self.last_search_time {
+            Some(t) => t.elapsed().as_millis() as u64 >= SEARCH_DEBOUNCE_MS,
+            None => true,
         }
     }
 
@@ -153,16 +205,11 @@ mod tests {
 
     #[test]
     fn test_detect_at_sign_with_text() {
-        // "请看 @main" → Some(("main", 3))
         let text = "请看 @main";
-        // "请" = 3 bytes, "看" = 3 bytes, " " = 1 byte → @ 在 byte 7
-        // 但我们用字符位置：cursor_pos = 6 (在 'n' 之后)
-        // 先找出正确的 cursor_pos
         let result = AtMentionState::detect(text, text.len());
         assert!(result.is_some(), "应检测到 @ 提及");
         let (query, pos) = result.unwrap();
         assert_eq!(query, "main");
-        // @ 在 char index 3
         assert_eq!(pos, "请看 ".len());
     }
 
@@ -174,7 +221,6 @@ mod tests {
 
     #[test]
     fn test_detect_at_sign_only() {
-        // "看 @" → @ 后无字符
         let result = AtMentionState::detect("看 @", "看 @".len());
         assert!(result.is_none(), "@ 后无内容应返回 None");
     }
@@ -190,7 +236,6 @@ mod tests {
 
     #[test]
     fn test_detect_not_at_line_start() {
-        // "user@example" → @ 前不是空白
         let result = AtMentionState::detect("user@example", "user@example".len());
         assert!(result.is_none(), "非空白前导的 @ 不应触发");
     }
@@ -228,5 +273,26 @@ mod tests {
         assert_eq!(state.selected, 0);
         state.move_up(); // 循环到末尾
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn test_cache_hit() {
+        let mut state = AtMentionState::new();
+        let candidates = vec![FileCandidate {
+            path: "main.rs".into(),
+            display: "main.rs".into(),
+            is_dir: false,
+            score: 10,
+        }];
+        state.cache_result("main", candidates.clone());
+        let cached = state.try_filter_from_cache("main");
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_should_search_now_first_time() {
+        let state = AtMentionState::new();
+        assert!(state.should_search_now(), "首次应允许搜索");
     }
 }

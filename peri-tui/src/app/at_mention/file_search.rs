@@ -135,6 +135,57 @@ pub fn find_common_prefix(candidates: &[FileCandidate]) -> Option<String> {
     Some(first.chars().take(end).collect())
 }
 
+/// 从已有候选列表中过滤匹配 query 的结果（纯内存操作，无 IO）
+/// 用于 query 变长时从缓存过滤，避免重新 glob
+pub fn filter_candidates(candidates: &[FileCandidate], query: &str) -> Vec<FileCandidate> {
+    let matcher = SkimMatcherV2::default();
+    let (dir_part, file_part): (String, &str) = if let Some(slash_pos) = query.rfind('/') {
+        (query[..=slash_pos].to_string(), &query[slash_pos + 1..])
+    } else {
+        (String::new(), query)
+    };
+
+    let mut results: Vec<FileCandidate> = candidates
+        .iter()
+        .filter_map(|c| {
+            // 路径必须以 dir_part 开头
+            if !dir_part.is_empty() && !c.path.starts_with(&dir_part) {
+                return None;
+            }
+
+            if file_part.is_empty() {
+                return Some(FileCandidate {
+                    score: c.score,
+                    ..c.clone()
+                });
+            }
+
+            let file_name = c
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&c.path)
+                .to_string();
+            let name_score = matcher.fuzzy_match(&file_name, file_part).unwrap_or(0);
+            let path_score = matcher.fuzzy_match(&c.path, query).unwrap_or(0);
+            let score = name_score * 2 + path_score;
+
+            if score > 0 {
+                Some(FileCandidate {
+                    score,
+                    ..c.clone()
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.len().cmp(&b.path.len())));
+    results.truncate(MAX_CANDIDATES);
+    results
+}
+
 fn should_ignore(rel_path: &str) -> bool {
     for component in rel_path.split('/') {
         if IGNORED_DIRS.contains(&component) {

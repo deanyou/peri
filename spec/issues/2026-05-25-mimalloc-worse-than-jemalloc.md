@@ -28,6 +28,29 @@
   3. 观察 RSS 快速达到 100MB+
 - **环境**：macOS，Rust 2021
 
+## 决议
+
+**删除 mimalloc，回退到系统默认分配器**（2026-05-25 决定）
+
+mimalloc 在本项目工作负载下内存膨胀速度比 jemalloc 更快，不符合预期。决定完全移除第三方全局分配器，使用系统默认分配器（macOS malloc / Linux glibc malloc）。
+
+**具体操作**：
+
+1. **移除 mimalloc 全局分配器**：删除 `main.rs` 中 `#[global_allocator] static GLOBAL: mimalloc::MiMalloc`
+2. **移除 workspace 和 crate 依赖**：删除 `Cargo.toml` 和 `peri-tui/Cargo.toml` 中的 `mimalloc` / `libmimalloc-sys` 依赖
+3. **删除 `/heapdump` 命令**：该命令完全依赖 mimalloc 统计 API（`mi_process_info` / `mi_stats_print_out`），无系统默认分配器对应实现，直接删除
+4. **清理内存回收函数**：`thread_ops::alloc_collect()` 中的 `mi_collect(true)` 调用随 mimalloc 一起移除
+5. **清理残留**：删除相关 plan 文件 `docs/superpowers/plans/2026-05-25-replace-jemalloc-with-mimalloc.md`
+
+**涉及文件**：
+
+- `Cargo.toml`（workspace 依赖声明）—— 移除 mimalloc / libmimalloc-sys
+- `peri-tui/Cargo.toml` —— 移除 mimalloc / libmimalloc-sys 依赖
+- `peri-tui/src/main.rs` —— 移除 `#[global_allocator]` 声明
+- `peri-tui/src/app/thread_ops.rs` —— 移除 `alloc_collect()` 中 mimalloc 调用
+- `peri-tui/src/command/core/heapdump.rs` —— 删除整个文件
+- `docs/superpowers/plans/2026-05-25-replace-jemalloc-with-mimalloc.md` —— 删除 plan 文件
+
 ## 关联 Issue
 
 - `spec/issues/2026-05-25-replace-jemalloc-with-mimalloc.md` —— 本次 mimalloc 替换的实施 issue（当前状态：Prepare）
