@@ -817,6 +817,18 @@ submit_message(text)
 **涉及文件:** peri-tui/src/command/core/clear.rs:19-21, peri-tui/src/app/thread_ops.rs:259-335, peri-tui/src/acp_server/mod.rs:39-52, peri-tui/src/acp_server/prompt.rs:88-155
 **CLAUDE.md 链接:** false
 
+### issue_2026-05-20-theme-markdown-color-decoupling
+
+**摘要:** Markdown 与 Theme 颜色体系脱节，存在多处分叉硬编码
+**状态:** Fixed
+**归档日期:** 2026-05-25
+**关键词:** Theme trait, 颜色解耦, MarkdownTheme, 适配器模式
+**问题本质:** 三套独立颜色系统（DarkTheme / MarkdownTheme / 散落硬编码）互不联动，改 DarkTheme 不影响 Markdown 渲染
+**通用模式:** widget 库通过 trait 暴露颜色接口，外部 adapter 桥接到库自身的 MarkdownTheme，消除分散硬编码
+**技术决策:** `ThemeMarkdownAdapter<'a>` 包裹 `&dyn Theme` 实现 `MarkdownTheme` trait——零开销桥接
+**涉及文件:** peri-widgets/src/markdown/mod.rs, peri-widgets/src/theme/mod.rs, peri-widgets/src/message_block/highlight.rs
+**CLAUDE.md 链接:** false
+
 ---
 
 ## 相关 Feature

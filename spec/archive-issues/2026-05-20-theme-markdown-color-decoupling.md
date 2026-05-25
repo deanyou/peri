@@ -1,3 +1,5 @@
+> 归档于 2026-05-25，原路径 spec/issues/2026-05-20-theme-markdown-color-decoupling.md
+
 # Markdown 与 Theme 颜色体系脱节，存在多处分叉硬编码
 
 **状态**：Fixed

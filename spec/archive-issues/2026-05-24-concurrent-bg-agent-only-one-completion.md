@@ -1,3 +1,5 @@
+> 归档于 2026-05-25，原路径 spec/issues/2026-05-24-concurrent-bg-agent-only-one-completion.md
+
 # 并发 Background Agent 只收到一次完成通知，父 Agent 永久等待
 
 **状态**：完成

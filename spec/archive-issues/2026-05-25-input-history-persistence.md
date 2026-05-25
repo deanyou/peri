@@ -1,3 +1,5 @@
+> 归档于 2026-05-25，原路径 spec/issues/2026-05-25-input-history-persistence.md
+
 # 输入历史跨会话持久化
 
 **状态**：已完成

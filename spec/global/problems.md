@@ -946,8 +946,48 @@
 ### include!宏分组
 - [TUI app/ 目录模块化拆分——48 个子模块、多个 1000+ 行文件](domains/code-architecture.md#issue_2026-05-14-tui-app-mod-decomposition) — code-architecture
 
+### Theme trait
+- [Markdown 与 Theme 颜色体系脱节，存在多处分叉硬编码](domains/tui-widgets.md#issue_2026-05-20-theme-markdown-color-decoupling) — tui-widgets
+
+### 颜色解耦
+- [Markdown 与 Theme 颜色体系脱节，存在多处分叉硬编码](domains/tui-widgets.md#issue_2026-05-20-theme-markdown-color-decoupling) — tui-widgets
+
+### MarkdownTheme
+- [Markdown 与 Theme 颜色体系脱节，存在多处分叉硬编码](domains/tui-widgets.md#issue_2026-05-20-theme-markdown-color-decoupling) — tui-widgets
+
+### 适配器模式
+- [Markdown 与 Theme 颜色体系脱节，存在多处分叉硬编码](domains/tui-widgets.md#issue_2026-05-20-theme-markdown-color-decoupling) — tui-widgets
+
+### Ctrl+C 中断
+- [Ctrl+C 中断后支持撤回并重发上一条用户消息](domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message) — agent
+
+### 消息撤回
+- [Ctrl+C 中断后支持撤回并重发上一条用户消息](domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message) — agent
+
+### 事件路由
+- [Ctrl+C 中断后支持撤回并重发上一条用户消息](domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message) — agent
+
+### 历史回滚
+- [Ctrl+C 中断后支持撤回并重发上一条用户消息](domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message) — agent
+
+### 索引漂移
+- [Ctrl+C 中断后支持撤回并重发上一条用户消息](domains/agent.md#issue_2026-05-25-interrupt-undo-last-user-message) — agent
+
+### 并发 background agent
+- [并发 Background Agent 只收到一次完成通知，父 Agent 永久等待](domains/agent.md#issue_2026-05-24-concurrent-bg-agent-only-one-completion) — agent
+
+### TOCTOU
+- [并发 Background Agent 只收到一次完成通知，父 Agent 永久等待](domains/agent.md#issue_2026-05-24-concurrent-bg-agent-only-one-completion) — agent
+
+### 事件丢失
+- [并发 Background Agent 只收到一次完成通知，父 Agent 永久等待](domains/agent.md#issue_2026-05-24-concurrent-bg-agent-only-one-completion) — agent
+
+### 竞态
+- [并发 Background Agent 只收到一次完成通知，父 Agent 永久等待](domains/agent.md#issue_2026-05-24-concurrent-bg-agent-only-one-completion) — agent
+
 ## 更新记录
 
+- 2026-05-25: 归档 4 个 issue，新增关键词索引
 - 2026-05-13: 首次创建，归档 22 个 issue，提取 14 条领域认知
 - 2026-05-14: 第二次归档，归档 12 个 issue，提取 8 条领域认知（agent 2 + message-pipeline 2 + system-prompt 4）
 - 2026-05-15: 第三次归档，归档 8 个 issue，提取 7 条领域认知（agent 3 + code-architecture 2 + message-pipeline 2 + tui 1）

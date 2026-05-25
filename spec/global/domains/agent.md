@@ -546,6 +546,29 @@ launch_agent 工具调用
 **涉及文件:** peri-agent/src/agent/events.rs, peri-middlewares/src/subagent/tool/define.rs, peri-acp/src/agent/builder.rs, peri-acp/src/session/executor.rs, peri-tui/src/app/agent.rs
 **CLAUDE.md 链接:** false
 
+### issue_2026-05-25-interrupt-undo-last-user-message
+
+**摘要:** Ctrl+C 中断后支持撤回并重发上一条用户消息
+**状态:** 已完成（5 层修复，已验证）
+**归档日期:** 2026-05-25
+**关键词:** Ctrl+C 中断, 消息撤回, 事件路由, 历史回滚, 索引漂移
+**问题本质:** 取消事件被错误路由到 Error 处理器（而非 Interrupted），消息撤回路径从未生效；缓存的 `round_start_vm_idx` 在 Pipeline RebuildAll 后失效
+**通用模式:** (1) 取消/中断语义必须独立于 Error，事件路由精确匹配 (2) 消息位置查找用 `rposition` 在 `view_messages` 中实时搜索，不依赖缓存索引 (3) 状态回滚（`state.history.truncate`）保证 ACP 层一致性
+**架构影响:** 触发了 5 层从 ACP Server → 事件路由 → 行为分叉 → VM 定位 → ephemeral_notes 过滤的纵贯修复
+**涉及文件:** acp_server/prompt.rs, agent.rs, agent_ops/lifecycle.rs, mod.rs, agent_render.rs
+**CLAUDE.md 链接:** true
+
+### issue_2026-05-24-concurrent-bg-agent-only-one-completion
+
+**摘要:** 并发 Background Agent 只收到一次完成通知，父 Agent 永久等待
+**状态:** 完成
+**归档日期:** 2026-05-25
+**关键词:** 并发 background agent, TOCTOU, 事件丢失, 竞态
+**问题本质:** `register()` 的计数检查与 `insert` 分两步执行（TOCTOU 窗口），两个并发 bg agent 可能同时通过检查；`SubagentStarted` 事件在注册前发送，注册失败留下幽灵计数
+**通用模式:** (1) 计数器和 map 插入在**同一持锁临界区**内完成 (2) 事件通知必须在状态变更**成功后**发送，注册失败不发事件 (3) 同名 agent 匹配需两遍查找——优先精确匹配（`final_result.is_none()`），兜底回退
+**涉及文件:** peri-middlewares/src/subagent/tool/define.rs, background.rs, agent_events_bg.rs
+**CLAUDE.md 链接:** true
+
 ---
 
 ## 相关 Feature

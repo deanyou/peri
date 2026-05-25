@@ -1,3 +1,5 @@
+> 归档于 2026-05-25，原路径 spec/issues/2026-05-25-interrupt-undo-last-user-message.md
+
 # Ctrl+C 中断后支持撤回并重发上一条用户消息
 
 **状态**：已完成（5 层修复，已验证）
