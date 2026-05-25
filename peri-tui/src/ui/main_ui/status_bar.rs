@@ -409,12 +409,14 @@ fn render_second_row(f: &mut Frame, app: &App, area: Rect) {
                 vec![
                     ("/".to_string(), lc.tr("key-command")),
                     ("Shift+Enter".to_string(), lc.tr("key-newline")),
+                    ("Ctrl+T".to_string(), lc.tr("key-switch-model")),
                     ("Ctrl+U/D".to_string(), lc.tr("key-scroll")),
                 ]
             } else {
                 vec![
                     ("/".to_string(), lc.tr("key-command")),
                     ("Shift+Enter".to_string(), lc.tr("key-newline")),
+                    ("Ctrl+T".to_string(), lc.tr("key-switch-model")),
                 ]
             };
             format_hints(&hints, key_style, desc_style)

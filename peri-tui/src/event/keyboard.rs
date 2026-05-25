@@ -53,6 +53,7 @@ impl KeyBinding {
     fn resolved_modifiers(&self) -> KeyModifiers {
         match self.label {
             "Alt+Shift+M" => KeyModifiers::ALT | KeyModifiers::SHIFT,
+            "Ctrl+Shift+T" => KeyModifiers::CONTROL | KeyModifiers::SHIFT,
             _ => self.modifiers,
         }
     }
@@ -73,6 +74,32 @@ static SHORTCUT_CYCLE_PROVIDER: KeyBinding = KeyBinding {
     modifiers: KeyModifiers::empty(), // resolved_modifiers() returns ALT|SHIFT
     key: KeyCode::Char('m'),
 };
+
+// Ctrl+T / Ctrl+Shift+T: cross-platform model/provider cycling.
+// Ctrl combos have no macOS composition issue, so macos_char is None.
+static SHORTCUT_CTRL_CYCLE_MODE: KeyBinding = KeyBinding {
+    label: "Ctrl+T",
+    macos_char: None,
+    modifiers: KeyModifiers::CONTROL,
+    key: KeyCode::Char('t'),
+};
+
+static SHORTCUT_CTRL_CYCLE_PROVIDER: KeyBinding = KeyBinding {
+    label: "Ctrl+Shift+T",
+    macos_char: None,
+    modifiers: KeyModifiers::empty(), // resolved_modifiers() returns CONTROL|SHIFT
+    key: KeyCode::Char('t'),
+};
+
+/// Returns the platform-appropriate label for the model-cycling shortcut.
+pub fn cycle_model_label() -> &'static str {
+    "Ctrl+T"
+}
+
+/// Returns the platform-appropriate label for the provider-cycling shortcut.
+pub fn cycle_provider_label() -> &'static str {
+    "Ctrl+Shift+T"
+}
 
 /// Handles a single key event, dispatching to panels, prompts, textarea, or
 /// application-level shortcuts. Returns an `Action` when a redraw or quit is
@@ -96,8 +123,8 @@ pub fn handle_key_event(
         return Ok(Some(Action::Redraw));
     }
 
-    // Alt+M cycles model aliases (opus → sonnet → haiku → opus)
-    if SHORTCUT_CYCLE_MODE.matches(&key_event) {
+    // Ctrl+T (universal) / Alt+M (macOS Option) cycles model aliases
+    if SHORTCUT_CTRL_CYCLE_MODE.matches(&key_event) || SHORTCUT_CYCLE_MODE.matches(&key_event) {
         if let Some(cfg) = app.services.peri_config.as_mut() {
             let aliases = ["opus", "sonnet", "haiku"];
             let current = cfg.config.active_alias.as_str();
@@ -121,8 +148,10 @@ pub fn handle_key_event(
         return Ok(Some(Action::Redraw));
     }
 
-    // Alt+Shift+M cycles providers
-    if SHORTCUT_CYCLE_PROVIDER.matches(&key_event) {
+    // Ctrl+Shift+T (universal) / Alt+Shift+M (macOS Option) cycles providers
+    if SHORTCUT_CTRL_CYCLE_PROVIDER.matches(&key_event)
+        || SHORTCUT_CYCLE_PROVIDER.matches(&key_event)
+    {
         if let Some(cfg) = app.services.peri_config.as_mut() {
             let providers = &cfg.config.providers;
             if providers.len() > 1 {
@@ -135,6 +164,63 @@ pub fn handle_key_event(
                 let next_provider = &providers[next_idx];
                 cfg.config.active_provider_id = next_provider.id.clone();
                 // 保持当前 alias，但需要确认新 provider 支持该 alias 的模型
+                if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
+                    app.services.provider_name = p.display_name().to_string();
+                    app.services.model_name = p.model_name().to_string();
+                }
+                if let Err(e) = App::save_config(cfg, app.services.config_path_override.as_deref())
+                {
+                    app.session_mgr.sessions[app.session_mgr.active]
+                        .messages
+                        .view_messages
+                        .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
+                }
+                app.services.sync_peri_config_to_acp();
+                app.global_ui.provider_highlight_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(2000));
+            }
+        }
+        return Ok(Some(Action::Redraw));
+    }
+
+    // Ctrl+T cycles model aliases (opus → sonnet → haiku → opus) — cross-platform
+    if SHORTCUT_CTRL_CYCLE_MODE.matches(&key_event) {
+        if let Some(cfg) = app.services.peri_config.as_mut() {
+            let aliases = ["opus", "sonnet", "haiku"];
+            let current = cfg.config.active_alias.as_str();
+            let idx = aliases.iter().position(|&a| a == current).unwrap_or(0);
+            let next = aliases[(idx + 1) % aliases.len()];
+            cfg.config.active_alias = next.to_string();
+            if let Err(e) = App::save_config(cfg, app.services.config_path_override.as_deref()) {
+                app.session_mgr.sessions[app.session_mgr.active]
+                    .messages
+                    .view_messages
+                    .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
+            }
+            if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
+                app.services.provider_name = p.display_name().to_string();
+                app.services.model_name = p.model_name().to_string();
+            }
+            app.services.sync_peri_config_to_acp();
+            app.global_ui.model_highlight_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
+        }
+        return Ok(Some(Action::Redraw));
+    }
+
+    // Ctrl+Shift+T cycles providers — cross-platform
+    if SHORTCUT_CTRL_CYCLE_PROVIDER.matches(&key_event) {
+        if let Some(cfg) = app.services.peri_config.as_mut() {
+            let providers = &cfg.config.providers;
+            if providers.len() > 1 {
+                let current_id = cfg.config.active_provider_id.as_str();
+                let idx = providers
+                    .iter()
+                    .position(|p| p.id == current_id)
+                    .unwrap_or(0);
+                let next_idx = (idx + 1) % providers.len();
+                let next_provider = &providers[next_idx];
+                cfg.config.active_provider_id = next_provider.id.clone();
                 if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
                     app.services.provider_name = p.display_name().to_string();
                     app.services.model_name = p.model_name().to_string();

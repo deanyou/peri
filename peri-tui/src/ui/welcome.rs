@@ -155,7 +155,10 @@ pub(crate) fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::DIM),
         ),
         Span::styled("  ", Style::default().fg(theme::DIM)),
-        Span::styled("Alt+M", Style::default().fg(theme::DIM)),
+        Span::styled(
+            crate::event::keyboard::cycle_model_label(),
+            Style::default().fg(theme::DIM),
+        ),
         Span::styled(
             lc.tr("welcome-shortcut-model"),
             Style::default().fg(theme::DIM),

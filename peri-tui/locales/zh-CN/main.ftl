@@ -43,7 +43,7 @@ help-available-commands = 可用命令：
 help-alias-prefix = （别名: /{ $aliases }）
 help-skills-count = Skills（{ $count } 个可用）: 输入 # 前缀查看
 help-skills-empty = Skills: 将 .md 文件放入 .claude/skills/ 目录即可添加
-help-shortcuts = 快捷键：Shift+Tab 切换权限模式 │ Shift+Enter 换行 │ Esc 退出 │ Ctrl+C 中断
+help-shortcuts = 快捷键：Shift+Tab 切换权限模式 │ Ctrl+T 切换模型 │ Shift+Enter 换行 │ Esc 退出 │ Ctrl+C 中断
 
 # compact command
 compact-agent-running = Agent 运行中，无法执行压缩
@@ -125,6 +125,7 @@ key-back = :返回
 key-install = :安装
 key-tab = :切换
 key-effort = :力度
+key-switch-model = :切换模型
 
 # ---- Welcome Page ----
 
@@ -146,7 +147,7 @@ welcome-skills-available = { $count } 个 skills 可用
 
 tip-0 = 按 / 输入命令，Tab 补全
 tip-1 = Ctrl+C 中断 Agent，Shift+Tab 切换权限模式
-tip-2 = Alt+M 快速切换模型（opus / sonnet / haiku）
+tip-2 = Ctrl+T 切换模型（opus / sonnet / haiku），Ctrl+Shift+T 切换 Provider
 tip-3 = Shift+Enter 在输入框中换行
 tip-4 = 拖拽文件或图片到终端可自动附加到消息
 tip-5 = 长按 Ctrl+V 粘贴剪贴板图片
