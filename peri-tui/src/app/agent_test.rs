@@ -49,3 +49,19 @@ fn test_map_executor_event_execution_failed() {
         _ => panic!("Expected AgentEvent::Error, got a different variant"),
     }
 }
+
+#[test]
+fn test_map_executor_event_interrupted() {
+    let event = ExecutorEvent::AgentExecutionFailed {
+        message: "Interrupted by user".to_string(),
+    };
+    let result = map_executor_event(event, "/tmp");
+    assert!(
+        result.is_some(),
+        "AgentExecutionFailed(Interrupted) should map to Some"
+    );
+    match result.unwrap() {
+        AgentEvent::Interrupted => {}
+        _ => panic!("Expected AgentEvent::Interrupted, got a different variant"),
+    }
+}
