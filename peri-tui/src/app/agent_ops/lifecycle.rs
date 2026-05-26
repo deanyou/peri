@@ -146,13 +146,22 @@ impl App {
         self.session_mgr.sessions[self.session_mgr.active]
             .agent
             .cancel_sent_at = None;
-        // Child agent interrupted during tool execution — ignore
+        // When parent agent is interrupted while executing a sync SubAgent,
+        // pipeline.in_subagent() returns true because the SubAgent UI state is active.
+        // Previously this was silently ignored, leaving the UI stuck in loading forever
+        // (only rescued by 5s cancel_sent_at timeout). Now we proceed with normal
+        // interrupt cleanup — the SubAgent's execute() was already dropped by the
+        // parent's tool_dispatch select! cancellation, so SubAgent state is irrelevant.
         if self.session_mgr.sessions[self.session_mgr.active]
             .messages
             .pipeline
             .in_subagent()
         {
-            return (false, false, false);
+            // Fall through to cleanup instead of returning early.
+            // The in_subagent() guard was designed to ignore *child agent* interruptions
+            // (e.g. a background agent being cancelled), but it also catches *parent agent*
+            // interruptions during sync SubAgent execution — which is the user's Ctrl+C intent.
+            tracing::info!("Parent agent interrupted during sync SubAgent — proceeding with cleanup");
         }
         // Pipeline：finalize 当前状态
         let actions = self.session_mgr.sessions[self.session_mgr.active]
