@@ -120,7 +120,7 @@ pub(crate) fn render_config_panel(f: &mut Frame, panel: &ConfigPanel, app: &mut 
                 let inactive_style = Style::default().fg(theme::MUTED);
                 let desc_style = Style::default().fg(theme::MUTED);
 
-                let options = ["auto", "en", "zh-CN"];
+                let options = ["en", "zh-CN"];
                 let mut value_spans: Vec<Span> = Vec::new();
                 for (i, code) in options.iter().enumerate() {
                     let display = lang_display(code);

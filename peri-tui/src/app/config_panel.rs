@@ -115,15 +115,22 @@ impl ConfigPanel {
     }
 
     /// 可选语言列表："" (auto) → "en" → "zh-CN" → ""
-    const LANGUAGE_OPTIONS: &[&str] = &["", "en", "zh-CN"];
+    const LANGUAGE_OPTIONS: &[&str] = &["en", "zh-CN"];
 
     pub fn cycle_language(&mut self, reverse: bool) {
         let current = self.buf_language.as_str();
-        let pos = Self::LANGUAGE_OPTIONS.iter().position(|&o| o == current).unwrap_or(0);
-        let next = if reverse {
-            if pos == 0 { Self::LANGUAGE_OPTIONS.len() - 1 } else { pos - 1 }
-        } else {
-            (pos + 1) % Self::LANGUAGE_OPTIONS.len()
+        let next = match Self::LANGUAGE_OPTIONS.iter().position(|&o| o == current) {
+            Some(p) => {
+                if reverse {
+                    if p == 0 { Self::LANGUAGE_OPTIONS.len() - 1 } else { p - 1 }
+                } else {
+                    (p + 1) % Self::LANGUAGE_OPTIONS.len()
+                }
+            }
+            // 未匹配时：forward → 第一个，reverse → 最后一个
+            None => {
+                if reverse { Self::LANGUAGE_OPTIONS.len() - 1 } else { 0 }
+            }
         };
         self.buf_language = Self::LANGUAGE_OPTIONS[next].to_string();
     }
@@ -183,7 +190,7 @@ impl ConfigPanel {
     pub fn apply_edit(
         &mut self,
         cfg: &mut PeriConfig,
-        lc: &crate::i18n::LcRegistry,
+        _lc: &crate::i18n::LcRegistry,
     ) -> Result<(), String> {
         // autocompact + threshold
         let compact = cfg

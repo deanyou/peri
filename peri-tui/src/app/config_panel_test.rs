@@ -85,22 +85,19 @@ fn test_config_panel_cycle_autocompact() {
 #[test]
 fn test_config_panel_cycle_language() {
     let mut panel = ConfigPanel::from_config(&PeriConfig::default());
-    // "" → "en"
+    // 默认 empty，position 找不到 → fallback index 0 → first cycle 到 "en"
     assert!(panel.buf_language.is_empty());
     panel.cycle_language(false);
     assert_eq!(panel.buf_language, "en");
     // "en" → "zh-CN"
     panel.cycle_language(false);
     assert_eq!(panel.buf_language, "zh-CN");
-    // "zh-CN" → ""
+    // "zh-CN" → "en" (wrap)
     panel.cycle_language(false);
-    assert!(panel.buf_language.is_empty());
-    // reverse: "" → "zh-CN"
+    assert_eq!(panel.buf_language, "en");
+    // reverse: "en" → "zh-CN"
     panel.cycle_language(true);
     assert_eq!(panel.buf_language, "zh-CN");
-    // reverse: "zh-CN" → "en"
-    panel.cycle_language(true);
-    assert_eq!(panel.buf_language, "en");
 }
 
 #[test]
