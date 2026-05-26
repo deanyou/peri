@@ -112,6 +112,7 @@ pub fn search_files(cwd: &str, query: &str) -> Vec<FileCandidate> {
 }
 
 /// 计算所有候选路径的公共前缀（用于 Tab 补全）
+#[allow(dead_code)]
 pub fn find_common_prefix(candidates: &[FileCandidate]) -> Option<String> {
     if candidates.is_empty() {
         return None;
