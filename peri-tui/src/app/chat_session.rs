@@ -14,7 +14,7 @@ use crate::thread::ThreadId;
 
 /// 正在运行的后台 SubAgent
 #[derive(Clone, Debug)]
-pub(crate) struct RunningBgAgent {
+pub struct RunningBgAgent {
     pub agent_name: String,
     pub instance_id: String,
     pub started_at: Instant,

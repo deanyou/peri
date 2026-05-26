@@ -7,7 +7,7 @@
 //!   polling.rs   — poll_agent, poll_background_events, poll_cron_triggers
 
 use super::*;
-
+use super::agent_events_bg::BackgroundTaskResult;
 mod acp_bridge;
 mod lifecycle;
 mod polling;
@@ -332,7 +332,7 @@ impl App {
                 tool_calls_count,
                 duration_ms,
                 child_thread_id,
-            } => self.handle_background_task_completed(
+            } => self.handle_background_task_completed(BackgroundTaskResult {
                 task_id,
                 agent_name,
                 success,
@@ -340,7 +340,7 @@ impl App {
                 tool_calls_count,
                 duration_ms,
                 child_thread_id,
-            ),
+            }),
             AgentEvent::LspDiagnostics {
                 errors,
                 warnings,

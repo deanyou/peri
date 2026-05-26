@@ -2,6 +2,17 @@ use super::message_pipeline::PipelineAction;
 use super::*;
 use crate::ui::message_view::MessageViewModel;
 
+/// 后台任务完成的事件参数
+pub(crate) struct BackgroundTaskResult {
+    pub task_id: String,
+    pub agent_name: String,
+    pub success: bool,
+    pub output: String,
+    pub tool_calls_count: usize,
+    pub duration_ms: u64,
+    pub child_thread_id: Option<String>,
+}
+
 /// 构建后台任务完成的显示通知文本（截断版，供 UI 展示）
 fn build_bg_display_notification(
     task_id: &str,
@@ -51,14 +62,17 @@ fn build_bg_display_notification(
 impl App {
     pub(crate) fn handle_background_task_completed(
         &mut self,
-        task_id: String,
-        agent_name: String,
-        success: bool,
-        output: String,
-        tool_calls_count: usize,
-        duration_ms: u64,
-        child_thread_id: Option<String>,
+        result: BackgroundTaskResult,
     ) -> (bool, bool, bool) {
+        let BackgroundTaskResult {
+            task_id,
+            agent_name,
+            success,
+            output,
+            tool_calls_count,
+            duration_ms,
+            child_thread_id,
+        } = result;
         // 优先按 child_thread_id 匹配 background_agents，回退到 agent_name
         if let Some(ref ctid) = child_thread_id {
             if let Some(pos) = self.session_mgr.sessions[self.session_mgr.active]
