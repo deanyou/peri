@@ -272,6 +272,40 @@ fn render_session_column(
         }
     }
 
+    // 聚焦模式输入框样式
+    let focused_id = app.session_mgr.sessions[session_idx]
+        .focused_instance_id
+        .clone();
+    if let Some(ref id) = focused_id {
+        let agents = &app.session_mgr.sessions[session_idx].background_agents;
+        let color_idx = agents.iter().position(|a| a.instance_id == *id);
+        let color = color_idx
+            .map(bg_agent_bar::agent_color)
+            .unwrap_or(ratatui::style::Color::Cyan);
+        let agent_name = agents
+            .iter()
+            .find(|a| a.instance_id == *id)
+            .map(|a| a.agent_name.as_str())
+            .unwrap_or("agent");
+        let title = format!("[{}]", agent_name);
+        let block = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(ratatui::style::Style::default().fg(color))
+            .title(title);
+        app.session_mgr.sessions[session_idx]
+            .ui
+            .textarea
+            .set_block(block);
+    } else {
+        let block = ratatui::widgets::Block::default()
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(ratatui::style::Style::default());
+        app.session_mgr.sessions[session_idx]
+            .ui
+            .textarea
+            .set_block(block);
+    }
+
     // 输入框：非聚焦 session 或应用失焦时隐藏光标（移除 REVERSED 修饰符）
     let textarea_ref = &app.session_mgr.sessions[session_idx].ui.textarea;
     // 应用失焦 或 当前 session 未激活 → 隐藏光标

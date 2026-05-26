@@ -737,6 +737,13 @@ impl MessagePipeline {
         self.completed_tools.clear();
     }
 
+    /// 根据聚焦的 agent instance_id 过滤 VM 列表
+    /// 第一版实现：保留所有消息，聚焦模式仅影响输入框样式
+    pub fn filter_for_focus(_vms: &mut Vec<MessageViewModel>, _focused_instance_id: Option<&str>) {
+        // TODO: 精确过滤需要在 SubAgentGroup 中存储 instance_id
+        // 当前 SubAgentGroup 仅有 bg_hash，无法精确匹配
+    }
+
     /// 从外部加载全量 BaseMessages（用于历史恢复后覆盖），并清除所有状态
     pub fn restore_completed(&mut self, msgs: Vec<BaseMessage>) {
         self.completed = msgs;
