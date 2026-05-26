@@ -118,6 +118,8 @@ pub(crate) async fn execute_prompt(
         is_git_repo: std::path::Path::new(&cwd).join(".git").exists(),
     });
 
+    // Keep a reference for the cancel-with-progress path (history is moved below)
+    let history_for_cancel = history.clone();
     let result = executor::execute_prompt(
         &provider_snapshot,
         peri_config_snapshot,
@@ -162,10 +164,36 @@ pub(crate) async fn execute_prompt(
                     }
                 }
                 state.history = result.messages;
+            } else if result.stop_reason == executor::PromptStopReason::Cancelled
+                && result.messages.len() > history_len + 1
+            {
+                // Cancelled but agent made progress (user msg + AI/tool messages beyond
+                // just the user message). Preserve history so the agent remembers the
+                // interrupted round's context on the next prompt.
+                //
+                // NOTE: execute() skips cleanup_prepended on error paths (? propagation),
+                // so result.messages may contain leaked system prepends at the beginning.
+                // Strip them by locating where the original history starts (ID matching).
+                let cleaned = strip_leaked_prepends(&result.messages, &history_for_cancel);
+                let new_count = cleaned.len().saturating_sub(history_len);
+                // Persist newly added messages to ThreadStore
+                if new_count > 0 && history_len < cleaned.len() {
+                    let new_msgs = &cleaned[history_len..];
+                    if let Err(e) = thread_store.append_messages(&thread_id, new_msgs).await {
+                        tracing::warn!(error = %e, "Failed to persist cancelled-round messages");
+                    }
+                }
+                state.history = cleaned;
+                info!(
+                    session_id = %session_id,
+                    history_len,
+                    new_count,
+                    "Agent cancelled with progress, preserving history"
+                );
             } else {
-                // Execution failed or was cancelled — roll back to pre-submit state.
-                // This prevents the cancelled round's user message + partial AI response
-                // from appearing in the next prompt's context.
+                // Execution failed, cancelled early (no tool calls), or MaxIterationsExceeded.
+                // Roll back to pre-submit state — the TUI's handle_interrupted will also
+                // truncate view_messages and restore text to input for the no-tool-call case.
                 state.history.truncate(history_len);
                 info!(session_id = %session_id, history_len, "Agent execution failed/cancelled, rolled back history");
             }
@@ -182,3 +210,40 @@ pub(crate) async fn execute_prompt(
     let resp = PromptResponse::new(acp_stop_reason);
     serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
 }
+
+/// Strip leaked system prepend messages from the agent's result messages.
+///
+/// When `execute()` returns via `?` propagation (cancel/error), `cleanup_prepended` is
+/// not called, leaving system messages (from `before_agent` + `with_system_prompt`) at
+/// the head of the message list. This function finds where the original history begins
+/// (by matching the first message ID) and returns messages from that point onward.
+fn strip_leaked_prepends(
+    result_messages: &[peri_agent::messages::BaseMessage],
+    original_history: &[peri_agent::messages::BaseMessage],
+) -> Vec<peri_agent::messages::BaseMessage> {
+    match original_history.first() {
+        Some(first) => {
+            // Find where original history starts in result (skip leaked prepends)
+            match result_messages.iter().position(|m| m.id() == first.id()) {
+                Some(start) => result_messages[start..].to_vec(),
+                None => {
+                    // Original history not found — compact may have replaced messages.
+                    // Return as-is (no stripping).
+                    result_messages.to_vec()
+                }
+            }
+        }
+        None => {
+            // Original history was empty — strip leading system messages (all prepends)
+            result_messages
+                .iter()
+                .skip_while(|m| m.is_system())
+                .cloned()
+                .collect()
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "prompt_test.rs"]
+mod tests;
