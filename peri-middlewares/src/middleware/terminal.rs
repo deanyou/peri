@@ -4,7 +4,6 @@ use peri_agent::middleware::r#trait::Middleware;
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
 use std::process::Stdio;
-use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 use crate::tools::output_persist::persist_truncated_output;
@@ -157,22 +156,12 @@ impl BaseTool for BashTool {
         let _description = input["description"].as_str();
         let _run_in_background = input["run_in_background"].as_bool().unwrap_or(false);
 
-        let (shell, flag) = if cfg!(target_os = "windows") {
-            ("cmd", "/C")
-        } else {
-            ("bash", "-c")
-        };
-
         let result = timeout(Duration::from_millis(timeout_ms), {
-            let mut cmd = Command::new(shell);
-            cmd.arg(flag)
-                .arg(command)
-                .current_dir(&self.cwd)
+            let mut cmd = crate::process::shell_command(&command, &[]);
+            cmd.current_dir(&self.cwd)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                // 超时时 future 被 drop → Child 被 drop → 自动 SIGKILL 终止子进程
                 .kill_on_drop(true);
-            // Unix: 将子进程放入独立进程组，确保超时时能杀掉整个进程树（含 bash 子进程）
             #[cfg(unix)]
             cmd.process_group(0);
             cmd.output()

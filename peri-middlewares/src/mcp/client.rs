@@ -349,9 +349,9 @@ pub(crate) fn spawn_stdio_transport(
 ) -> std::io::Result<rmcp::transport::child_process::TokioChildProcess> {
     use std::process::Stdio;
 
-    // 使用 builder 模式以获取 stderr 句柄
-    let mut cmd = tokio::process::Command::new(command);
-    cmd.args(args).envs(env);
+    let arg_strs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let mut cmd = crate::process::shell_command(command, &arg_strs);
+    cmd.envs(env);
 
     let builder = rmcp::transport::child_process::TokioChildProcess::builder(cmd)
         .stdin(Stdio::piped())

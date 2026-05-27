@@ -26,17 +26,13 @@ pub async fn execute_command_hook(
     input: &HookInput,
     registered: &RegisteredHook,
 ) -> HookAction {
-    let (command, shell, timeout_secs) = match hook {
+    let (command, _shell, timeout_secs) = match hook {
         HookType::Command {
             command,
             shell,
             timeout,
             ..
-        } => (
-            command.clone(),
-            shell.clone().unwrap_or_else(|| "bash".to_string()),
-            timeout.unwrap_or(600),
-        ),
+        } => (command.clone(), shell.clone(), timeout.unwrap_or(600)),
         _ => {
             return HookAction::Allow;
         }
@@ -63,10 +59,8 @@ pub async fn execute_command_hook(
     let hook_event_str = format!("{:?}", input.hook_event_name);
 
     let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-        let mut cmd = tokio::process::Command::new(&shell);
-        cmd.arg("-c")
-            .arg(&command)
-            .stdin(Stdio::piped())
+        let mut cmd = crate::process::shell_command(&command, &[]);
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("CLAUDE_PROJECT_DIR", &input.cwd)
