@@ -13,6 +13,8 @@ syntect = { version = "5", default-features = false, features = [
 once_cell = "1"
 unicode-width = "0.2"
 rand = "0.10"
+similar = "2"
+lru = "0.12"
 
 [features]
 default = []

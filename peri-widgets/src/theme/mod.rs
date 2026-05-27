@@ -59,16 +59,32 @@ pub trait Theme: Send + Sync + 'static {
     }
 
     // ── Diff 高亮色 ─────────────────────────────────────────
-    /// Diff 新增行颜色
+    /// Diff 新增行前景色
     fn diff_add(&self) -> Color {
-        Color::Rgb(110, 181, 106)
-    } // DIFF_ADD #6EB56A
-    /// Diff 删除行颜色
+        Color::Rgb(63, 185, 80)
+    } // DIFF_ADD #3FB950
+    /// Diff 新增行背景色
+    fn diff_add_bg(&self) -> Color {
+        Color::Rgb(18, 52, 26)
+    } // DIFF_ADD_BG #12341A
+    /// Diff 新增单词高亮背景色
+    fn diff_add_word_bg(&self) -> Color {
+        Color::Rgb(26, 78, 36)
+    } // DIFF_ADD_WORD_BG #1A4E24
+    /// Diff 删除行前景色
     fn diff_remove(&self) -> Color {
-        Color::Rgb(204, 70, 62)
-    } // DIFF_REMOVE #CC463E
+        Color::Rgb(248, 81, 73)
+    } // DIFF_REMOVE #F85149
+    /// Diff 删除行背景色
+    fn diff_remove_bg(&self) -> Color {
+        Color::Rgb(55, 20, 18)
+    } // DIFF_REMOVE_BG #371412
+    /// Diff 删除单词高亮背景色
+    fn diff_remove_word_bg(&self) -> Color {
+        Color::Rgb(78, 28, 22)
+    } // DIFF_REMOVE_WORD_BG #4E1C16
     /// Diff hunk 头部颜色
     fn diff_hunk(&self) -> Color {
-        Color::Cyan
-    } // DIFF_HUNK 青色
+        Color::Rgb(87, 143, 169)
+    } // DIFF_HUNK #578FA9
 }

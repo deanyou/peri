@@ -130,6 +130,7 @@ impl MessagePipeline {
             is_error: false,
             collapsed: true,
             color: tool_color(name),
+            diff_lines: None,
         }
     }
 }

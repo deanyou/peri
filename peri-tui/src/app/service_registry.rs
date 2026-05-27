@@ -19,6 +19,8 @@ pub struct ProcessResourceMonitor {
     last_sample: std::time::Instant,
     /// 缓存的内存使用量（MB）
     memory_mb: u64,
+    /// 缓存的 CPU 占用百分比（0.0-100.0，单核；可超过 100 表示多核）
+    cpu_percent: f32,
 }
 
 impl ProcessResourceMonitor {
@@ -31,6 +33,7 @@ impl ProcessResourceMonitor {
             pid,
             last_sample: std::time::Instant::now() - std::time::Duration::from_secs(3), // 确保首次调用立即采样
             memory_mb: 0,
+            cpu_percent: 0.0,
         }
     }
 
@@ -41,6 +44,7 @@ impl ProcessResourceMonitor {
                 .refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.pid]), true);
             if let Some(proc) = self.sys.process(self.pid) {
                 self.memory_mb = proc.memory() / 1024 / 1024;
+                self.cpu_percent = proc.cpu_usage();
             }
             self.last_sample = std::time::Instant::now();
         }
@@ -48,6 +52,10 @@ impl ProcessResourceMonitor {
 
     pub fn memory_mb(&self) -> u64 {
         self.memory_mb
+    }
+
+    pub fn cpu_percent(&self) -> f32 {
+        self.cpu_percent
     }
 }
 

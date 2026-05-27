@@ -1,5 +1,6 @@
 pub mod bordered_panel;
 pub mod checkbox_group;
+pub mod diff;
 pub mod form;
 pub mod input_field;
 pub mod list;
@@ -18,6 +19,7 @@ pub mod markdown;
 // 重导出核心类型
 pub use bordered_panel::BorderedPanel;
 pub use checkbox_group::{CheckboxGroup, CheckboxState};
+pub use diff::{DiffHunk, DiffInput, DiffLine, DiffResult, DiffWordType, WordDiff};
 pub use form::{FormField, FormState};
 pub use input_field::{InputField, InputFieldStyle, InputState};
 pub use list::{ListState, SelectableList};

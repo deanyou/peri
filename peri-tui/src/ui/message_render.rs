@@ -250,6 +250,7 @@ pub fn render_view_model(
             color: _color,
             is_error,
             tool_name,
+            diff_lines,
             ..
         } => {
             // AskUserQuestion 专用渲染路径
@@ -336,6 +337,10 @@ pub fn render_view_model(
                 }
             } else if *is_error && !content.is_empty() {
                 lines.extend(error_summary_lines(content));
+            }
+            // 内嵌 diff 视图（预渲染缓存）
+            if let Some(ref cached_lines) = diff_lines {
+                lines.extend(cached_lines.iter().cloned());
             }
             lines
         }

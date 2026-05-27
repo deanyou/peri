@@ -28,6 +28,8 @@ pub struct UiState {
     pub scrollbar_dragging: bool,
     /// 消息区域滚动条的最大偏移量（内容高度 - 可见高度）
     pub scrollbar_max_offset: u16,
+    /// 滚动条拖拽时，鼠标点击位置相对于 thumb 顶部的行偏移
+    pub scrollbar_drag_y_offset: u16,
     /// Panel scrollbar geometry for mouse interaction
     pub panel_scrollbar_metrics: Option<ScrollbarMetrics>,
     /// Whether user is currently dragging the panel scrollbar
@@ -65,6 +67,7 @@ impl UiState {
             panel_scroll_offset: 0,
             scrollbar_dragging: false,
             scrollbar_max_offset: 0,
+            scrollbar_drag_y_offset: 0,
             panel_scrollbar_metrics: None,
             panel_scrollbar_dragging: false,
             at_mention: AtMentionState::new(),

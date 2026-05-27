@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use crate::ui::theme;
 use peri_agent::messages::{BaseMessage, ContentBlock};
 use ratatui::style::Color;
-use ratatui::text::Text;
+use ratatui::text::{Line, Text};
 
 use super::markdown::parse_markdown_default;
 
@@ -15,6 +15,62 @@ pub use aggregate::{aggregate_batch_groups, aggregate_tail_tool_groups, aggregat
 pub(crate) use tools::parse_subagent_tool_count;
 pub use tools::{tool_color, AgentSummary, ToolCategory, ToolEntry};
 pub(crate) use utils::{instance_hash, parse_bg_hash};
+
+/// 从工具名和入参构造预渲染的 diff 行（仅 Write/Edit 工具）
+fn build_diff_lines(name: &str, input: &serde_json::Value) -> Option<Vec<Line<'static>>> {
+    let diff_input = match name {
+        "Edit" => {
+            let old_string = input
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_string = input
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let file_path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if old_string.is_empty() || file_path.is_empty() {
+                return None;
+            }
+            Some(peri_widgets::DiffInput {
+                file_path: file_path.to_string(),
+                old_content: old_string.to_string(),
+                new_content: new_string.to_string(),
+                is_new_file: false,
+                is_deleted_file: false,
+                is_binary: false,
+            })
+        }
+        "Write" => {
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let file_path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if content.is_empty() || file_path.is_empty() {
+                return None;
+            }
+            Some(peri_widgets::DiffInput {
+                file_path: file_path.to_string(),
+                old_content: String::new(),
+                new_content: content.to_string(),
+                is_new_file: true,
+                is_deleted_file: false,
+                is_binary: false,
+            })
+        }
+        _ => None,
+    }?;
+    let lines = peri_widgets::diff::render_diff(&diff_input, 80, &peri_widgets::DarkTheme);
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines)
+    }
+}
 
 /// 渲染层的视图模型，从 BaseMessage/AgentEvent 转换而来
 #[derive(Debug, Clone)]
@@ -43,6 +99,8 @@ pub enum MessageViewModel {
         is_error: bool,
         collapsed: bool,
         color: Color,
+        /// 内嵌 diff 视图（Write/Edit 工具执行成功后填充，预渲染缓存）
+        diff_lines: Option<Vec<Line<'static>>>,
     },
     /// 系统消息
     SystemNote { content: String },
@@ -103,6 +161,7 @@ impl PartialEq for MessageViewModel {
                     args_display: a_args,
                     content: a_content,
                     is_error: a_err,
+                    diff_lines: a_diff,
                     ..
                 },
                 MessageViewModel::ToolBlock {
@@ -111,6 +170,7 @@ impl PartialEq for MessageViewModel {
                     args_display: b_args,
                     content: b_content,
                     is_error: b_err,
+                    diff_lines: b_diff,
                     ..
                 },
             ) => {
@@ -119,6 +179,7 @@ impl PartialEq for MessageViewModel {
                     && a_args == b_args
                     && a_content == b_content
                     && a_err == b_err
+                    && a_diff == b_diff
             }
             (
                 MessageViewModel::SystemNote { content: a },
@@ -212,6 +273,7 @@ impl Hash for MessageViewModel {
                 content,
                 is_error,
                 collapsed,
+                diff_lines,
                 ..
             } => {
                 2u8.hash(state);
@@ -222,6 +284,7 @@ impl Hash for MessageViewModel {
                 content.hash(state);
                 is_error.hash(state);
                 collapsed.hash(state);
+                diff_lines.hash(state);
             }
             MessageViewModel::SystemNote { content } => {
                 3u8.hash(state);
@@ -541,6 +604,12 @@ impl MessageViewModel {
                 } else {
                     tool_color(&tool_name)
                 };
+                // diff_lines：从工具入参构造（仅成功的 Write/Edit）
+                let diff_lines = if *is_error {
+                    None
+                } else {
+                    build_diff_lines(&tool_name, &input)
+                };
                 MessageViewModel::ToolBlock {
                     tool_name,
                     tool_call_id: tool_call_id.clone(),
@@ -550,6 +619,7 @@ impl MessageViewModel {
                     is_error: *is_error,
                     collapsed: true,
                     color,
+                    diff_lines,
                 }
             }
             BaseMessage::System { content, .. } => MessageViewModel::SystemNote {
@@ -668,6 +738,7 @@ impl MessageViewModel {
             is_error,
             collapsed: true,
             color,
+            diff_lines: None,
         }
     }
 

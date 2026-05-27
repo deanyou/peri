@@ -1392,3 +1392,150 @@ fn test_no_duplicate_subagent_state_on_tool_start_plus_subagent_start() {
         "ToolEnd 不应产生额外的 frozen VM"
     );
 }
+
+// ─── diff_lines 集成测试 ──────────────────────────────────────────────────
+
+/// 测试：Edit 工具的 ToolEnd 产生 diff_lines（old_content/new_content/file_path）
+#[test]
+fn test_edit_tool_end_produces_diff_lines() {
+    let mut pipeline = MessagePipeline::new("/tmp".to_string());
+
+    // Arrange：发送 AssistantChunk + ToolStart + ToolEnd
+    pipeline.handle_event(AgentEvent::AssistantChunk {
+        chunk: "I'll edit the file".into(),
+        source_agent_id: None,
+    });
+    pipeline.handle_event(AgentEvent::ToolStart {
+        tool_call_id: "tc_edit1".into(),
+        name: "Edit".into(),
+        display: "Edit".into(),
+        args: "src/main.rs".into(),
+        input: json!({
+            "file_path": "/tmp/src/main.rs",
+            "old_string": "fn old() {}",
+            "new_string": "fn new() {}"
+        }),
+        source_agent_id: None,
+    });
+    pipeline.handle_event(AgentEvent::ToolEnd {
+        tool_call_id: "tc_edit1".into(),
+        name: "Edit".into(),
+        output: "Replaced text".into(),
+        is_error: false,
+        source_agent_id: None,
+    });
+
+    // Act：build_tail_vms 从 completed_tools 构建 ToolBlock
+    let tail_vms = pipeline.build_tail_vms();
+
+    // Assert：找到 Edit ToolBlock，验证 diff_lines 有值且内容正确
+    let edit_block = tail_vms.iter().find(
+        |vm| matches!(vm, MessageViewModel::ToolBlock { tool_name, .. } if tool_name == "Edit"),
+    );
+    assert!(
+        edit_block.is_some(),
+        "应包含 Edit ToolBlock，实际 VMs: {:?}",
+        tail_vms
+    );
+
+    if let MessageViewModel::ToolBlock { diff_lines, .. } = edit_block.unwrap() {
+        let lines = diff_lines
+            .as_ref()
+            .expect("Edit 工具应产生 diff_lines（预渲染行）");
+        assert!(!lines.is_empty(), "Edit diff 应至少有 1 行渲染输出");
+        // 验证渲染行中包含文件路径
+        let combined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.clone()))
+            .collect();
+        assert!(
+            combined.contains("/tmp/src/main.rs"),
+            "diff 渲染应包含文件路径，实际: {}",
+            combined
+        );
+    }
+}
+
+/// 测试：非 Edit/Write 工具不产生 diff_lines
+#[test]
+fn test_non_edit_tool_no_diff_lines() {
+    let mut pipeline = MessagePipeline::new("/tmp".to_string());
+
+    // Arrange：发送 Bash 工具的 ToolStart + ToolEnd
+    pipeline.handle_event(AgentEvent::ToolStart {
+        tool_call_id: "tc_bash1".into(),
+        name: "Bash".into(),
+        display: "Bash".into(),
+        args: "ls -la".into(),
+        input: json!({"command": "ls -la"}),
+        source_agent_id: None,
+    });
+    pipeline.handle_event(AgentEvent::ToolEnd {
+        tool_call_id: "tc_bash1".into(),
+        name: "Bash".into(),
+        output: "file1.txt\nfile2.txt".into(),
+        is_error: false,
+        source_agent_id: None,
+    });
+
+    // Act
+    let tail_vms = pipeline.build_tail_vms();
+
+    // Assert：Bash ToolBlock 的 diff_lines 应为 None
+    let bash_block = tail_vms.iter().find(
+        |vm| matches!(vm, MessageViewModel::ToolBlock { tool_name, .. } if tool_name == "Bash"),
+    );
+    assert!(bash_block.is_some(), "应包含 Bash ToolBlock");
+
+    if let MessageViewModel::ToolBlock { diff_lines, .. } = bash_block.unwrap() {
+        assert!(
+            diff_lines.is_none(),
+            "Bash 工具不应产生 diff_lines，实际: {:?}",
+            diff_lines
+        );
+    }
+}
+
+/// 测试：is_error=true 的 ToolEnd 不产生 diff_lines（即使工具名是 Edit）
+#[test]
+fn test_error_tool_end_no_diff_lines() {
+    let mut pipeline = MessagePipeline::new("/tmp".to_string());
+
+    // Arrange：Edit 工具执行失败
+    pipeline.handle_event(AgentEvent::ToolStart {
+        tool_call_id: "tc_err1".into(),
+        name: "Edit".into(),
+        display: "Edit".into(),
+        args: "missing.rs".into(),
+        input: json!({
+            "file_path": "/tmp/missing.rs",
+            "old_string": "old code",
+            "new_string": "new code"
+        }),
+        source_agent_id: None,
+    });
+    pipeline.handle_event(AgentEvent::ToolEnd {
+        tool_call_id: "tc_err1".into(),
+        name: "Edit".into(),
+        output: "File not found".into(),
+        is_error: true,
+        source_agent_id: None,
+    });
+
+    // Act
+    let tail_vms = pipeline.build_tail_vms();
+
+    // Assert：错误 ToolBlock 的 diff_lines 应为 None
+    let err_block = tail_vms.iter().find(|vm| {
+        matches!(vm, MessageViewModel::ToolBlock { tool_name, is_error, .. } if tool_name == "Edit" && *is_error)
+    });
+    assert!(err_block.is_some(), "应包含 Edit 错误 ToolBlock");
+
+    if let MessageViewModel::ToolBlock { diff_lines, .. } = err_block.unwrap() {
+        assert!(
+            diff_lines.is_none(),
+            "错误 ToolEnd 不应产生 diff_lines，实际: {:?}",
+            diff_lines
+        );
+    }
+}

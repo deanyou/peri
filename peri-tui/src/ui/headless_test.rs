@@ -1609,6 +1609,7 @@ async fn test_tool_call_widget_renders_completed() {
         color: crate::ui::theme::SAGE,
         is_error: false,
         collapsed: false,
+        diff_lines: None,
     };
 
     let lines = crate::ui::message_render::render_view_model(&vm, Some(1), 80);
@@ -2390,6 +2391,7 @@ fn test_tool_block_error_visible_when_collapsed() {
         is_error: true,
         collapsed: true,
         color: crate::ui::theme::ERROR,
+        diff_lines: None,
     };
     let lines = render_view_model(&vm, Some(1), 80);
     // header + 2 error summary lines (content has 2 lines)
@@ -2422,6 +2424,7 @@ fn test_tool_block_success_no_summary_when_collapsed() {
         is_error: false,
         collapsed: true,
         color: crate::ui::theme::SAGE,
+        diff_lines: None,
     };
     let lines = render_view_model(&vm, Some(1), 80);
     assert_eq!(
