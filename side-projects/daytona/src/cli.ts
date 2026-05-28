@@ -5,7 +5,9 @@
 import { Command } from "commander";
 import { runInit } from "./commands/init";
 import { runCreate } from "./commands/create";
+import { runList } from "./commands/list";
 import { askPeri } from "./commands/ask";
+import { parseParamsArg } from "./daytona-helpers";
 
 const program = new Command();
 
@@ -17,15 +19,25 @@ program
 program
     .command("init")
     .description("初始化 Daytona 连接")
-    .action(async () => {
-        await runInit();
+    .option("--params <json>", "JSON 参数，跳过交互（{apiKey, apiUrl}）")
+    .action(async (opts) => {
+        await runInit(opts.params ? parseParamsArg(opts.params) : undefined);
     });
 
 program
     .command("create")
-    .description("创建新沙箱（交互式填表）")
+    .description("创建新沙箱")
+    .option("--params <json>", "JSON 参数，跳过交互（{name, gitUrl, snapshot, config}）")
+    .action(async (opts) => {
+        await runCreate(opts.params ? parseParamsArg(opts.params) : undefined);
+    });
+
+program
+    .command("list")
+    .alias("ls")
+    .description("列出所有沙箱")
     .action(async () => {
-        await runCreate();
+        await runList();
     });
 
 program

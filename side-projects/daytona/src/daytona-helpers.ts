@@ -142,3 +142,21 @@ export function loadConfig(configPath: string): Record<string, unknown> {
     console.log(`[配置] 未找到 ${configPath}，使用空配置`);
     return {};
 }
+
+// ---------------------------------------------------------------------------
+// --params 解析
+// ---------------------------------------------------------------------------
+
+/** 解析 --params JSON 字符串，提供后跳过交互式填表 */
+export function parseParamsArg(raw: string): Record<string, string> {
+    try {
+        const obj = JSON.parse(raw);
+        if (typeof obj !== "object" || obj === null) {
+            throw new Error("params 必须是 JSON 对象");
+        }
+        return obj as Record<string, string>;
+    } catch (err) {
+        console.error(`--params JSON 解析失败: ${err instanceof Error ? err.message : err}`);
+        process.exit(1);
+    }
+}

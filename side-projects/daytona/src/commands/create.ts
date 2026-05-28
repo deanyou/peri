@@ -12,72 +12,79 @@ import {
     ensureDaytonaEnv,
 } from "../daytona-helpers";
 
+export interface CreateParams {
+    name?: string;
+    gitUrl?: string;
+    snapshot?: string;
+    config?: string;
+}
+
 const DEFAULT_NAME = "Perihelion Sandbox";
 const DEFAULT_GIT_URL = "https://github.com/KonghaYao/peri.git";
 const DEFAULT_CONFIG_PATH = "./settings.json";
 
-export async function runCreate(): Promise<void> {
+export async function runCreate(params?: CreateParams): Promise<void> {
     ensureDaytonaEnv();
-
-    console.log("\n创建 Daytona Sandbox\n");
 
     const daytona = new Daytona();
 
-    // Step 0: 选择快照（仅 daytona- 前缀）
+    let name: string;
+    let gitUrl: string;
+    let configPath: string;
     let snapshotName: string | undefined;
-    const snapshots = await daytona.snapshot.list(1, 50);
-    const filtered = snapshots.items.filter((s) => s.name.startsWith("daytona-"));
-    if (filtered.length > 0) {
-        const choice = await search<string | undefined>({
-            message: "选择快照（回车跳过则使用默认）",
-            source: async (input) => {
-                const opts: { name: string; value: string | undefined; description: string }[] = [
-                    { name: "（跳过，使用默认快照）", value: undefined, description: "" },
-                ];
-                const term = (input ?? "").toLowerCase();
-                for (const s of filtered) {
-                    if (term && !s.name.toLowerCase().includes(term)) continue;
-                    opts.push({
-                        name: s.name,
-                        value: s.name,
-                        description: `${s.imageName ?? ""}  ${s.state}`,
-                    });
-                }
-                return opts.slice(0, 20);
-            },
+
+    if (params) {
+        // 非交互模式
+        name = params.name ?? DEFAULT_NAME;
+        gitUrl = params.gitUrl ?? DEFAULT_GIT_URL;
+        configPath = params.config ?? DEFAULT_CONFIG_PATH;
+        snapshotName = params.snapshot || undefined;
+        if (snapshotName) {
+            console.log(`[create] 快照: ${snapshotName}`);
+        }
+    } else {
+        console.log("\n创建 Daytona Sandbox\n");
+
+        // 选择快照（仅 daytona- 前缀）
+        const snapshots = await daytona.snapshot.list(1, 50);
+        const filtered = snapshots.items.filter((s) => s.name.startsWith("daytona-"));
+        if (filtered.length > 0) {
+            const choice = await search<string | undefined>({
+                message: "选择快照（回车跳过则使用默认）",
+                source: async (input) => {
+                    const opts: { name: string; value: string | undefined; description: string }[] = [
+                        { name: "（跳过，使用默认快照）", value: undefined, description: "" },
+                    ];
+                    const term = (input ?? "").toLowerCase();
+                    for (const s of filtered) {
+                        if (term && !s.name.toLowerCase().includes(term)) continue;
+                        opts.push({
+                            name: s.name,
+                            value: s.name,
+                            description: `${s.imageName ?? ""}  ${s.state}`,
+                        });
+                    }
+                    return opts.slice(0, 20);
+                },
+            });
+            snapshotName = choice ?? undefined;
+        }
+
+        // 填表
+        name = await input({ message: "沙箱名称", default: DEFAULT_NAME });
+        gitUrl = await input({ message: "Git 仓库地址", default: DEFAULT_GIT_URL });
+        configPath = await input({
+            message: "peri 配置文件（本地路径，将传输到沙箱内）",
+            default: DEFAULT_CONFIG_PATH,
         });
-        snapshotName = choice ?? undefined;
-    }
 
-    // 填表
-    const name = await input({
-        message: "沙箱名称",
-        default: DEFAULT_NAME,
-    });
-    const gitUrl = await input({
-        message: "Git 仓库地址",
-        default: DEFAULT_GIT_URL,
-    });
-    const configPath = await input({
-        message: "peri 配置文件（本地路径，将传输到沙箱内）",
-        default: DEFAULT_CONFIG_PATH,
-    });
-
-    const config = loadConfig(configPath);
-
-    // 确认
-    console.log("\n即将执行:\n");
-    console.log(`  沙箱名称:                  ${name}`);
-    console.log(`  Git 仓库:                  ${gitUrl}`);
-    console.log(`  peri 配置（本地传沙箱）:    ${configPath}`);
-    if (snapshotName) {
-        console.log(`  快照:                      ${snapshotName}`);
-    }
-
-    const ok = await confirm({ message: "\n确认创建?", default: true });
-    if (!ok) {
-        console.log("已取消。");
-        return;
+        console.log("\n即将执行:\n");
+        console.log(`  沙箱名称:                  ${name}`);
+        console.log(`  Git 仓库:                  ${gitUrl}`);
+        console.log(`  peri 配置（本地传沙箱）:    ${configPath}`);
+        if (snapshotName) console.log(`  快照:                      ${snapshotName}`);
+        const ok = await confirm({ message: "\n确认创建?", default: true });
+        if (!ok) { console.log("已取消。"); return; }
     }
 
     // 检查是否已存在
@@ -86,6 +93,8 @@ export async function runCreate(): Promise<void> {
         console.log(`\nSandbox "${name}" 已存在 (${existing.id})，跳过创建`);
         return;
     }
+
+    const config = loadConfig(configPath);
 
     // Step 1: 创建 Sandbox
     const s1 = ora("创建沙箱...").start();
