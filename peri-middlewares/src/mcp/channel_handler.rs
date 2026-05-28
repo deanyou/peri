@@ -120,13 +120,27 @@ impl ClientHandler for ChannelHandler {
     }
 }
 
-/// 从 channel source 标识符提取 MCP server name
+/// 从 channel source 标识符提取 MCP server name（对齐 config 中的命名格式）
 ///
-/// - `"plugin:weixin@anthropic:weixin"` → `"plugin_weixin_anthropic__weixin"`
+/// plugin 格式移除 @marketplace 保留 `plugin:{name}:{server}`：
+/// - `"plugin:weixin@anthropic:weixin"` → `"plugin:weixin:weixin"`
+/// - `"plugin:weixin:weixin"` → `"plugin:weixin:weixin"`
+///
+/// server 格式直接取出 server name：
 /// - `"server:my-mcp"` → `"my-mcp"`
 fn extract_server_name(source: &str) -> String {
     if let Some(rest) = source.strip_prefix("plugin:") {
-        rest.replace(':', "__").replace('@', "_")
+        // 移除 @marketplace 部分：从 "@anthropic:server" 中删掉 "@anthropic"
+        let cleaned = if let Some(at_pos) = rest.find('@') {
+            if let Some(colon_pos) = rest[at_pos..].find(':') {
+                format!("{}{}", &rest[..at_pos], &rest[at_pos + colon_pos..])
+            } else {
+                rest[..at_pos].to_string()
+            }
+        } else {
+            rest.to_string()
+        };
+        format!("plugin:{}", cleaned)
     } else if let Some(rest) = source.strip_prefix("server:") {
         rest.to_string()
     } else {
