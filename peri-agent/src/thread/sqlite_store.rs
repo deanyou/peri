@@ -1,17 +1,27 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    SqlitePool,
+};
 use std::path::PathBuf;
 
-use crate::messages::BaseMessage;
-use crate::thread::{ThreadId, ThreadMeta, ThreadStore};
+use crate::{
+    messages::BaseMessage,
+    thread::{ThreadId, ThreadMeta, ThreadStore},
+};
 
-/// SELECT 所有 thread 列的统一常量
+/// SELECT 所有 thread 列的统一常量（含 cached_context，仅 load_context 等需要完整数据的场景使用）
 const THREAD_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
     (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
     t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, t.cached_context, t.agent_status";
+
+/// SELECT thread 元数据列（不含 cached_context），用于 list_threads 等列表场景。
+/// cached_context 包含完整消息历史 JSON，加载所有线程时会占用大量内存（~1MB/线程）。
+const THREAD_META_COLUMNS: &str = "t.id, t.title, t.cwd, t.created_at, t.updated_at, t.message_count,
+    (SELECT COALESCE(SUM(LENGTH(m.content)), 0) FROM messages m WHERE m.thread_id = t.id) as content_size,
+    t.parent_thread_id, t.snapshot_at_message_id, t.hidden, t.cancel_policy, t.config, NULL as cached_context, t.agent_status";
 
 /// 基于 SQLite 的 ThreadStore 实现
 ///
@@ -412,7 +422,7 @@ impl ThreadStore for SqliteThreadStore {
             Option<String>,
             String,
         )> = sqlx::query_as(&format!(
-            "SELECT {THREAD_COLUMNS} FROM threads t WHERE t.hidden = 0 ORDER BY t.updated_at DESC"
+            "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.hidden = 0 ORDER BY t.updated_at DESC"
         ))
         .fetch_all(&self.pool)
         .await?;
@@ -518,7 +528,7 @@ impl ThreadStore for SqliteThreadStore {
         let rows: Vec<(String, Option<String>, String, String, String, i64, i64,
                        Option<String>, Option<String>, bool, String, Option<String>, Option<String>, String)> =
             sqlx::query_as(&format!(
-                "SELECT {THREAD_COLUMNS} FROM threads t WHERE t.parent_thread_id = ?1 ORDER BY t.created_at ASC"
+                "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.parent_thread_id = ?1 ORDER BY t.created_at ASC"
             ))
             .bind(parent_id.as_str())
             .fetch_all(&self.pool)
@@ -557,7 +567,7 @@ impl ThreadStore for SqliteThreadStore {
                     SELECT t.* FROM threads t
                     INNER JOIN session_tree st ON t.parent_thread_id = st.id
                 )
-                SELECT {THREAD_COLUMNS} FROM session_tree t ORDER BY t.created_at ASC"
+                SELECT {THREAD_META_COLUMNS} FROM session_tree t ORDER BY t.created_at ASC"
         ))
         .bind(root_id.as_str())
         .fetch_all(&self.pool)
@@ -589,6 +599,38 @@ impl ThreadStore for SqliteThreadStore {
             .bind(thread_id.as_str())
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn delete_messages(
+        &self,
+        thread_id: &ThreadId,
+        message_ids: &[crate::messages::MessageId],
+    ) -> Result<()> {
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for mid in message_ids {
+            let uuid_str = mid.as_uuid().to_string();
+            sqlx::query("DELETE FROM messages WHERE message_id = ?1 AND thread_id = ?2")
+                .bind(&uuid_str)
+                .bind(thread_id.as_str())
+                .execute(&mut *tx)
+                .await?;
+        }
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE threads SET updated_at = ?1,
+                message_count = (SELECT COUNT(*) FROM messages WHERE thread_id = ?2)
+             WHERE id = ?2",
+        )
+        .bind(&now)
+        .bind(thread_id.as_str())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.invalidate_context_cache(thread_id).await?;
         Ok(())
     }
 }

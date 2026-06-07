@@ -88,8 +88,6 @@ pub enum AgentEvent {
         is_error: bool,
         source_agent_id: Option<String>,
     },
-    /// 一轮 ReAct 步骤完成
-    StepDone { step: usize },
     /// 状态快照（含完整的消息历史），用于持久化和断点续跑
     StateSnapshot(Vec<crate::messages::BaseMessage>),
     /// 增量消息（BaseMessage），持久化和遥测的最小数据单元
@@ -97,7 +95,8 @@ pub enum AgentEvent {
     /// LLM 调用开始（携带完整 input messages 快照 + 工具定义，用于 Langfuse Generation）
     LlmCallStart {
         step: usize,
-        messages: Vec<crate::messages::BaseMessage>,
+        /// Arc 共享引用——Clone AgentEvent 时为浅拷贝（引用计数 +1），不产生独立副本
+        messages: std::sync::Arc<Vec<crate::messages::BaseMessage>>,
         tools: Vec<crate::tools::ToolDefinition>,
     },
     /// LLM 调用结束（携带模型名、输出文本、token 使用量）
@@ -106,6 +105,8 @@ pub enum AgentEvent {
         model: String,
         output: String,
         usage: Option<crate::llm::types::TokenUsage>,
+        /// LLM 响应停止原因（None 表示 LLM 调用失败/异常）
+        stop_reason: Option<crate::llm::types::StopReason>,
     },
     /// 上下文窗口使用警告（阈值触发时发出）
     ContextWarning {
@@ -138,8 +139,6 @@ pub enum AgentEvent {
         /// 唯一实例标识符
         instance_id: String,
     },
-    /// Session 结束
-    SessionEnded,
     /// 上下文压缩开始
     CompactStarted,
     /// 上下文压缩完成
@@ -155,6 +154,13 @@ pub enum AgentEvent {
         /// 压缩后的新消息列表（full compact 时非空）
         messages: Vec<crate::messages::BaseMessage>,
     },
+    /// 对话回退完成（rewind 命令，移除目标用户消息及其之后的所有消息）
+    RewindCompleted {
+        /// 摘要文本（如"已回滚 N 条消息"）
+        summary: String,
+        /// 回退后的新消息列表（目标消息之前，不含目标本身）
+        messages: Vec<crate::messages::BaseMessage>,
+    },
     /// 上下文压缩失败
     CompactError { message: String },
     /// Todo 列表更新
@@ -167,6 +173,8 @@ pub enum AgentEvent {
     },
     /// Agent 执行失败（由 executor 在 agent.execute() 返回 Err 时发送）
     AgentExecutionFailed { message: String },
+    /// 后台 agent 工具调用进度通知（轻量级，仅用于 TUI bg_agent_bar 实时计数）
+    BgToolStep { child_thread_id: String },
 }
 
 /// 事件回调 trait（应用层实现）

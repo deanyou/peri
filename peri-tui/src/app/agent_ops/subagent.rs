@@ -3,8 +3,7 @@
 
 use super::super::*;
 
-use crate::app::message_pipeline::PipelineAction;
-use crate::app::App;
+use crate::app::{message_pipeline::PipelineAction, App};
 
 impl App {
     pub(super) fn handle_token_usage_update(
@@ -12,34 +11,44 @@ impl App {
         usage: peri_agent::llm::types::TokenUsage,
     ) -> (bool, bool, bool) {
         // SubAgent 的 TokenUsageUpdate 不应污染父 agent 的 tracker
-        if self.session_mgr.sessions[self.session_mgr.active]
-            .agent
-            .subagent_depth
-            > 0
-        {
+        if self.session_mgr.current_mut().agent.subagent_depth > 0 {
             return (true, false, false);
         }
 
         // 累积到会话追踪器
-        self.session_mgr.sessions[self.session_mgr.active]
+        self.session_mgr
+            .current_mut()
             .agent
             .session_token_tracker
             .accumulate(&usage);
 
         // 缓存率检查：当次命中率低于 80% 时显示黄色提示
-        let rate = self.session_mgr.sessions[self.session_mgr.active]
+        let rate = self
+            .session_mgr
+            .current_mut()
             .agent
             .session_token_tracker
             .cache_hit_rate();
         if rate < 0.8 {
-            let tracker = &self.session_mgr.sessions[self.session_mgr.active]
-                .agent
-                .session_token_tracker;
+            let sid = self.session_mgr.current().metadata.session_id.to_string();
+            let tracker = &self.session_mgr.current_mut().agent.session_token_tracker;
             tracing::warn!(
                 input = tracker.total_input_tokens,
                 cache_read = tracker.total_cache_read_tokens,
                 rate_pct = rate * 100.0,
                 "prompt cache hit rate below threshold"
+            );
+            peri_agent::metrics::emit(
+                "trap.cache_anomaly",
+                serde_json::json!({
+                    "rate": rate,
+                    "threshold": 0.80,
+                    "request_id": tracker.last_request_id.as_deref().unwrap_or("-"),
+                    "total_input_tokens": tracker.total_input_tokens,
+                    "total_cache_read_tokens": tracker.total_cache_read_tokens,
+                }),
+                Some(&sid),
+                None,
             );
             let percentage = (rate * 100.0) as u32;
             let req_id = tracker.last_request_id.as_deref().unwrap_or("-");
@@ -58,7 +67,8 @@ impl App {
         }
         // 更新 spinner 的 token 显示（仅当次调用的 token，不累计）
         let current_tokens = usage.input_tokens as usize + usage.output_tokens as usize;
-        self.session_mgr.sessions[self.session_mgr.active]
+        self.session_mgr
+            .current_mut()
             .spinner_state
             .set_token_count(current_tokens);
         (true, false, false)
@@ -73,19 +83,21 @@ impl App {
     ) -> (bool, bool, bool) {
         if is_background {
             use super::super::chat_session::RunningBgAgent;
-            self.session_mgr.sessions[self.session_mgr.active]
+            self.session_mgr
+                .current_mut()
                 .background_agents
                 .push(RunningBgAgent {
                     agent_name: agent_id.clone(),
                     instance_id: instance_id.clone(),
                     started_at: std::time::Instant::now(),
+                    tool_count: 0,
                 });
         }
-        self.session_mgr.sessions[self.session_mgr.active]
-            .agent
-            .subagent_depth += 1;
+        self.session_mgr.current_mut().agent.subagent_depth += 1;
         // Pipeline：创建 SubAgentGroup VM
-        let actions = self.session_mgr.sessions[self.session_mgr.active]
+        let actions = self
+            .session_mgr
+            .current_mut()
             .messages
             .pipeline
             .handle_event(AgentEvent::SubAgentStart {

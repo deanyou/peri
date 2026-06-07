@@ -1,3 +1,5 @@
+use crate::app::FieldTextarea;
+
 /// 向导步骤
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SetupStep {
@@ -99,20 +101,16 @@ impl ProviderType {
 /// 单个别名的配置
 #[derive(Debug, Clone)]
 pub struct AliasConfig {
-    pub model_id: String,
-    pub cursor: usize,
+    pub field_model_id: FieldTextarea,
 }
 
 /// 单个 Provider 的完整表单数据
 #[derive(Debug, Clone)]
 pub struct MigratedProvider {
     pub provider_type: ProviderType,
-    pub provider_id: String,
-    pub cur_provider_id: usize,
-    pub base_url: String,
-    pub cur_base_url: usize,
-    pub api_key: String,
-    pub cur_api_key: usize,
+    pub field_provider_id: FieldTextarea,
+    pub field_base_url: FieldTextarea,
+    pub field_api_key: FieldTextarea,
     pub aliases: [AliasConfig; 3],
     /// 勾选框状态：是否包含在最终保存中
     pub selected: bool,
@@ -121,19 +119,19 @@ pub struct MigratedProvider {
 impl MigratedProvider {
     /// 创建指定类型的默认 provider
     pub fn new(pt: ProviderType) -> Self {
-        let pid = pt.default_provider_id().to_string();
-        let burl = pt.default_base_url().to_string();
+        let mut field_provider_id = FieldTextarea::single_line();
+        field_provider_id.set_value(pt.default_provider_id());
+        let mut field_base_url = FieldTextarea::single_line();
+        field_base_url.set_value(pt.default_base_url());
         Self {
             provider_type: pt,
-            provider_id: pid.clone(),
-            cur_provider_id: pid.chars().count(),
-            base_url: burl.clone(),
-            cur_base_url: burl.chars().count(),
-            api_key: String::new(),
-            cur_api_key: 0,
-            aliases: pt.default_model_ids().map(|s| AliasConfig {
-                model_id: s.to_string(),
-                cursor: s.chars().count(),
+            field_provider_id,
+            field_base_url,
+            field_api_key: FieldTextarea::single_line(),
+            aliases: pt.default_model_ids().map(|s| {
+                let mut f = FieldTextarea::single_line();
+                f.set_value(s);
+                AliasConfig { field_model_id: f }
             }),
             selected: true,
         }
@@ -141,21 +139,25 @@ impl MigratedProvider {
 
     /// 切换 Provider 类型后刷新默认值（保留 api_key）
     pub fn refresh_provider_defaults(&mut self) {
-        self.provider_id = self.provider_type.default_provider_id().to_string();
-        self.cur_provider_id = self.provider_id.chars().count();
-        self.base_url = self.provider_type.default_base_url().to_string();
-        self.cur_base_url = self.base_url.chars().count();
-        self.aliases = self.provider_type.default_model_ids().map(|s| AliasConfig {
-            model_id: s.to_string(),
-            cursor: s.chars().count(),
+        self.field_provider_id
+            .set_value(self.provider_type.default_provider_id());
+        self.field_base_url
+            .set_value(self.provider_type.default_base_url());
+        self.aliases = self.provider_type.default_model_ids().map(|s| {
+            let mut f = FieldTextarea::single_line();
+            f.set_value(s);
+            AliasConfig { field_model_id: f }
         });
     }
 
     /// 字段是否完整（provider_id 和 api_key 非空）
     pub fn is_complete(&self) -> bool {
-        !self.provider_id.trim().is_empty()
-            && !self.api_key.trim().is_empty()
-            && self.aliases.iter().all(|a| !a.model_id.trim().is_empty())
+        !self.field_provider_id.value().trim().is_empty()
+            && !self.field_api_key.value().trim().is_empty()
+            && self
+                .aliases
+                .iter()
+                .all(|a| !a.field_model_id.value().trim().is_empty())
     }
 }
 
@@ -288,7 +290,6 @@ impl SetupWizardPanel {
 
     /// 粘贴文本到当前聚焦的字段（仅保留第一行）
     pub fn paste_text(&mut self, text: &str) {
-        let text = text.lines().next().unwrap_or("");
         if self.step != SetupStep::Form || self.form_mode != FormMode::Edit {
             return;
         }
@@ -296,26 +297,11 @@ impl SetupWizardPanel {
             Some(p) => p,
             None => return,
         };
-        match self.form_focus {
-            FormField::ProviderId => {
-                insert_at_cursor(&mut mp.provider_id, &mut mp.cur_provider_id, text);
+        let text = text.lines().next().unwrap_or("");
+        if self.form_focus.is_text_input() {
+            if let Some(field) = ops::provider_field_buf(mp, self.form_focus) {
+                field.insert_text(text);
             }
-            FormField::BaseUrl => {
-                insert_at_cursor(&mut mp.base_url, &mut mp.cur_base_url, text);
-            }
-            FormField::ApiKey => {
-                insert_at_cursor(&mut mp.api_key, &mut mp.cur_api_key, text);
-            }
-            FormField::OpusModel => {
-                insert_at_cursor(&mut mp.aliases[0].model_id, &mut mp.aliases[0].cursor, text);
-            }
-            FormField::SonnetModel => {
-                insert_at_cursor(&mut mp.aliases[1].model_id, &mut mp.aliases[1].cursor, text);
-            }
-            FormField::HaikuModel => {
-                insert_at_cursor(&mut mp.aliases[2].model_id, &mut mp.aliases[2].cursor, text);
-            }
-            _ => {}
         }
     }
 
@@ -391,42 +377,27 @@ impl SetupWizardPanel {
             }
 
             let mut mp = MigratedProvider::new(pt);
-            mp.provider_id = default_id.to_string();
-            mp.cur_provider_id = default_id.chars().count();
+            mp.field_provider_id.set_value(default_id);
 
             if !api_key.is_empty() {
-                mp.cur_api_key = api_key.chars().count();
-                mp.api_key = api_key;
+                mp.field_api_key.set_value(&api_key);
             } else {
                 // 无 API key → 默认不选中
                 mp.selected = false;
             }
 
             if !base_url.is_empty() {
-                mp.base_url = base_url;
-                mp.cur_base_url = mp.base_url.chars().count();
+                mp.field_base_url.set_value(&base_url);
             }
 
             if !opus.is_empty() {
-                mp.aliases[0] = AliasConfig {
-                    model_id: opus,
-                    cursor: 0,
-                };
-                mp.aliases[0].cursor = mp.aliases[0].model_id.chars().count();
+                mp.aliases[0].field_model_id.set_value(&opus);
             }
             if !sonnet.is_empty() {
-                mp.aliases[1] = AliasConfig {
-                    model_id: sonnet,
-                    cursor: 0,
-                };
-                mp.aliases[1].cursor = mp.aliases[1].model_id.chars().count();
+                mp.aliases[1].field_model_id.set_value(&sonnet);
             }
             if !haiku.is_empty() {
-                mp.aliases[2] = AliasConfig {
-                    model_id: haiku,
-                    cursor: 0,
-                };
-                mp.aliases[2].cursor = mp.aliases[2].model_id.chars().count();
+                mp.aliases[2].field_model_id.set_value(&haiku);
             }
 
             detected.push(mp);
@@ -537,21 +508,6 @@ fn parse_url_parts(url: &str) -> Option<(&str, u16, &str)> {
         port_str.parse().ok()?
     };
     Some((host, port, path))
-}
-
-/// 在光标位置插入字符串并移动光标
-fn insert_at_cursor(buf: &mut String, cursor: &mut usize, text: &str) {
-    let char_count = buf.chars().count();
-    if *cursor > char_count {
-        *cursor = char_count;
-    }
-    let byte_pos = buf
-        .char_indices()
-        .nth(*cursor)
-        .map(|(i, _)| i)
-        .unwrap_or(buf.len());
-    buf.insert_str(byte_pos, text);
-    *cursor += text.chars().count();
 }
 
 pub use ops::{

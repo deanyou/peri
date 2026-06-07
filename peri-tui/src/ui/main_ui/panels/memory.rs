@@ -1,6 +1,7 @@
-use crate::app::memory_panel::MemoryPanel;
-use crate::app::App;
-use crate::ui::theme;
+use crate::{
+    app::{memory_panel::MemoryPanel, App},
+    ui::theme,
+};
 use peri_widgets::{BorderedPanel, ScrollState, ScrollableArea};
 use ratatui::{
     layout::Rect,
@@ -67,15 +68,9 @@ pub(crate) fn render_memory_panel(f: &mut Frame, panel: &MemoryPanel, app: &mut 
     }
 
     // 存储面板元数据
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_area = Some(inner);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_scroll_offset = panel.scroll_offset();
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_plain_lines = lines
+    app.session_mgr.current_mut().ui.panel_area = Some(inner);
+    app.session_mgr.current_mut().ui.panel_scroll_offset = panel.scroll_offset();
+    app.session_mgr.current_mut().ui.panel_plain_lines = lines
         .iter()
         .map(|l| {
             l.spans
@@ -86,9 +81,8 @@ pub(crate) fn render_memory_panel(f: &mut Frame, panel: &MemoryPanel, app: &mut 
         .collect();
 
     let mut scroll_state = ScrollState::with_offset(panel.scroll_offset());
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_scrollbar_metrics = ScrollableArea::new(Text::from(lines))
-        .scrollbar_style(Style::default().fg(theme::MUTED))
-        .render(f, inner, &mut scroll_state);
+    app.session_mgr.current_mut().ui.panel_scrollbar_metrics =
+        ScrollableArea::new(Text::from(lines))
+            .scrollbar_style(Style::default().fg(theme::MUTED))
+            .render(f, inner, &mut scroll_state);
 }

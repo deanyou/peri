@@ -1,3 +1,4 @@
+use crate::app::FieldTextarea;
 use peri_middlewares::ask_user::{AskUserBatchRequest, AskUserQuestionData};
 
 // ─── AskUserBatchPrompt ───────────────────────────────────────────────────────
@@ -7,8 +8,7 @@ pub struct QuestionState {
     pub data: AskUserQuestionData,
     pub option_cursor: isize, // 当前光标在第几个选项（最后一项 = 自定义输入行）
     pub selected: Vec<bool>,
-    pub custom_input: String,
-    pub custom_cursor: usize,
+    pub custom_input: FieldTextarea,
     pub in_custom_input: bool,
 }
 
@@ -19,8 +19,7 @@ impl QuestionState {
             data,
             option_cursor: 0,
             selected: vec![false; len],
-            custom_input: String::new(),
-            custom_cursor: 0,
+            custom_input: FieldTextarea::multi_line(5),
             in_custom_input: false,
         }
     }
@@ -53,18 +52,6 @@ impl QuestionState {
         }
     }
 
-    pub fn push_char(&mut self, c: char) {
-        if self.in_custom_input {
-            self.custom_input.push(c);
-        }
-    }
-
-    pub fn pop_char(&mut self) {
-        if self.in_custom_input {
-            self.custom_input.pop();
-        }
-    }
-
     /// 收集当前问题的答案文本
     pub fn answer(&self) -> String {
         let mut parts: Vec<String> = self
@@ -74,12 +61,12 @@ impl QuestionState {
             .filter(|(_, &v)| v)
             .map(|(i, _)| self.data.options[i].label.clone())
             .collect();
-        let custom = self.custom_input.trim().to_string();
+        let custom = self.custom_input.value().trim().to_string();
         if !custom.is_empty() {
             parts.push(custom);
         }
         if parts.is_empty() {
-            self.custom_input.trim().to_string()
+            self.custom_input.value().trim().to_string()
         } else {
             parts.join(", ")
         }

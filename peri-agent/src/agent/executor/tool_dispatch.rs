@@ -2,14 +2,78 @@ use std::collections::HashMap;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::events::AgentEvent;
-use crate::agent::react::{ReactLLM, Reasoning, ToolCall, ToolResult};
-use crate::agent::state::State;
-use crate::error::{AgentError, AgentResult};
-use crate::messages::{message::MessageId, BaseMessage, ToolCallRequest};
-use crate::tools::BaseTool;
+use crate::{
+    agent::{
+        events::AgentEvent,
+        react::{ReactLLM, Reasoning, ToolCall, ToolResult},
+        state::State,
+    },
+    error::{AgentError, AgentResult},
+    messages::{message::MessageId, BaseMessage, ToolCallRequest},
+    tools::BaseTool,
+};
 
 use super::ReActAgent;
+
+/// 工具名语义别名表：LLM 输出的名称 → 实际注册的工具名。
+const TOOL_ALIASES: &[(&str, &str)] = &[("task", "Agent"), ("shell", "Bash"), ("reading", "Read")];
+
+/// 工具参数名别名表：LLM 输出的参数名 → 实际参数名。
+/// 主要解决 Read/Write/Edit（file_path）与 Glob/Grep（path）之间的 LLM 参数名混淆。
+const PARAM_ALIASES: &[(&str, &str)] = &[("path", "file_path")];
+
+/// 将 LLM 有时会误用的参数名归一化为标准名。
+/// 仅在有别名键且无目标键时才替换（不覆盖已有正确值）。
+fn normalize_params(input: serde_json::Value) -> serde_json::Value {
+    let mut obj = match input {
+        serde_json::Value::Object(map) => map,
+        _ => return input,
+    };
+
+    for (alias, real) in PARAM_ALIASES {
+        if obj.contains_key(*alias) && !obj.contains_key(*real) {
+            let value = obj.remove(*alias).unwrap();
+            obj.insert(real.to_string(), value);
+            tracing::warn!(
+                alias = %alias,
+                resolved = %real,
+                "参数名别名归一化：LLM 使用了非标准参数名"
+            );
+        }
+    }
+
+    serde_json::Value::Object(obj)
+}
+
+/// 连续失败检测阈值
+const CONSECUTIVE_FAILURE_THRESHOLD: usize = 5;
+
+/// 工具名解析：精确匹配 → 大小写无关匹配 → 语义别名。
+fn resolve_tool<'a>(
+    name: &str,
+    all_tools: &HashMap<String, &'a dyn BaseTool>,
+) -> Option<&'a dyn BaseTool> {
+    // 1. 精确匹配
+    if let Some(tool) = all_tools.get(name).copied() {
+        return Some(tool);
+    }
+    // 2. 大小写无关匹配
+    for (key, tool) in all_tools {
+        if key.eq_ignore_ascii_case(name) {
+            return Some(*tool);
+        }
+    }
+    // 3. 语义别名
+    for (alias, real_name) in TOOL_ALIASES {
+        if name.eq_ignore_ascii_case(alias) {
+            if let Some(tool) = all_tools.get(*real_name).copied() {
+                tracing::debug!(alias = %name, resolved = %real_name, "工具名别名匹配");
+                return Some(tool);
+            }
+        }
+    }
+    None
+}
 
 /// 工具审批 → 并发执行 → 结果收集（不写 state）→ 统一写入
 pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
@@ -18,6 +82,7 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
     reasoning: &Reasoning,
     all_tools: &HashMap<String, &dyn BaseTool>,
     cancel: &CancellationToken,
+    consecutive_failures: &mut HashMap<String, usize>,
 ) -> AgentResult<Vec<(ToolCall, ToolResult)>> {
     let tc_reqs: Vec<ToolCallRequest> = reasoning
         .tool_calls
@@ -70,6 +135,30 @@ pub(crate) async fn dispatch_tools<L: ReactLLM, S: State>(
     state.add_message(ai_msg);
 
     for (_, result) in &results {
+        // 连续失败追踪
+        if result.is_error {
+            let key = format!("{}:{}", result.tool_name, result.output);
+            let count = consecutive_failures.entry(key).or_insert(0);
+            *count += 1;
+            if *count >= CONSECUTIVE_FAILURE_THRESHOLD {
+                tracing::warn!(
+                    tool = %result.tool_name,
+                    count = *count,
+                    "连续 {} 次相同错误，注入纠正消息",
+                    count
+                );
+                state.add_message(BaseMessage::system(format!(
+                    "Warning: Tool '{}' has failed {} consecutive times with the same error. \
+                     Stop retrying and analyze the root cause. Consider using a different approach \
+                     or asking the user for guidance.",
+                    result.tool_name, count
+                )));
+            }
+        } else {
+            // 成功则重置该工具的所有失败计数
+            consecutive_failures.retain(|k, _| !k.starts_with(&format!("{}:", result.tool_name)));
+        }
+
         let tool_msg = if result.is_error {
             BaseMessage::tool_error(&result.tool_call_id, result.output.as_str())
         } else {
@@ -210,7 +299,8 @@ async fn collect_tool_results<L: ReactLLM, S: State>(
                 let tool_name = call.name.clone();
                 let call_id = call.id.clone();
                 let input = call.input.clone();
-                let tool = all_tools.get(&call.name).copied();
+                let input = normalize_params(input); // 新增：参数名归一化
+                let tool = resolve_tool(&call.name, all_tools);
                 let cancel = cancel.clone();
                 async move {
                     let span = tracing::info_span!(
@@ -279,6 +369,27 @@ async fn collect_tool_results<L: ReactLLM, S: State>(
                 tool.is_error = true,
                 error_len = result.output.len(),
                 "tool call failed"
+            );
+            let rid = state.get_context("run_id").map(|s| s.to_owned());
+            let input_summary: String = modified_call
+                .input
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect();
+            crate::metrics::emit(
+                "tool.error",
+                serde_json::json!({
+                    "name": result.tool_name,
+                    "tool_call_id": modified_call.id,
+                    "error": result.output,
+                    "input_summary": input_summary,
+                    "duration_ms": (),
+                    "step": state.current_step(),
+                }),
+                state.get_context("session_id"),
+                rid.as_deref(),
             );
         }
         agent.emit(AgentEvent::ToolEnd {

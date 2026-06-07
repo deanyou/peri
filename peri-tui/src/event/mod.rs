@@ -9,8 +9,7 @@ pub mod keyboard;
 mod macros;
 pub mod mouse;
 
-use crate::with_global_panels;
-use crate::with_session_panels;
+use crate::{with_global_panels, with_session_panels};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{
@@ -19,8 +18,10 @@ use ratatui::crossterm::event::{
 use std::time::Duration;
 use tui_textarea::{Input, Key};
 
-use crate::app::panel_manager::{EventResult, PanelKind};
-use crate::app::App;
+use crate::app::{
+    panel_manager::{EventResult, PanelKind},
+    App,
+};
 
 // ── Action ──────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,14 @@ pub async fn next_event(app: &mut App) -> Result<Option<Action>> {
     if let Some(since) = app.global_ui.quit_pending_since {
         if since.elapsed() >= std::time::Duration::from_secs(1) {
             app.global_ui.quit_pending_since = None;
+            return Ok(Some(Action::Redraw));
+        }
+    }
+
+    // Rewind-pending state auto-expires after 2s
+    if let Some(since) = app.global_ui.rewind_pending_since {
+        if since.elapsed() >= std::time::Duration::from_secs(2) {
+            app.global_ui.rewind_pending_since = None;
             return Ok(Some(Action::Redraw));
         }
     }
@@ -249,10 +258,7 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
         }
         Event::Resize(_, _) => {
             // Width sync is now driven by render_messages (compares cache.width vs text_area.width)
-            app.session_mgr.sessions[app.session_mgr.active]
-                .ui
-                .text_selection
-                .clear();
+            app.session_mgr.current_mut().ui.text_selection.clear();
         }
         Event::Key(key_event) => {
             return keyboard::handle_key_event(app, key_event);
@@ -268,12 +274,18 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                 return Ok(Some(Action::Redraw));
             }
 
+            // ─── 交互弹窗优先路由（AskUser/HITL/OAuth） ──────────────────
+            // 弹窗激活时，Paste（含终端 IME 组合后的中文）应进入弹窗
+            // 而非 textarea。仅 AskUser 弹窗有 custom_input 接收文本。
+            if app.is_interaction_popup_active() {
+                app.paste_to_interaction_popup(&text);
+                return Ok(Some(Action::Redraw));
+            }
+
             // ─── PanelManager paste dispatch ────────────────────────────
             {
                 // Session panels: Model, Agent, Hooks, Login, Config, ThreadBrowser
-                let session_kind = app.session_mgr.sessions[app.session_mgr.active]
-                    .session_panels
-                    .active_kind();
+                let session_kind = app.session_mgr.current_mut().session_panels.active_kind();
                 if matches!(
                     session_kind,
                     Some(PanelKind::Model)
@@ -287,7 +299,7 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                     return Ok(Some(Action::Redraw));
                 }
 
-                // Global panels: Status, Memory, Mcp, Cron, Plugin
+                // Global panels: Status, Memory, Mcp, Cron, Plugin, Betas
                 let global_kind = app.global_panels.active_kind();
                 if matches!(
                     global_kind,
@@ -296,6 +308,7 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                         | Some(PanelKind::Mcp)
                         | Some(PanelKind::Cron)
                         | Some(PanelKind::Plugin)
+                        | Some(PanelKind::Betas)
                 ) {
                     with_global_panels!(app, |pm, ctx| pm.dispatch_paste(&text, &mut ctx));
                     return Ok(Some(Action::Redraw));
@@ -303,21 +316,19 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
             }
 
             // Fallback: paste into textarea
-            app.session_mgr.sessions[app.session_mgr.active]
-                .ui
-                .textarea
-                .insert_str(&text);
+            // 弹窗激活时不写入 textarea——用户应通过弹窗 UI 交互
+            if !app.is_interaction_popup_active() {
+                app.session_mgr.current_mut().ui.textarea.insert_str(&text);
+            }
         }
         Event::Mouse(mouse) => match mouse.kind {
             // ── AskUser 弹窗鼠标交互（优先于面板/消息区） ────────────────────────
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 {
-                    let sessions = &app.session_mgr.sessions;
-                    let active = app.session_mgr.active;
                     if let Some(crate::app::InteractionPrompt::Questions(_)) =
-                        sessions[active].agent.interaction_prompt
+                        app.session_mgr.current_mut().agent.interaction_prompt
                     {
-                        if let Some(area) = sessions[active].ui.panel_area {
+                        if let Some(area) = app.session_mgr.current_mut().ui.panel_area {
                             if mouse::mouse_in_rect(&mouse, area) {
                                 let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
                                     -3
@@ -333,14 +344,11 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                 // 正常滚动处理
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
-                        let panel_area = app.session_mgr.sessions[app.session_mgr.active]
-                            .ui
-                            .panel_area;
+                        let panel_area = app.session_mgr.current_mut().ui.panel_area;
                         if let Some(area) = panel_area {
                             if mouse::mouse_in_rect(&mouse, area) {
                                 // Session panel takes priority
-                                let sp = &app.session_mgr.sessions[app.session_mgr.active]
-                                    .session_panels;
+                                let sp = &app.session_mgr.current_mut().session_panels;
                                 if sp.is_any_open() {
                                     let result = with_session_panels!(app, |sp, ctx| {
                                         sp.dispatch_scroll(-3, &mut ctx)
@@ -363,14 +371,11 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                         app.scroll_up();
                     }
                     MouseEventKind::ScrollDown => {
-                        let panel_area = app.session_mgr.sessions[app.session_mgr.active]
-                            .ui
-                            .panel_area;
+                        let panel_area = app.session_mgr.current_mut().ui.panel_area;
                         if let Some(area) = panel_area {
                             if mouse::mouse_in_rect(&mouse, area) {
                                 // Session panel takes priority
-                                let sp = &app.session_mgr.sessions[app.session_mgr.active]
-                                    .session_panels;
+                                let sp = &app.session_mgr.current_mut().session_panels;
                                 if sp.is_any_open() {
                                     let result = with_session_panels!(app, |sp, ctx| {
                                         sp.dispatch_scroll(3, &mut ctx)
@@ -398,10 +403,8 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
             MouseEventKind::Down(MouseButton::Left) => {
                 // ── AskUser 弹窗滚动条点击（优先于面板滚动条） ──────────────────
                 {
-                    let sessions = &app.session_mgr.sessions;
-                    let active = app.session_mgr.active;
                     if let Some(crate::app::InteractionPrompt::Questions(ref p)) =
-                        sessions[active].agent.interaction_prompt
+                        app.session_mgr.current_mut().agent.interaction_prompt
                     {
                         if let Some(metrics) = p.scrollbar_metrics {
                             if mouse.column >= metrics.bar_area.x
@@ -418,11 +421,12 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                                         * metrics.max_offset as f64)
                                         as u16;
                                     let new_offset = new_offset.min(metrics.max_offset);
-                                    if let Some(crate::app::InteractionPrompt::Questions(p)) =
-                                        app.session_mgr.sessions[app.session_mgr.active]
-                                            .agent
-                                            .interaction_prompt
-                                            .as_mut()
+                                    if let Some(crate::app::InteractionPrompt::Questions(p)) = app
+                                        .session_mgr
+                                        .current_mut()
+                                        .agent
+                                        .interaction_prompt
+                                        .as_mut()
                                     {
                                         p.scroll_offset = new_offset;
                                     }
@@ -436,7 +440,7 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                 // Must be checked BEFORE dispatch_mouse so scrollbar clicks
                 // aren't consumed by panel content area handlers.
                 {
-                    let session = &mut app.session_mgr.sessions[app.session_mgr.active];
+                    let session = &mut app.session_mgr.current_mut();
                     if let Some(ref metrics) = session.ui.panel_scrollbar_metrics {
                         // ▼ button click (scroll to bottom)
                         if let Some(btn) = metrics.down_btn_area {
@@ -489,16 +493,13 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                     }
                 }
                 // Panel area: dispatch mouse click to panel content
-                let panel_area = app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .panel_area;
+                let panel_area = app.session_mgr.current_mut().ui.panel_area;
                 let mut click_consumed = false;
                 if let Some(area) = panel_area {
                     if mouse::mouse_in_rect(&mouse, area) {
                         // Session panels
                         {
-                            let sp =
-                                &app.session_mgr.sessions[app.session_mgr.active].session_panels;
+                            let sp = &app.session_mgr.current_mut().session_panels;
                             if sp.is_any_open() {
                                 let result = with_session_panels!(app, |sp, ctx| {
                                     sp.dispatch_mouse(mouse, area, &mut ctx)
@@ -522,53 +523,26 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                 if click_consumed {
                     return Ok(Some(Action::Redraw));
                 }
-                // Multi-session: clicking a non-active session column switches focus
-                if app.session_mgr.sessions.len() > 1 {
-                    for (i, area) in app.session_mgr.session_areas.iter().enumerate() {
-                        if mouse.column >= area.x
-                            && mouse.column < area.x + area.width
-                            && mouse.row >= area.y
-                            && mouse.row < area.y + area.height
-                            && i != app.session_mgr.active
-                        {
-                            app.session_mgr.active = i;
-                            return Ok(Some(Action::Redraw));
-                        }
-                    }
-                }
                 // Panel area: start panel selection
-                let panel_area = app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .panel_area;
+                let panel_area = app.session_mgr.current_mut().ui.panel_area;
                 if let Some(area) = panel_area {
                     if mouse::mouse_in_rect(&mouse, area) {
                         let content_row = mouse.row - area.y
-                            + app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .panel_scroll_offset;
+                            + app.session_mgr.current_mut().ui.panel_scroll_offset;
                         let col = mouse.column - area.x;
-                        app.session_mgr.sessions[app.session_mgr.active]
+                        app.session_mgr
+                            .current_mut()
                             .ui
                             .panel_selection
                             .start_drag(content_row, col);
-                        app.session_mgr.sessions[app.session_mgr.active]
-                            .ui
-                            .text_selection
-                            .clear();
+                        app.session_mgr.current_mut().ui.text_selection.clear();
                         // Don't process other-area selections
                         return Ok(Some(Action::Redraw));
                     }
                 }
-                if let Some(area) = app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .messages_area
-                {
-                    let scroll_offset = app.session_mgr.sessions[app.session_mgr.active]
-                        .ui
-                        .scroll_offset;
-                    let scroll_follow = app.session_mgr.sessions[app.session_mgr.active]
-                        .ui
-                        .scroll_follow;
+                if let Some(area) = app.session_mgr.current_mut().ui.messages_area {
+                    let scroll_offset = app.session_mgr.current_mut().ui.scroll_offset;
+                    let scroll_follow = app.session_mgr.current_mut().ui.scroll_follow;
 
                     // Scroll-to-bottom button: bottom-right click when user has scrolled away
                     let btn_col_start = area.right().saturating_sub(2);
@@ -604,9 +578,7 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                     {
                         let track = area.height;
                         if track > 0 {
-                            let max_scroll = app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scrollbar_max_offset;
+                            let max_scroll = app.session_mgr.current_mut().ui.scrollbar_max_offset;
                             // 首次点击：按比例跳到点击位置
                             let rel_y = mouse.row.saturating_sub(area.y);
                             let new_offset = if max_scroll > 0 {
@@ -616,21 +588,12 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                             } else {
                                 0
                             };
-                            app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scroll_offset = new_offset;
-                            app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scroll_follow = false;
-                            app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scrollbar_dragging = true;
-                            app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scrollbar_drag_start_y = mouse.row;
-                            app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scrollbar_drag_start_offset = new_offset;
+                            app.session_mgr.current_mut().ui.scroll_offset = new_offset;
+                            app.session_mgr.current_mut().ui.scroll_follow = false;
+                            app.session_mgr.current_mut().ui.scrollbar_dragging = true;
+                            app.session_mgr.current_mut().ui.scrollbar_drag_start_y = mouse.row;
+                            app.session_mgr.current_mut().ui.scrollbar_drag_start_offset =
+                                new_offset;
                         }
                         return Ok(Some(Action::Redraw));
                     }
@@ -640,62 +603,46 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                         && mouse.column >= area.x
                         && mouse.column < area.x + area.width
                     {
-                        let visual_row = mouse.row - area.y
-                            + app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scroll_offset;
+                        let visual_row =
+                            mouse.row - area.y + app.session_mgr.current_mut().ui.scroll_offset;
                         let visual_col = mouse.column - area.x;
-                        app.session_mgr.sessions[app.session_mgr.active]
+                        app.session_mgr
+                            .current_mut()
                             .ui
                             .text_selection
                             .start_drag(visual_row, visual_col);
                     }
                 }
                 // Textarea area: start textarea selection
-                if let Some(area) = app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .textarea_area
-                {
-                    if mouse.row >= area.y
-                        && mouse.row < area.y + area.height
-                        && mouse.column >= area.x
-                        && mouse.column < area.x + area.width
-                    {
-                        let session = &app.session_mgr.sessions[app.session_mgr.active];
-                        let (row, col) =
-                            mouse::textarea_mouse_to_cursor(&session.ui.textarea, area, &mouse);
-                        app.session_mgr.sessions[app.session_mgr.active]
-                            .ui
-                            .textarea
-                            .move_cursor(tui_textarea::CursorMove::Jump(row as u16, col as u16));
-                        app.session_mgr.sessions[app.session_mgr.active]
-                            .ui
-                            .textarea
-                            .start_selection();
+                // 弹窗激活时跳过——光标不应移到 textarea 内
+                if !app.is_interaction_popup_active() {
+                    if let Some(area) = app.session_mgr.current_mut().ui.textarea_area {
+                        if mouse.row >= area.y
+                            && mouse.row < area.y + area.height
+                            && mouse.column >= area.x
+                            && mouse.column < area.x + area.width
+                        {
+                            let session = &app.session_mgr.current_mut();
+                            let (row, col) =
+                                mouse::textarea_mouse_to_cursor(&session.ui.textarea, area, &mouse);
+                            app.session_mgr.current_mut().ui.textarea.move_cursor(
+                                tui_textarea::CursorMove::Jump(row as u16, col as u16),
+                            );
+                            app.session_mgr.current_mut().ui.textarea.start_selection();
+                        }
                     }
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 // Scrollbar drag: 用相对位移计算 offset，无需匹配 thumb 几何
-                if app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .scrollbar_dragging
-                {
-                    if let Some(area) = app.session_mgr.sessions[app.session_mgr.active]
-                        .ui
-                        .messages_area
-                    {
+                if app.session_mgr.current_mut().ui.scrollbar_dragging {
+                    if let Some(area) = app.session_mgr.current_mut().ui.messages_area {
                         let track = area.height;
                         if track > 0 {
-                            let max_scroll = app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scrollbar_max_offset;
-                            let start_y = app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scrollbar_drag_start_y;
-                            let start_offset = app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scrollbar_drag_start_offset;
+                            let max_scroll = app.session_mgr.current_mut().ui.scrollbar_max_offset;
+                            let start_y = app.session_mgr.current_mut().ui.scrollbar_drag_start_y;
+                            let start_offset =
+                                app.session_mgr.current_mut().ui.scrollbar_drag_start_offset;
                             if max_scroll > 0 {
                                 let delta_y = mouse.row as i32 - start_y as i32;
                                 // 每移动 1 行 track = 移动 max_scroll / track 的 offset
@@ -704,19 +651,15 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                                 let new_offset = (start_offset as i32 + delta_offset)
                                     .clamp(0, max_scroll as i32)
                                     as u16;
-                                app.session_mgr.sessions[app.session_mgr.active]
-                                    .ui
-                                    .scroll_offset = new_offset;
-                                app.session_mgr.sessions[app.session_mgr.active]
-                                    .ui
-                                    .scroll_follow = false;
+                                app.session_mgr.current_mut().ui.scroll_offset = new_offset;
+                                app.session_mgr.current_mut().ui.scroll_follow = false;
                             }
                         }
                     }
                 }
                 // Panel scrollbar drag: update panel scroll offset from mouse Y
                 {
-                    let session = &mut app.session_mgr.sessions[app.session_mgr.active];
+                    let session = &mut app.session_mgr.current_mut();
                     if session.ui.panel_scrollbar_dragging {
                         if let Some(ref metrics) = session.ui.panel_scrollbar_metrics {
                             let bar_inner_height = metrics.bar_area.height.saturating_sub(2);
@@ -737,131 +680,83 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                     }
                 }
                 // Panel selection drag
-                if app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .panel_selection
-                    .dragging
-                {
-                    if let Some(area) = app.session_mgr.sessions[app.session_mgr.active]
-                        .ui
-                        .panel_area
-                    {
-                        let content_row = mouse.row.saturating_sub(area.y).saturating_add(
-                            app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .panel_scroll_offset,
-                        );
+                if app.session_mgr.current_mut().ui.panel_selection.dragging {
+                    if let Some(area) = app.session_mgr.current_mut().ui.panel_area {
+                        let content_row = mouse
+                            .row
+                            .saturating_sub(area.y)
+                            .saturating_add(app.session_mgr.current_mut().ui.panel_scroll_offset);
                         let col = mouse.column.saturating_sub(area.x);
-                        app.session_mgr.sessions[app.session_mgr.active]
+                        app.session_mgr
+                            .current_mut()
                             .ui
                             .panel_selection
                             .update_drag(content_row, col);
                     }
                 }
-                if app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .text_selection
-                    .dragging
-                {
-                    if let Some(area) = app.session_mgr.sessions[app.session_mgr.active]
-                        .ui
-                        .messages_area
-                    {
-                        let visual_row = mouse.row.saturating_sub(area.y).saturating_add(
-                            app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .scroll_offset,
-                        );
+                if app.session_mgr.current_mut().ui.text_selection.dragging {
+                    if let Some(area) = app.session_mgr.current_mut().ui.messages_area {
+                        let visual_row = mouse
+                            .row
+                            .saturating_sub(area.y)
+                            .saturating_add(app.session_mgr.current_mut().ui.scroll_offset);
                         let visual_col = mouse.column.saturating_sub(area.x);
-                        app.session_mgr.sessions[app.session_mgr.active]
+                        app.session_mgr
+                            .current_mut()
                             .ui
                             .text_selection
                             .update_drag(visual_row, visual_col);
                     }
                 }
                 // Textarea area: extend textarea selection
-                if app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .textarea
-                    .is_selecting()
-                {
-                    if let Some(area) = app.session_mgr.sessions[app.session_mgr.active]
-                        .ui
-                        .textarea_area
-                    {
+                if app.session_mgr.current_mut().ui.textarea.is_selecting() {
+                    if let Some(area) = app.session_mgr.current_mut().ui.textarea_area {
                         if mouse.row >= area.y && mouse.row < area.y + area.height {
-                            let session = &app.session_mgr.sessions[app.session_mgr.active];
+                            let session = &app.session_mgr.current_mut();
                             let (row, col) =
                                 mouse::textarea_mouse_to_cursor(&session.ui.textarea, area, &mouse);
-                            app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .textarea
-                                .move_cursor(tui_textarea::CursorMove::Jump(
-                                    row as u16, col as u16,
-                                ));
+                            app.session_mgr.current_mut().ui.textarea.move_cursor(
+                                tui_textarea::CursorMove::Jump(row as u16, col as u16),
+                            );
                         }
                     }
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 // End scrollbar drag
-                app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .scrollbar_dragging = false;
+                app.session_mgr.current_mut().ui.scrollbar_dragging = false;
                 // End panel scrollbar drag
-                app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .panel_scrollbar_dragging = false;
+                app.session_mgr.current_mut().ui.panel_scrollbar_dragging = false;
                 // Panel selection released
-                if app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .panel_selection
-                    .dragging
-                {
-                    app.session_mgr.sessions[app.session_mgr.active]
-                        .ui
-                        .panel_selection
-                        .end_drag();
-                    let sel = &app.session_mgr.sessions[app.session_mgr.active]
-                        .ui
-                        .panel_selection;
+                if app.session_mgr.current_mut().ui.panel_selection.dragging {
+                    app.session_mgr.current_mut().ui.panel_selection.end_drag();
+                    let sel = &app.session_mgr.current_mut().ui.panel_selection;
                     if let (Some(start), Some(end)) = (sel.start, sel.end) {
                         let text = crate::app::text_selection::extract_panel_text(
                             start,
                             end,
-                            &app.session_mgr.sessions[app.session_mgr.active]
-                                .ui
-                                .panel_plain_lines,
+                            &app.session_mgr.current_mut().ui.panel_plain_lines,
                         );
-                        app.session_mgr.sessions[app.session_mgr.active]
+                        app.session_mgr
+                            .current_mut()
                             .ui
                             .panel_selection
                             .set_selected_text(text);
                     }
                     mouse::copy_panel_selection_to_clipboard(app);
                 }
-                if app.session_mgr.sessions[app.session_mgr.active]
-                    .ui
-                    .text_selection
-                    .dragging
-                {
-                    app.session_mgr.sessions[app.session_mgr.active]
-                        .ui
-                        .text_selection
-                        .end_drag();
-                    let ts = &app.session_mgr.sessions[app.session_mgr.active]
-                        .ui
-                        .text_selection;
+                if app.session_mgr.current_mut().ui.text_selection.dragging {
+                    app.session_mgr.current_mut().ui.text_selection.end_drag();
+                    let ts = &app.session_mgr.current_mut().ui.text_selection;
                     if let (Some(start), Some(end)) = (ts.start, ts.end) {
-                        let usable_width = app.session_mgr.sessions[app.session_mgr.active]
+                        let usable_width = app
+                            .session_mgr
+                            .current_mut()
                             .ui
                             .messages_area
                             .map(|a| a.width.saturating_sub(1))
                             .unwrap_or(0);
-                        let cache = app.session_mgr.sessions[app.session_mgr.active]
-                            .messages
-                            .render_cache
-                            .read();
+                        let cache = app.session_mgr.current_mut().messages.render_cache.read();
                         let text = crate::app::text_selection::extract_selected_text(
                             start,
                             end,
@@ -869,7 +764,8 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
                             usable_width,
                         );
                         drop(cache);
-                        app.session_mgr.sessions[app.session_mgr.active]
+                        app.session_mgr
+                            .current_mut()
                             .ui
                             .text_selection
                             .set_selected_text(text);
@@ -889,7 +785,6 @@ async fn handle_event(app: &mut App, ev: Event) -> Result<Option<Action>> {
 // ── OAuth prompt ────────────────────────────────────────────────────────────
 
 fn handle_oauth_prompt(app: &mut App, input: Input) {
-    use crate::app::handle_edit_key;
     let prompt = match app.global_ui.oauth_prompt.as_mut() {
         Some(p) => p,
         None => return,
@@ -927,7 +822,7 @@ fn handle_oauth_prompt(app: &mut App, input: Input) {
         }
         _ => {
             prompt.error_message = None;
-            handle_edit_key(&mut prompt.input, &mut prompt.cursor, input);
+            prompt.field.input(input);
         }
     }
 }

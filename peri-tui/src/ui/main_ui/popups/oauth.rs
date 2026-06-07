@@ -1,10 +1,11 @@
-use ratatui::layout::Rect;
-use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
+use ratatui::{
+    layout::Rect,
+    text::Span,
+    widgets::{Block, Borders, Paragraph},
+    Frame,
+};
 
-use crate::app::{edit_display_parts, App};
-use crate::ui::theme;
+use crate::{app::App, ui::theme};
 
 pub(crate) fn render_oauth_popup(f: &mut Frame, app: &mut App, area: Rect) {
     let prompt = match app.global_ui.oauth_prompt.as_ref() {
@@ -53,15 +54,13 @@ pub(crate) fn render_oauth_popup(f: &mut Frame, app: &mut App, area: Rect) {
     lines.push(ratatui::text::Line::from(""));
 
     // 输入行
-    let (before_cursor, after_cursor) = edit_display_parts(&prompt.input, prompt.cursor);
+    let value = prompt.field.value();
     lines.push(ratatui::text::Line::from(vec![
         Span::styled(
             "回调 URL > ",
             ratatui::style::Style::default().fg(theme::MUTED),
         ),
-        Span::raw(before_cursor),
-        Span::styled("█", ratatui::style::Style::default().fg(theme::TEXT)),
-        Span::raw(after_cursor),
+        Span::raw(format!("{}█", value)),
     ]));
 
     // 错误行

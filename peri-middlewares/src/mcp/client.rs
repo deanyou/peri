@@ -1,12 +1,15 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 
-use rmcp::model::{Resource, Tool};
-use rmcp::service::{Peer, QuitReason, RoleClient, RunningService, ServiceError};
+use rmcp::{
+    model::{Resource, Tool},
+    service::{Peer, QuitReason, RoleClient, RunningService, ServiceError},
+};
 
-use super::channel_handler::ChannelHandler;
-use super::config::{ConfigSource, McpServerConfig};
+use super::{
+    channel_handler::ChannelHandler,
+    config::{ConfigSource, McpServerConfig},
+};
 
 /// Wrapper for RunningService that can hold either handler type
 pub(crate) enum McpServiceWrapper {
@@ -109,8 +112,6 @@ pub enum McpPoolError {
         server: String,
         status: ClientStatus,
     },
-    #[error("MCP 服务器 \"{server}\" 调用超时")]
-    CallTimeout { server: String },
 }
 
 /// 单个 MCP 服务器的客户端句柄
@@ -178,12 +179,22 @@ impl McpClientPool {
                 peer: None,
                 tools: vec![],
                 resources: vec![],
-                status: ClientStatus::Failed(reason),
+                status: ClientStatus::Failed(reason.clone()),
                 oauth_status: OAuthStatus::default(),
                 source,
                 url,
                 channel_capable: false,
             }),
+        );
+        peri_agent::metrics::emit(
+            "mcp.error",
+            serde_json::json!({
+                "server": name,
+                "tool": "connect",
+                "error": reason,
+            }),
+            None,
+            None,
         );
     }
 

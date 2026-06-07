@@ -1,7 +1,8 @@
 use super::*;
-use crate::app::MessageViewModel;
-use crate::app::{AgentEvent, App};
-use crate::ui::main_ui;
+use crate::{
+    app::{AgentEvent, App, MessageViewModel},
+    ui::main_ui,
+};
 
 #[tokio::test]
 async fn test_snapshot_row_count() {
@@ -25,7 +26,8 @@ async fn test_assistant_chunk_renders() {
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
     app.flush_rebuild();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
     handle
         .terminal
         .draw(|f| main_ui::render(f, &mut app))
@@ -71,7 +73,8 @@ async fn test_user_message_renders() {
     let notified = handle.render_notify.notified();
     // 使用 ASCII 内容避免 CJK 宽字符在 buffer 中的空格填充问题
     let vm = MessageViewModel::user("hello from user".into());
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .view_messages
         .push(vm);
@@ -93,18 +96,23 @@ async fn test_user_message_renders() {
 async fn test_clear_empties_render_cache() {
     use crate::ui::render_thread::RenderEvent;
 
-    let (app, _handle) = App::new_headless(120, 30).await;
+    let (mut app, _handle) = App::new_headless(120, 30).await;
 
     // 直接发送 LoadHistory 填充 RenderCache
     let msgs = vec![MessageViewModel::user("test content".into())];
-    let _ = app.session_mgr.sessions[app.session_mgr.active]
+    let _ = app
+        .session_mgr
+        .current_mut()
         .messages
         .render_tx
-        .send(RenderEvent::Rebuild(msgs));
-    tokio::time::sleep(Duration::from_millis(50)).await;
+        .try_send(RenderEvent::Rebuild(msgs));
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     // 验证 RenderCache 有内容
-    let lines_before = app.session_mgr.sessions[app.session_mgr.active]
+    let lines_before = app
+        .session_mgr
+        .current_mut()
         .messages
         .render_cache
         .read()
@@ -112,318 +120,18 @@ async fn test_clear_empties_render_cache() {
     assert!(lines_before > 0, "清空前应有内容");
 
     // 发送 Clear 清空 RenderCache
-    let _ = app.session_mgr.sessions[app.session_mgr.active]
+    let _ = app
+        .session_mgr
+        .current_mut()
         .messages
         .render_tx
-        .send(RenderEvent::Clear);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+        .try_send(RenderEvent::Clear);
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     // 验证 RenderCache 已清空
-    let cache = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .render_cache
-        .read();
+    let cache = app.session_mgr.current_mut().messages.render_cache.read();
     assert_eq!(cache.total_lines, 0, "清空后 RenderCache 应为空");
-}
-
-mod markdown_tests {
-    use crate::ui::markdown::parse_markdown_default;
-    use ratatui::style::Modifier;
-
-    fn all_text(text: &ratatui::text::Text) -> String {
-        text.lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
-    #[test]
-    fn test_md_heading() {
-        use peri_widgets::markdown::{DefaultMarkdownTheme, MarkdownTheme};
-        let theme = DefaultMarkdownTheme;
-
-        let text = parse_markdown_default("# Hello World");
-        // 标题前有空行，标题在 index 1
-        let heading_line = &text.lines[1];
-        let all_content: String = heading_line
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(
-            all_content.contains("Hello World"),
-            "H1 应含标题文字，实际: {all_content:?}"
-        );
-        let has_heading_color = heading_line
-            .spans
-            .iter()
-            .any(|s| s.style.fg == Some(theme.heading()));
-        assert!(has_heading_color, "H1 应为 markdown 主题 heading 颜色");
-    }
-
-    #[test]
-    fn test_md_heading_h2() {
-        use peri_widgets::markdown::{DefaultMarkdownTheme, MarkdownTheme};
-        let theme = DefaultMarkdownTheme;
-
-        let text = parse_markdown_default("## Section Title");
-        // 标题前有空行，标题在 index 1
-        let heading_line = &text.lines[1];
-        let has_heading_color = heading_line
-            .spans
-            .iter()
-            .any(|s| s.style.fg == Some(theme.heading()));
-        assert!(has_heading_color, "H2 应为 markdown 主题 heading 颜色");
-    }
-
-    #[test]
-    fn test_md_inline_styles() {
-        let text = parse_markdown_default("**bold** *italic* ~~strike~~");
-        let all = all_text(&text);
-        assert!(all.contains("bold"), "应含 bold 文字");
-        assert!(all.contains("italic"), "应含 italic 文字");
-        assert!(all.contains("strike"), "应含 strike 文字");
-
-        let has_bold =
-            text.lines.iter().flat_map(|l| l.spans.iter()).any(|s| {
-                s.style.add_modifier.contains(Modifier::BOLD) && s.content.contains("bold")
-            });
-        assert!(has_bold, "bold span 应有 BOLD modifier");
-
-        let has_italic = text.lines.iter().flat_map(|l| l.spans.iter()).any(|s| {
-            s.style.add_modifier.contains(Modifier::ITALIC) && s.content.contains("italic")
-        });
-        assert!(has_italic, "italic span 应有 ITALIC modifier");
-
-        let has_strike = text.lines.iter().flat_map(|l| l.spans.iter()).any(|s| {
-            s.style.add_modifier.contains(Modifier::CROSSED_OUT) && s.content.contains("strike")
-        });
-        assert!(has_strike, "strikethrough span 应有 CROSSED_OUT modifier");
-    }
-
-    #[test]
-    fn test_md_inline_code() {
-        use peri_widgets::markdown::{DefaultMarkdownTheme, MarkdownTheme};
-        let theme = DefaultMarkdownTheme;
-
-        let text = parse_markdown_default("`hello`");
-        let has_code = text
-            .lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .any(|s| s.style.fg == Some(theme.code()) && s.content.contains("hello"));
-        assert!(
-            has_code,
-            "行内代码应为 markdown 主题 code 颜色，含 hello 文字"
-        );
-    }
-
-    #[test]
-    fn test_md_code_block() {
-        let text = parse_markdown_default("```rust\nfn main() {}\n```");
-        let all_lines: Vec<String> = text
-            .lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
-        // 单行代码块：无 [lang] 标签，无 │ 前缀
-        assert_eq!(
-            all_lines.len(),
-            1,
-            "单行代码块应只产生一行，got: {all_lines:#?}"
-        );
-        assert!(
-            !all_lines[0].contains("[rust]"),
-            "单行代码块不应含 [lang] 标签"
-        );
-        assert!(!all_lines[0].contains('│'), "单行代码块不应含 │ 前缀");
-        assert!(all_lines[0].contains("fn main"), "应包含代码内容");
-    }
-
-    #[test]
-    fn test_md_unordered_list() {
-        let text = parse_markdown_default("- item1\n- item2");
-        let all_lines: Vec<String> = text
-            .lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
-        let bullet_lines: Vec<&String> = all_lines.iter().filter(|l| l.contains('•')).collect();
-        assert_eq!(
-            bullet_lines.len(),
-            2,
-            "无序列表应有 2 行含 • ，实际:{all_lines:#?}"
-        );
-    }
-
-    #[test]
-    fn test_md_ordered_list() {
-        let text = parse_markdown_default("1. first\n2. second");
-        let all_lines: Vec<String> = text
-            .lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
-        let has_one = all_lines.iter().any(|l| l.contains("1."));
-        let has_two = all_lines.iter().any(|l| l.contains("2."));
-        assert!(has_one, "有序列表应含 1. 前缀，实际:{all_lines:#?}");
-        assert!(has_two, "有序列表应含 2. 前缀，实际:{all_lines:#?}");
-    }
-
-    #[test]
-    fn test_md_blockquote() {
-        let text = parse_markdown_default("> quoted text");
-        let has_prefix = text
-            .lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .any(|s| s.content.contains('▍'));
-        assert!(has_prefix, "引用块应含 ▍ 前缀");
-    }
-
-    #[test]
-    fn test_md_rule() {
-        let text = parse_markdown_default("---");
-        let has_rule = text
-            .lines
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .any(|s| s.content.matches('─').count() >= 10);
-        assert!(has_rule, "水平线应含多个 ─ 字符");
-    }
-
-    #[test]
-    fn test_md_incomplete_does_not_panic() {
-        // 不完整 Markdown 不应 panic，应降级为纯文本
-        let text = parse_markdown_default("**unclosed bold");
-        let all = all_text(&text);
-        assert!(
-            all.contains("unclosed bold"),
-            "不完整 Markdown 应降级为纯文本，实际: {all:?}"
-        );
-    }
-
-    #[test]
-    fn test_md_table_basic() {
-        let md = "| Name  | Value |\n|-------|-------|\n| foo   | 123   |\n| bar   | 456   |";
-        let text = parse_markdown_default(md);
-        let all = all_text(&text);
-        // Should contain header and data cells
-        assert!(
-            all.contains("Name"),
-            "Table should contain header 'Name', got: {all:?}"
-        );
-        assert!(
-            all.contains("foo"),
-            "Table should contain data 'foo', got: {all:?}"
-        );
-        assert!(
-            all.contains("456"),
-            "Table should contain data '456', got: {all:?}"
-        );
-        // Should have border characters
-        assert!(
-            all.contains("│"),
-            "Table should have vertical borders, got: {all:?}"
-        );
-        assert!(
-            all.contains("┌"),
-            "Table should have top-left corner, got: {all:?}"
-        );
-        assert!(
-            all.contains("└"),
-            "Table should have bottom-left corner, got: {all:?}"
-        );
-        assert!(
-            all.contains("┼"),
-            "Table should have header separator, got: {all:?}"
-        );
-    }
-
-    #[test]
-    fn test_md_table_cell_count() {
-        let md = "| A | B |\n|---|---|\n| 1 | 2 |";
-        let text = parse_markdown_default(md);
-        // Should produce exactly: top border + header + separator + 1 data row + bottom border = 5 lines
-        assert_eq!(
-            text.lines.len(),
-            5,
-            "2-col table should produce 5 lines, got: {}",
-            text.lines.len()
-        );
-    }
-
-    #[test]
-    fn test_md_table_border_alignment() {
-        let md = "| Name | Value |\n|------|-------|\n| foo  | 123   |";
-        let text = parse_markdown_default(md);
-        // Debug: print each line
-        for (i, line) in text.lines.iter().enumerate() {
-            let content: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            eprintln!(
-                "line {}: {:?} (chars={})",
-                i,
-                content,
-                content.chars().count()
-            );
-        }
-        // Each line should have the same visual width (measured in chars, not bytes)
-        let widths: Vec<usize> = text
-            .lines
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|s| s.content.chars().count())
-                    .sum::<usize>()
-            })
-            .collect();
-        let unique_widths: std::collections::HashSet<usize> = widths.iter().copied().collect();
-        assert!(
-            unique_widths.len() == 1,
-            "All table lines should have same visual width, got: {:?}",
-            widths
-        );
-    }
-
-    #[test]
-    fn test_md_table_alignment() {
-        let md = "| Left | Center | Right |\n|:-----|:------:|------:|\n| a    | b      | c     |";
-        let text = parse_markdown_default(md);
-        let all = all_text(&text);
-        assert!(
-            all.contains("Left"),
-            "Should contain 'Left' header, got: {all:?}"
-        );
-        assert!(all.contains("a"), "Should contain data 'a', got: {all:?}");
-    }
-
-    #[test]
-    fn test_md_table_with_inline_code() {
-        let md = "| Command |\n|---------|\n| `ls`    |";
-        let text = parse_markdown_default(md);
-        let all = all_text(&text);
-        assert!(
-            all.contains("ls"),
-            "Should contain inline code content, got: {all:?}"
-        );
-    }
 }
 
 #[tokio::test]
@@ -461,7 +169,8 @@ async fn test_subagent_group_basic() {
     });
     app.process_pending_events();
     app.flush_rebuild();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     handle
         .terminal
@@ -478,11 +187,7 @@ async fn test_subagent_group_basic() {
     );
 
     // 验证 SubAgentGroup 已完成（is_running=false）
-    if let Some(vm) = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .last()
-    {
+    if let Some(vm) = app.session_mgr.current_mut().messages.view_messages.last() {
         assert!(vm.is_subagent_group(), "最后一条消息应为 SubAgentGroup");
         if let crate::app::MessageViewModel::SubAgentGroup {
             is_running,
@@ -531,10 +236,7 @@ async fn test_subagent_group_sliding_window() {
         recent_messages,
         is_running,
         ..
-    }) = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .last()
+    }) = app.session_mgr.current_mut().messages.view_messages.last()
     {
         assert_eq!(*total_steps, 6, "total_steps 应为 6，实际: {}", total_steps);
         assert!(
@@ -576,10 +278,7 @@ async fn test_subagent_group_assistant_chunk() {
         recent_messages,
         final_result,
         ..
-    }) = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .last()
+    }) = app.session_mgr.current_mut().messages.view_messages.last()
     {
         let has_assistant = recent_messages.iter().any(|m| m.is_assistant());
         assert!(has_assistant, "recent_messages 应包含 AssistantBubble");
@@ -646,15 +345,13 @@ async fn test_empty_assistant_chunk_no_bubble() {
 
     // view_messages 应为空（没有创建空白气泡）
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .messages
             .view_messages
             .is_empty(),
         "空 AssistantChunk 不应创建 AssistantBubble，实际: {:?}",
-        app.session_mgr.sessions[app.session_mgr.active]
-            .messages
-            .view_messages
-            .len()
+        app.session_mgr.current_mut().messages.view_messages.len()
     );
 
     // 发送多个空 chunk，仍不应创建气泡
@@ -669,7 +366,8 @@ async fn test_empty_assistant_chunk_no_bubble() {
     app.process_pending_events();
 
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .messages
             .view_messages
             .is_empty(),
@@ -703,7 +401,8 @@ async fn test_empty_then_nonempty_assistant_chunk() {
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
     app.flush_rebuild();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     handle
         .terminal
@@ -712,18 +411,12 @@ async fn test_empty_then_nonempty_assistant_chunk() {
 
     // Done 触发 reconcile_tail 从 completed 重建，应包含 Human + AI 两条消息
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .messages
-            .view_messages
-            .len(),
+        app.session_mgr.current_mut().messages.view_messages.len(),
         2,
         "应有 2 条消息（Human+AI）"
     );
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .messages
-            .view_messages[1]
-            .is_assistant(),
+        app.session_mgr.current_mut().messages.view_messages[1].is_assistant(),
         "第二条应为 AssistantBubble"
     );
     assert!(handle.contains("Hello"), "应显示 Hello 内容");
@@ -754,19 +447,13 @@ async fn test_tool_call_without_assistant_chunk_no_bubble() {
 
     // 应该有 1 个 ToolBlock，不应有空白 AssistantBubble
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .messages
-            .view_messages
-            .len(),
+        app.session_mgr.current_mut().messages.view_messages.len(),
         1,
         "应有 1 条消息（ToolBlock）"
     );
     // 确保不是 AssistantBubble（空白气泡）
     assert!(
-        !app.session_mgr.sessions[app.session_mgr.active]
-            .messages
-            .view_messages[0]
-            .is_assistant(),
+        !app.session_mgr.current_mut().messages.view_messages[0].is_assistant(),
         "不应创建 AssistantBubble，应为 ToolBlock"
     );
 }
@@ -809,7 +496,8 @@ async fn test_welcome_card_hidden_after_message() {
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
     app.flush_rebuild();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     handle
         .terminal
@@ -877,7 +565,8 @@ async fn test_sticky_header_hidden_when_no_messages() {
     // 无消息时 sticky header 应完全隐藏
     let (mut app, mut handle) = App::new_headless(80, 24).await;
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .metadata
             .last_human_message
             .is_none(),
@@ -906,7 +595,8 @@ async fn test_sticky_header_shows_after_submit() {
     for i in 0..30 {
         let notified = handle.render_notify.notified();
         let vm = MessageViewModel::user(format!("message line {}", i));
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .messages
             .view_messages
             .push(vm);
@@ -915,9 +605,7 @@ async fn test_sticky_header_shows_after_submit() {
     }
 
     // 设置 last_human_message（模拟 submit_message 的效果）
-    app.session_mgr.sessions[app.session_mgr.active]
-        .metadata
-        .last_human_message = Some("hello from user".to_string());
+    app.session_mgr.current_mut().metadata.last_human_message = Some("hello from user".to_string());
 
     handle
         .terminal
@@ -939,11 +627,10 @@ async fn test_sticky_header_hidden_after_clear() {
     let (mut app, mut handle) = App::new_headless(80, 24).await;
 
     // 模拟已有消息
-    app.session_mgr.sessions[app.session_mgr.active]
-        .metadata
-        .last_human_message = Some("some message".to_string());
+    app.session_mgr.current_mut().metadata.last_human_message = Some("some message".to_string());
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .metadata
             .last_human_message
             .is_some(),
@@ -956,7 +643,8 @@ async fn test_sticky_header_hidden_after_clear() {
     notified.await;
 
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .metadata
             .last_human_message
             .is_none(),
@@ -985,7 +673,8 @@ async fn test_sticky_header_shows_last_message_not_first() {
     for i in 0..30 {
         let notified = handle.render_notify.notified();
         let vm = MessageViewModel::user(format!("padding line {}", i));
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .messages
             .view_messages
             .push(vm);
@@ -994,13 +683,9 @@ async fn test_sticky_header_shows_last_message_not_first() {
     }
 
     // 模拟第一条消息
-    app.session_mgr.sessions[app.session_mgr.active]
-        .metadata
-        .last_human_message = Some("first message".to_string());
+    app.session_mgr.current_mut().metadata.last_human_message = Some("first message".to_string());
     // 模拟第二条消息（覆盖）
-    app.session_mgr.sessions[app.session_mgr.active]
-        .metadata
-        .last_human_message = Some("second message".to_string());
+    app.session_mgr.current_mut().metadata.last_human_message = Some("second message".to_string());
 
     handle
         .terminal
@@ -1030,7 +715,8 @@ async fn test_sticky_header_truncation_long_message() {
     for i in 0..30 {
         let notified = handle.render_notify.notified();
         let vm = MessageViewModel::user(format!("padding {}", i));
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .messages
             .view_messages
             .push(vm);
@@ -1042,9 +728,7 @@ async fn test_sticky_header_truncation_long_message() {
     let long_msg =
         "hello this is a very long message that definitely exceeds header capacity".to_string();
     assert!(long_msg.chars().count() > 40);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .metadata
-        .last_human_message = Some(long_msg.clone());
+    app.session_mgr.current_mut().metadata.last_human_message = Some(long_msg.clone());
 
     handle
         .terminal
@@ -1117,11 +801,9 @@ async fn test_bordered_panel_integration() {
     // BorderedPanel 集成冒烟测试：渲染 agent panel 验证无 panic 且输出正确
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    app.session_mgr.sessions[app.session_mgr.active]
-        .session_panels
-        .open(crate::app::panel_manager::PanelState::Agent(
-            crate::app::AgentPanel::new(vec![], None),
-        ));
+    app.session_mgr.current_mut().session_panels.open(
+        crate::app::panel_manager::PanelState::Agent(crate::app::AgentPanel::new(vec![], None)),
+    );
 
     handle
         .terminal
@@ -1170,9 +852,8 @@ async fn test_tab_bar_integration() {
         },
     ]);
     let prompt = AskUserBatchPrompt::from_request(req);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .interaction_prompt = Some(crate::app::InteractionPrompt::Questions(prompt));
+    app.session_mgr.current_mut().agent.interaction_prompt =
+        Some(crate::app::InteractionPrompt::Questions(prompt));
 
     handle
         .terminal
@@ -1192,232 +873,6 @@ async fn test_tab_bar_integration() {
     );
 }
 
-mod setup_wizard_e2e {
-    use crate::app::setup_wizard::{
-        handle_setup_wizard_key, needs_setup, save_setup_to, FormField, FormMode, MigratedProvider,
-        ProviderType, SetupStep, SetupWizardAction, SetupWizardPanel,
-    };
-    use crate::app::App;
-    use tui_textarea::{Input, Key};
-
-    fn make_char(c: char) -> Input {
-        Input {
-            key: Key::Char(c),
-            ctrl: false,
-            alt: false,
-            shift: false,
-        }
-    }
-    fn make_key(key: Key) -> Input {
-        Input {
-            key,
-            ctrl: false,
-            alt: false,
-            shift: false,
-        }
-    }
-    fn type_text(wizard: &mut SetupWizardPanel, text: &str) {
-        for c in text.chars() {
-            let _ = handle_setup_wizard_key(wizard, make_char(c));
-        }
-    }
-
-    fn advance_to_form(wizard: &mut SetupWizardPanel) {
-        wizard.step = SetupStep::Choose;
-        let _ = handle_setup_wizard_key(wizard, make_key(Key::Enter));
-        assert_eq!(wizard.step, SetupStep::Form);
-        assert_eq!(wizard.form_mode, FormMode::Browse);
-    }
-
-    /// 进入 Edit 模式，填写 API Key，Confirm 回到 Browse，然后 Submit
-    fn fill_and_submit(wizard: &mut SetupWizardPanel, api_key: &str) {
-        // 确保在第一个 provider 位置
-        wizard.browse_cursor = 0;
-        // Browse → Edit（Enter on first provider）
-        let _ = handle_setup_wizard_key(wizard, make_key(Key::Enter));
-        assert_eq!(wizard.form_mode, FormMode::Edit);
-
-        // 填写 API Key
-        wizard.form_focus = FormField::ApiKey;
-        type_text(wizard, api_key);
-
-        // Confirm 回到 Browse
-        wizard.form_focus = FormField::Confirm;
-        let _ = handle_setup_wizard_key(wizard, make_key(Key::Enter));
-        assert_eq!(wizard.form_mode, FormMode::Browse);
-
-        // 移到 Submit 并提交
-        wizard.browse_cursor = wizard.providers.len();
-        let _ = handle_setup_wizard_key(wizard, make_key(Key::Enter));
-    }
-
-    #[tokio::test]
-    async fn test_needs_setup_triggers_for_empty_config() {
-        let (app, _handle) = App::new_headless(120, 30).await;
-        assert!(app.services.peri_config.is_none());
-        let empty_cfg = crate::config::PeriConfig::default();
-        assert!(needs_setup(&empty_cfg.config));
-    }
-
-    #[tokio::test]
-    async fn test_setup_wizard_full_flow_anthropic() {
-        let mut wizard = SetupWizardPanel::new();
-        advance_to_form(&mut wizard);
-        assert_eq!(wizard.providers.len(), 1);
-        assert_eq!(wizard.providers[0].provider_type, ProviderType::Anthropic);
-
-        fill_and_submit(&mut wizard, "sk-ant-test-key-12345");
-        assert_eq!(wizard.step, SetupStep::Done);
-
-        let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-        assert!(matches!(action, Some(SetupWizardAction::SaveAndClose)));
-
-        let temp_dir =
-            std::env::temp_dir().join(format!("zen-setup-test-{}", uuid::Uuid::now_v7()));
-        let config_path = temp_dir.join("settings.json");
-        let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
-        assert_eq!(cfg.config.providers.len(), 1);
-        assert_eq!(cfg.config.providers[0].provider_type, "anthropic");
-        assert_eq!(cfg.config.providers[0].api_key, "sk-ant-test-key-12345");
-        assert!(!needs_setup(&cfg.config));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    #[tokio::test]
-    async fn test_setup_wizard_full_flow_openai() {
-        let mut wizard = SetupWizardPanel::new();
-        advance_to_form(&mut wizard);
-
-        // Enter Edit mode, change type to OpenAI
-        let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-        assert_eq!(wizard.form_mode, FormMode::Edit);
-        wizard.form_focus = FormField::ProviderType;
-        let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Right));
-        assert_eq!(
-            wizard.providers[0].provider_type,
-            ProviderType::OpenAiCompatible
-        );
-
-        // Fill key
-        wizard.form_focus = FormField::ApiKey;
-        type_text(&mut wizard, "sk-openai-test-key");
-
-        // Confirm back to Browse
-        wizard.form_focus = FormField::Confirm;
-        let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-        assert_eq!(wizard.form_mode, FormMode::Browse);
-
-        // Submit
-        wizard.browse_cursor = wizard.providers.len();
-        let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-        assert_eq!(wizard.step, SetupStep::Done);
-
-        let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-        assert!(matches!(action, Some(SetupWizardAction::SaveAndClose)));
-
-        let temp_dir =
-            std::env::temp_dir().join(format!("zen-setup-test-openai-{}", uuid::Uuid::now_v7()));
-        let config_path = temp_dir.join("settings.json");
-        let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
-        assert_eq!(cfg.config.providers[0].provider_type, "openai");
-        assert_eq!(cfg.config.providers[0].api_key, "sk-openai-test-key");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    #[tokio::test]
-    async fn test_setup_wizard_skip_on_choose() {
-        let (mut app, _handle) = App::new_headless(120, 30).await;
-        app.global_ui.setup_wizard = Some(SetupWizardPanel::new());
-        let wizard = app.global_ui.setup_wizard.as_mut().unwrap();
-        let action = handle_setup_wizard_key(wizard, make_key(Key::Esc));
-        assert!(matches!(action, Some(SetupWizardAction::Skip)));
-    }
-
-    #[tokio::test]
-    async fn test_setup_wizard_esc_navigation() {
-        let mut wizard = SetupWizardPanel::new();
-        advance_to_form(&mut wizard);
-
-        // Browse → Submit → Enter (empty key, should stay)
-        wizard.browse_cursor = wizard.providers.len();
-        let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-        assert_eq!(wizard.step, SetupStep::Form);
-
-        fill_and_submit(&mut wizard, "test-key");
-        assert_eq!(wizard.step, SetupStep::Done);
-
-        // Done → Esc → Form
-        let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-        assert_eq!(wizard.step, SetupStep::Form);
-
-        // Form → Esc → Choose
-        let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-        assert_eq!(wizard.step, SetupStep::Choose);
-
-        // Choose → Esc → Language
-        let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-        assert_eq!(wizard.step, SetupStep::Language);
-    }
-
-    #[tokio::test]
-    async fn test_setup_wizard_toggle_select() {
-        let mut wizard = SetupWizardPanel::new();
-        advance_to_form(&mut wizard);
-        // Browse mode: Space toggles
-        assert!(wizard.providers[0].selected);
-        let _ = handle_setup_wizard_key(&mut wizard, make_char(' '));
-        assert!(!wizard.providers[0].selected);
-        let _ = handle_setup_wizard_key(&mut wizard, make_char(' '));
-        assert!(wizard.providers[0].selected);
-    }
-
-    #[tokio::test]
-    async fn test_setup_wizard_multi_provider() {
-        let mut wizard = SetupWizardPanel::new();
-        advance_to_form(&mut wizard);
-        wizard
-            .providers
-            .push(MigratedProvider::new(ProviderType::OpenAiCompatible));
-        wizard.providers[1].api_key = "sk-openai".to_string();
-        wizard.providers[0].api_key = "sk-ant".to_string();
-
-        // Browse: Submit
-        wizard.browse_cursor = wizard.providers.len();
-        let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-        assert_eq!(wizard.step, SetupStep::Done);
-
-        let temp_dir =
-            std::env::temp_dir().join(format!("zen-setup-multi-{}", uuid::Uuid::now_v7()));
-        let config_path = temp_dir.join("settings.json");
-        let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
-        assert_eq!(cfg.config.providers.len(), 2);
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    #[tokio::test]
-    async fn test_setup_wizard_saves_and_clears() {
-        let (mut app, _handle) = App::new_headless(120, 30).await;
-        let mut wizard = SetupWizardPanel::new();
-        advance_to_form(&mut wizard);
-        fill_and_submit(&mut wizard, "sk-final-test");
-        assert_eq!(wizard.step, SetupStep::Done);
-
-        app.global_ui.setup_wizard = Some(wizard);
-        let wizard = app.global_ui.setup_wizard.as_mut().unwrap();
-        let action = handle_setup_wizard_key(wizard, make_key(Key::Enter));
-        assert!(matches!(action, Some(SetupWizardAction::SaveAndClose)));
-
-        let wizard = app.global_ui.setup_wizard.take().unwrap();
-        let temp_dir =
-            std::env::temp_dir().join(format!("zen-setup-final-{}", uuid::Uuid::now_v7()));
-        let config_path = temp_dir.join("settings.json");
-        let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
-        assert!(!needs_setup(&cfg.config));
-        app.services.peri_config = Some(cfg);
-        assert!(app.global_ui.setup_wizard.is_none());
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-}
 // ─── Permission Mode Tests ──────────────────────────────────────────────
 
 #[tokio::test]
@@ -1577,14 +1032,16 @@ async fn test_mode_highlight_until_set_on_cycle() {
 async fn test_spinner_shows_verb_in_status_bar() {
     let (mut app, mut handle) = crate::app::App::new_headless(120, 30).await;
     // 添加一条消息，否则 render_messages 会走 welcome 分支提前 return
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .view_messages
         .push(crate::app::MessageViewModel::user("hello".into()));
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .spinner_state
         .set_verb(Some("Searching code"));
-    app.session_mgr.sessions[app.session_mgr.active].ui.loading = true;
+    app.session_mgr.current_mut().ui.loading = true;
 
     handle
         .terminal
@@ -1610,6 +1067,7 @@ async fn test_tool_call_widget_renders_completed() {
         is_error: false,
         collapsed: false,
         diff_lines: None,
+        content_hash: 0,
     };
 
     let lines = crate::ui::message_render::render_view_model(&vm, Some(1), 80, false); // Render into a visible area for verification
@@ -1630,9 +1088,7 @@ async fn test_retry_status_shows_in_status_bar() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
     // 直接设置 retry_status 并渲染
-    app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .retry_status = Some(crate::app::RetryStatus {
+    app.session_mgr.current_mut().agent.retry_status = Some(crate::app::RetryStatus {
         attempt: 2,
         max_attempts: 5,
         delay_ms: 2000,
@@ -1698,9 +1154,7 @@ async fn test_compact_done_with_re_inject() {
     notified.await;
 
     // view_messages 应包含压缩提示（condensed summary 格式）
-    let msgs = &app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages;
+    let msgs = &app.session_mgr.current_mut().messages.view_messages;
     assert_eq!(
         msgs.len(),
         1,
@@ -1708,7 +1162,7 @@ async fn test_compact_done_with_re_inject() {
         msgs.len()
     );
     let has_compact = msgs.iter().any(|m| {
-        if let MessageViewModel::SystemNote { content } = m {
+        if let MessageViewModel::SystemNote { content, .. } = m {
             content.contains("✻ Context compressed")
                 && content.contains("Read /a.rs")
                 && content.contains("Skill: skill.md")
@@ -1727,12 +1181,10 @@ async fn test_compact_done_without_re_inject() {
     app.process_pending_events();
     notified.await;
 
-    let msgs = &app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages;
+    let msgs = &app.session_mgr.current_mut().messages.view_messages;
     assert_eq!(msgs.len(), 1, "应只有 1 条压缩占位消息");
     let has_compact = msgs.iter().any(|m| {
-        if let MessageViewModel::SystemNote { content } = m {
+        if let MessageViewModel::SystemNote { content, .. } = m {
             content.contains("✻ Context compressed")
         } else {
             false
@@ -1740,7 +1192,7 @@ async fn test_compact_done_without_re_inject() {
     });
     assert!(has_compact, "应包含压缩提示消息");
     let has_re_inject = msgs.iter().any(|m| {
-        if let MessageViewModel::SystemNote { content } = m {
+        if let MessageViewModel::SystemNote { content, .. } = m {
             content.contains("Read ") || content.contains("Skill:")
         } else {
             false
@@ -1785,7 +1237,8 @@ async fn test_user_message_survives_assistant_chunk() {
 
     // 模拟用户发送消息
     let user_vm = MessageViewModel::user("my question".into());
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .view_messages
         .push(user_vm);
@@ -1802,7 +1255,8 @@ async fn test_user_message_survives_assistant_chunk() {
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
     app.flush_rebuild();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     handle
         .terminal
@@ -1811,16 +1265,9 @@ async fn test_user_message_survives_assistant_chunk() {
 
     // view_messages 应包含用户消息 + AI 消息
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .messages
-            .view_messages
-            .len()
-            >= 2,
+        app.session_mgr.current_mut().messages.view_messages.len() >= 2,
         "应有至少 2 条消息（用户+AI），实际: {}",
-        app.session_mgr.sessions[app.session_mgr.active]
-            .messages
-            .view_messages
-            .len()
+        app.session_mgr.current_mut().messages.view_messages.len()
     );
     assert!(
         handle.contains("my question"),
@@ -1843,14 +1290,11 @@ async fn test_messages_accumulate_across_turns() {
 
     // 第一轮：用户 → AI
     // 模拟 submit_message：先记录 round_start_vm_idx，再 push Human VM
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
     let user1 = MessageViewModel::user("turn1".into());
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .view_messages
         .push(user1);
@@ -1867,18 +1311,16 @@ async fn test_messages_accumulate_across_turns() {
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
     app.flush_rebuild();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     // 第二轮：用户 → AI
     // 模拟 submit_message：先记录 round_start_vm_idx，再 push Human VM
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
     let user2 = MessageViewModel::user("turn2".into());
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .view_messages
         .push(user2);
@@ -1897,7 +1339,8 @@ async fn test_messages_accumulate_across_turns() {
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
     app.flush_rebuild();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     handle
         .terminal
@@ -1906,16 +1349,10 @@ async fn test_messages_accumulate_across_turns() {
 
     // 应累积 4 条消息
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .messages
-            .view_messages
-            .len(),
+        app.session_mgr.current_mut().messages.view_messages.len(),
         4,
         "两轮对话应有 4 条消息，实际: {}",
-        app.session_mgr.sessions[app.session_mgr.active]
-            .messages
-            .view_messages
-            .len()
+        app.session_mgr.current_mut().messages.view_messages.len()
     );
     assert!(handle.contains("turn1"), "第一轮用户消息应可见");
     assert!(handle.contains("turn2"), "第二轮用户消息应可见");
@@ -1941,7 +1378,9 @@ async fn test_done_does_not_duplicate_ai_message() {
     app.process_pending_events();
 
     // 统计包含 "unique text" 的 assistant bubble 数量
-    let assistant_count = app.session_mgr.sessions[app.session_mgr.active]
+    let assistant_count = app
+        .session_mgr
+        .current_mut()
         .messages
         .view_messages
         .iter()
@@ -2002,7 +1441,8 @@ async fn test_tool_then_text_preserves_tool_block() {
     });
     app.process_pending_events();
     app.flush_rebuild();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     handle
         .terminal
@@ -2010,12 +1450,16 @@ async fn test_tool_then_text_preserves_tool_block() {
         .unwrap();
 
     // ToolBlock 和 AssistantBubble 都应存在
-    let has_tool = app.session_mgr.sessions[app.session_mgr.active]
+    let has_tool = app
+        .session_mgr
+        .current_mut()
         .messages
         .view_messages
         .iter()
         .any(|m| matches!(m, MessageViewModel::ToolBlock { .. }));
-    let has_assistant = app.session_mgr.sessions[app.session_mgr.active]
+    let has_assistant = app
+        .session_mgr
+        .current_mut()
         .messages
         .view_messages
         .iter()
@@ -2033,15 +1477,17 @@ async fn test_unified_hint_shows_commands_and_skills() {
     let (mut app, mut handle) = App::new_headless(120, 50).await;
 
     // 设置输入框内容为 /
-    app.session_mgr.sessions[app.session_mgr.active].ui.textarea =
-        crate::app::build_textarea(false);
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
+    app.session_mgr.current_mut().ui.textarea.insert_str("/");
+    app.session_mgr
+        .current_mut()
         .ui
-        .textarea
-        .insert_str("/");
+        .slash_hint
+        .activate(String::new(), 0);
 
     // 注入 2 个 Skills
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .commands
         .skills
         .push(SkillMetadata {
@@ -2049,7 +1495,8 @@ async fn test_unified_hint_shows_commands_and_skills() {
             description: "commit changes".into(),
             path: "/tmp/commit.md".into(),
         });
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .commands
         .skills
         .push(SkillMetadata {
@@ -2060,7 +1507,9 @@ async fn test_unified_hint_shows_commands_and_skills() {
 
     // 候选列表应包含命令和 Skills
     let count = app.hint_candidates_count();
-    let cmd_count = app.session_mgr.sessions[app.session_mgr.active]
+    let cmd_count = app
+        .session_mgr
+        .current_mut()
         .commands
         .command_registry
         .match_prefix("", &app.services.lc)
@@ -2092,14 +1541,16 @@ async fn test_unified_hint_filters_by_prefix() {
     use peri_middlewares::skills::loader::SkillMetadata;
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    app.session_mgr.sessions[app.session_mgr.active].ui.textarea =
-        crate::app::build_textarea(false);
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
+    app.session_mgr.current_mut().ui.textarea.insert_str("/mo");
+    app.session_mgr
+        .current_mut()
         .ui
-        .textarea
-        .insert_str("/mo");
+        .slash_hint
+        .activate("mo".to_string(), 0);
 
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .commands
         .skills
         .push(SkillMetadata {
@@ -2134,14 +1585,15 @@ async fn test_unified_hint_no_result_for_hash() {
     use peri_middlewares::skills::loader::SkillMetadata;
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
-    app.session_mgr.sessions[app.session_mgr.active].ui.textarea =
-        crate::app::build_textarea(false);
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
+    app.session_mgr
+        .current_mut()
         .ui
         .textarea
         .insert_str("#skill");
 
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .commands
         .skills
         .push(SkillMetadata {
@@ -2172,13 +1624,14 @@ async fn test_enter_skill_name_submits_message() {
     use peri_middlewares::skills::loader::SkillMetadata;
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
-    app.session_mgr.sessions[app.session_mgr.active].ui.textarea =
-        crate::app::build_textarea(false);
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
+    app.session_mgr
+        .current_mut()
         .ui
         .textarea
         .insert_str("/review");
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .commands
         .skills
         .push(SkillMetadata {
@@ -2188,24 +1641,14 @@ async fn test_enter_skill_name_submits_message() {
         });
 
     // 模拟 Enter 事件处理
-    let text: String = app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .textarea
-        .lines()
-        .join("\n");
+    let text: String = app.session_mgr.current_mut().ui.textarea.lines().join("\n");
     let text = text.trim().to_string();
     assert!(text.starts_with('/'));
 
     // 验证命令 dispatch 不匹配后 Skill fallback
-    let registry = std::mem::take(
-        &mut app.session_mgr.sessions[app.session_mgr.active]
-            .commands
-            .command_registry,
-    );
+    let registry = std::mem::take(&mut app.session_mgr.current_mut().commands.command_registry);
     let known = registry.dispatch(&mut app, &text);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .commands
-        .command_registry = registry;
+    app.session_mgr.current_mut().commands.command_registry = registry;
     assert!(!known, "review 不应是已知命令");
 
     // 验证 Skill 匹配
@@ -2215,7 +1658,9 @@ async fn test_enter_skill_name_submits_message() {
         .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     assert_eq!(skill_name, "review");
-    let skill_found = app.session_mgr.sessions[app.session_mgr.active]
+    let skill_found = app
+        .session_mgr
+        .current_mut()
         .commands
         .skills
         .iter()
@@ -2227,29 +1672,19 @@ async fn test_enter_skill_name_submits_message() {
 async fn test_enter_unknown_command_shows_error() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
-    app.session_mgr.sessions[app.session_mgr.active].ui.textarea =
-        crate::app::build_textarea(false);
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr.current_mut().ui.textarea = crate::app::build_textarea(false);
+    app.session_mgr
+        .current_mut()
         .ui
         .textarea
         .insert_str("/nonexistent");
 
     // 模拟 Enter 处理逻辑
-    let text: String = app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .textarea
-        .lines()
-        .join("\n");
+    let text: String = app.session_mgr.current_mut().ui.textarea.lines().join("\n");
     let text = text.trim().to_string();
-    let registry = std::mem::take(
-        &mut app.session_mgr.sessions[app.session_mgr.active]
-            .commands
-            .command_registry,
-    );
+    let registry = std::mem::take(&mut app.session_mgr.current_mut().commands.command_registry);
     let known = registry.dispatch(&mut app, &text);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .commands
-        .command_registry = registry;
+    app.session_mgr.current_mut().commands.command_registry = registry;
     assert!(!known, "nonexistent 不应是已知命令");
 
     // Skill fallback 也应失败
@@ -2258,7 +1693,9 @@ async fn test_enter_unknown_command_shows_error() {
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    let skill_found = app.session_mgr.sessions[app.session_mgr.active]
+    let skill_found = app
+        .session_mgr
+        .current_mut()
         .commands
         .skills
         .iter()
@@ -2272,7 +1709,8 @@ async fn test_enter_known_command_no_skill_fallback() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     // 注入名为 help 的 Skill
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .commands
         .skills
         .push(SkillMetadata {
@@ -2282,15 +1720,9 @@ async fn test_enter_known_command_no_skill_fallback() {
         });
 
     // /help 应被命令 dispatch 拦截，不走 Skill fallback
-    let registry = std::mem::take(
-        &mut app.session_mgr.sessions[app.session_mgr.active]
-            .commands
-            .command_registry,
-    );
+    let registry = std::mem::take(&mut app.session_mgr.current_mut().commands.command_registry);
     let known = registry.dispatch(&mut app, "/help");
-    app.session_mgr.sessions[app.session_mgr.active]
-        .commands
-        .command_registry = registry;
+    app.session_mgr.current_mut().commands.command_registry = registry;
     assert!(known, "/help 应是已知命令，优先于同名 Skill");
 }
 
@@ -2336,183 +1768,14 @@ async fn test_welcome_card_shows_alt_enter_hint() {
 async fn test_ambiguous_command_shows_candidates() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
     // /c 前缀匹配 clear/compact/cron
-    let registry = &app.session_mgr.sessions[app.session_mgr.active]
-        .commands
-        .command_registry;
+    let registry = &app.session_mgr.current_mut().commands.command_registry;
     let matches = registry.match_prefix("c", &app.services.lc);
     assert!(matches.len() >= 2, "/c 应匹配多个命令，实际: {:?}", matches);
     // dispatch 应返回 false（歧义）
-    let registry = std::mem::take(
-        &mut app.session_mgr.sessions[app.session_mgr.active]
-            .commands
-            .command_registry,
-    );
+    let registry = std::mem::take(&mut app.session_mgr.current_mut().commands.command_registry);
     let known = registry.dispatch(&mut app, "/c");
-    app.session_mgr.sessions[app.session_mgr.active]
-        .commands
-        .command_registry = registry;
+    app.session_mgr.current_mut().commands.command_registry = registry;
     assert!(!known, "歧义前缀 dispatch 应返回 false");
-}
-
-// ── SystemNote Error Color Detection ────────────────────────────────────
-
-#[test]
-fn test_system_note_error_detection() {
-    // 错误类 system note
-    let error_content = "Compact failed: No LLM Provider";
-    assert!(
-        error_content.contains("failed") || error_content.contains("Compact failed"),
-        "应检测到错误标记"
-    );
-    let warn_content = "⚠ Interrupted";
-    assert!(warn_content.contains("⚠"), "应检测到警告标记");
-    // 普通信息
-    let info_content = "Configuration saved";
-    assert!(
-        !info_content.contains("❌")
-            && !info_content.contains("failed")
-            && !info_content.contains("⚠"),
-        "普通消息不应被标记为错误"
-    );
-}
-
-// ─── 错误信息红色显示测试 ─────────────────────────────────────────────────
-
-#[test]
-fn test_tool_block_error_visible_when_collapsed() {
-    use crate::ui::message_render::render_view_model;
-    let vm = MessageViewModel::ToolBlock {
-        tool_name: "Bash".to_string(),
-        tool_call_id: "tc_err".to_string(),
-        display_name: "Shell".to_string(),
-        args_display: Some("bad_command".to_string()),
-        content: "command not found: bad_command\nexit code 127".to_string(),
-        is_error: true,
-        collapsed: true,
-        color: crate::ui::theme::ERROR,
-        diff_lines: None,
-    };
-    let lines = render_view_model(&vm, Some(1), 80, false); // header + 2 error summary lines (content has 2 lines)
-    assert!(
-        lines.len() >= 3,
-        "collapsed error ToolBlock should have header + error lines, got {}",
-        lines.len()
-    );
-    let text: String = lines
-        .iter()
-        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-        .collect::<Vec<_>>()
-        .join("");
-    assert!(
-        text.contains("command not found"),
-        "error content should be visible: {}",
-        text
-    );
-}
-
-#[test]
-fn test_tool_block_success_no_summary_when_collapsed() {
-    use crate::ui::message_render::render_view_model;
-    let vm = MessageViewModel::ToolBlock {
-        tool_name: "Read".to_string(),
-        tool_call_id: "tc_ok".to_string(),
-        display_name: "Read".to_string(),
-        args_display: Some("file.txt".to_string()),
-        content: "file contents here".to_string(),
-        is_error: false,
-        collapsed: true,
-        color: crate::ui::theme::SAGE,
-        diff_lines: None,
-    };
-    let lines = render_view_model(&vm, Some(1), 80, false);
-    assert_eq!(
-        lines.len(),
-        1,
-        "successful collapsed ToolBlock should have only header"
-    );
-}
-
-#[test]
-fn test_tool_call_group_error_visible_when_collapsed() {
-    use crate::ui::message_render::render_view_model;
-    use crate::ui::message_view::{ToolCategory, ToolEntry};
-
-    let vm = MessageViewModel::ToolCallGroup {
-        category: ToolCategory::Read,
-        tools: vec![
-            ToolEntry {
-                tool_name: "Read".to_string(),
-                display_name: "Read".to_string(),
-                args_display: Some("ok_file.txt".to_string()),
-                content: "ok content".to_string(),
-                is_error: false,
-            },
-            ToolEntry {
-                tool_name: "Read".to_string(),
-                display_name: "Read".to_string(),
-                args_display: Some("missing.txt".to_string()),
-                content: "Error: file not found".to_string(),
-                is_error: true,
-            },
-        ],
-        collapsed: true,
-    };
-    let lines = render_view_model(&vm, Some(1), 80, false);
-    let text: String = lines
-        .iter()
-        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-        .collect::<Vec<_>>()
-        .join("");
-    assert!(
-        text.contains("Error: file not found"),
-        "error from failed tool should be visible: {}",
-        text
-    );
-    assert!(
-        !text.contains("ok content"),
-        "successful tool content should NOT be visible: {}",
-        text
-    );
-}
-
-#[test]
-fn test_subagent_group_error_red_title_and_summary() {
-    use crate::ui::message_render::render_view_model;
-
-    let vm = MessageViewModel::SubAgentGroup {
-        agent_id: "test-agent".to_string(),
-        task_preview: "do something risky".to_string(),
-        total_steps: 3,
-        recent_messages: Vec::new(),
-        is_running: false,
-        collapsed: true,
-        final_result: Some("Agent failed: permission denied".to_string()),
-        is_error: true,
-        is_background: false,
-        bg_hash: Some("abc123".to_string()),
-        batch_agents: Vec::new(),
-        instance_id: None,
-    };
-    let lines = render_view_model(&vm, Some(1), 80, false); // 标题行 "Agent" 文字应为红色（第二个 span，第一个是 ❯ 符号）
-    let title_color = lines
-        .first()
-        .and_then(|l| l.spans.get(1).and_then(|s| s.style.fg));
-    assert_eq!(
-        title_color,
-        Some(crate::ui::theme::ERROR),
-        "title should be red on error"
-    );
-    // 错误摘要应可见
-    let text: String = lines
-        .iter()
-        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-        .collect::<Vec<_>>()
-        .join("");
-    assert!(
-        text.contains("Agent failed"),
-        "error summary should be visible: {}",
-        text
-    );
 }
 
 // ─── Design Review 第22轮：Model 面板 Space 键 + Cron 确认删除 + 面板 Paste 拦截 ────
@@ -2520,9 +1783,10 @@ fn test_subagent_group_error_red_title_and_summary() {
 /// Model 面板 Space 键在模型行应选中对应模型（而非静默无响应）
 #[tokio::test]
 async fn test_model_panel_space_selects_model() {
-    use crate::app::model_panel::{AliasTab, ModelPanel, ROW_SONNET};
-    use crate::config::AppConfig;
-    use crate::config::{PeriConfig, ProviderConfig, ThinkingConfig};
+    use crate::{
+        app::model_panel::{AliasTab, ModelPanel, ROW_SONNET},
+        config::{AppConfig, PeriConfig, ProviderConfig, ThinkingConfig},
+    };
 
     let cfg = PeriConfig {
         schema: None,
@@ -2666,9 +1930,10 @@ async fn test_cron_panel_confirm_delete_renders() {
 /// Model 面板确认选择后应显示"模型已切换为"反馈消息
 #[tokio::test]
 async fn test_model_panel_confirm_shows_feedback() {
-    use crate::app::model_panel::{AliasTab, ModelPanel};
-    use crate::config::AppConfig;
-    use crate::config::{PeriConfig, ProviderConfig, ThinkingConfig};
+    use crate::{
+        app::model_panel::{AliasTab, ModelPanel},
+        config::{AppConfig, PeriConfig, ProviderConfig, ThinkingConfig},
+    };
 
     let (mut app, _handle) = App::new_headless(120, 30).await;
     let cfg = PeriConfig {
@@ -2691,12 +1956,13 @@ async fn test_model_panel_confirm_shows_feedback() {
         },
     };
     app.services.peri_config = Some(cfg);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .session_panels
-        .open(crate::app::panel_manager::PanelState::Model(
-            ModelPanel::from_config(app.services.peri_config.as_ref().unwrap()),
-        ));
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr.current_mut().session_panels.open(
+        crate::app::panel_manager::PanelState::Model(ModelPanel::from_config(
+            app.services.peri_config.as_ref().unwrap(),
+        )),
+    );
+    app.session_mgr
+        .current_mut()
         .session_panels
         .get_mut::<ModelPanel>()
         .unwrap()
@@ -2704,10 +1970,7 @@ async fn test_model_panel_confirm_shows_feedback() {
 
     app.model_panel_confirm();
 
-    let last_msg = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .last();
+    let last_msg = app.session_mgr.current_mut().messages.view_messages.last();
     assert!(last_msg.is_some(), "Model 面板确认后应有反馈消息");
     let msg_text = match last_msg.unwrap() {
         MessageViewModel::SystemNote { content, .. } => content.clone(),
@@ -2719,7 +1982,8 @@ async fn test_model_panel_confirm_shows_feedback() {
         msg_text
     );
     assert!(
-        !app.session_mgr.sessions[app.session_mgr.active]
+        !app.session_mgr
+            .current_mut()
             .session_panels
             .is_active(crate::app::PanelKind::Model),
         "确认后面板应关闭"
@@ -2729,9 +1993,10 @@ async fn test_model_panel_confirm_shows_feedback() {
 /// Login 面板激活 Provider 后应显示"已激活"反馈消息
 #[tokio::test]
 async fn test_login_select_provider_shows_feedback() {
-    use crate::app::login_panel::LoginPanel;
-    use crate::config::AppConfig;
-    use crate::config::{PeriConfig, ProviderConfig};
+    use crate::{
+        app::login_panel::LoginPanel,
+        config::{AppConfig, PeriConfig, ProviderConfig},
+    };
 
     let (mut app, _handle) = App::new_headless(120, 30).await;
     let cfg = PeriConfig {
@@ -2755,13 +2020,14 @@ async fn test_login_select_provider_shows_feedback() {
         },
     };
     app.services.peri_config = Some(cfg);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .session_panels
-        .open(crate::app::panel_manager::PanelState::Login(
-            LoginPanel::from_config(app.services.peri_config.as_ref().unwrap()),
-        ));
+    app.session_mgr.current_mut().session_panels.open(
+        crate::app::panel_manager::PanelState::Login(LoginPanel::from_config(
+            app.services.peri_config.as_ref().unwrap(),
+        )),
+    );
     // 光标移到第二个 Provider
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .session_panels
         .get_mut::<LoginPanel>()
         .unwrap()
@@ -2770,10 +2036,7 @@ async fn test_login_select_provider_shows_feedback() {
 
     app.login_panel_select_provider();
 
-    let last_msg = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .last();
+    let last_msg = app.session_mgr.current_mut().messages.view_messages.last();
     assert!(last_msg.is_some(), "Login 面板激活后应有反馈消息");
     let msg_text = match last_msg.unwrap() {
         MessageViewModel::SystemNote { content, .. } => content.clone(),
@@ -2785,7 +2048,8 @@ async fn test_login_select_provider_shows_feedback() {
         msg_text
     );
     assert!(
-        !app.session_mgr.sessions[app.session_mgr.active]
+        !app.session_mgr
+            .current_mut()
             .session_panels
             .is_active(crate::app::PanelKind::Login),
         "激活后面板应关闭"
@@ -2818,26 +2082,23 @@ async fn test_background_task_notification() {
     let (mut app, handle) = App::new_headless(120, 30).await;
 
     // 模拟 submit_message：设置 round_start_vm_idx 并推送用户消息
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
     let user_vm = MessageViewModel::user("test query".into());
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .view_messages
         .push(user_vm);
     app.render_rebuild();
 
     // 先设置后台任务
-    app.session_mgr.sessions[app.session_mgr.active].background_agents =
-        vec![crate::app::RunningBgAgent {
-            agent_name: "code-reviewer".to_string(),
-            instance_id: "test-inst".to_string(),
-            started_at: std::time::Instant::now(),
-        }];
+    app.session_mgr.current_mut().background_agents = vec![crate::app::RunningBgAgent {
+        agent_name: "code-reviewer".to_string(),
+        instance_id: "test-inst".to_string(),
+        started_at: std::time::Instant::now(),
+        tool_count: 0,
+    }];
 
     let notified = handle.render_notify.notified();
 
@@ -2866,15 +2127,13 @@ async fn test_background_task_notification() {
 
     // 断言：后台任务计数递减
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .background_agents
-            .is_empty(),
+        app.session_mgr.current_mut().background_agents.is_empty(),
         "BackgroundTaskCompleted should decrement background_agents"
     );
 
     // 断言：view_messages 包含后台任务 ToolBlock 通知
     use crate::ui::message_view::MessageViewModel;
-    let has_notification = app.session_mgr.sessions[app.session_mgr.active]
+    let has_notification = app.session_mgr.current_mut()
             .messages
             .view_messages
             .iter()
@@ -2891,29 +2150,28 @@ async fn test_background_task_status_bar() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
     // 模拟 submit_message：设置 round_start_vm_idx 并推送用户消息
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
     let user_vm = MessageViewModel::user("test".into());
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .view_messages
         .push(user_vm);
     app.render_rebuild();
 
-    app.session_mgr.sessions[app.session_mgr.active].background_agents = vec![
+    app.session_mgr.current_mut().background_agents = vec![
         crate::app::RunningBgAgent {
             agent_name: "reviewer-1".to_string(),
             instance_id: "test-inst-1".to_string(),
             started_at: std::time::Instant::now(),
+            tool_count: 0,
         },
         crate::app::RunningBgAgent {
             agent_name: "reviewer-2".to_string(),
             instance_id: "test-inst-2".to_string(),
             started_at: std::time::Instant::now(),
+            tool_count: 0,
         },
     ];
 
@@ -2951,24 +2209,18 @@ async fn test_textarea_input_visible_during_loading() {
     app.set_loading(true);
 
     // 用户在 loading 时输入文字
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .textarea
-        .input(Input {
-            key: Key::Char('h'),
-            ctrl: false,
-            alt: false,
-            shift: false,
-        });
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .textarea
-        .input(Input {
-            key: Key::Char('i'),
-            ctrl: false,
-            alt: false,
-            shift: false,
-        });
+    app.session_mgr.current_mut().ui.textarea.input(Input {
+        key: Key::Char('h'),
+        ctrl: false,
+        alt: false,
+        shift: false,
+    });
+    app.session_mgr.current_mut().ui.textarea.input(Input {
+        key: Key::Char('i'),
+        ctrl: false,
+        alt: false,
+        shift: false,
+    });
 
     handle
         .terminal
@@ -3048,7 +2300,9 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
     let _ = n;
 
     // 5. 记录 Done 前 SubAgentGroup 状态
-    let pre_done_sub = app.session_mgr.sessions[app.session_mgr.active]
+    let pre_done_sub = app
+        .session_mgr
+        .current_mut()
         .messages
         .view_messages
         .iter()
@@ -3088,7 +2342,9 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
     app.process_pending_events();
 
     // 8. 验证 Done 后 SubAgentGroup 状态保留
-    let post_done_sub = app.session_mgr.sessions[app.session_mgr.active]
+    let post_done_sub = app
+        .session_mgr
+        .current_mut()
         .messages
         .view_messages
         .iter()
@@ -3125,288 +2381,14 @@ async fn test_subagent_group_preserved_after_done_reconcile() {
     }
 }
 
-mod split_panel_tests {
-    use crate::app::panel_manager::PanelKind;
-    use crate::app::App;
-
-    #[tokio::test]
-    async fn test_split_session_hint_shows_for_both_columns() {
-        use crate::ui::main_ui;
-        let (mut app, mut handle) = App::new_headless(120, 40).await;
-
-        // 创建第二个 session
-        app.new_session();
-        assert_eq!(app.session_mgr.sessions.len(), 2);
-
-        // 在 session 0 的 textarea 中输入 /
-        app.session_mgr.active = 0;
-        app.session_mgr.sessions[0].ui.textarea = crate::app::build_textarea(false);
-        app.session_mgr.sessions[0].ui.textarea.insert_str("/");
-
-        // 在 session 1 的 textarea 中输入 hello（不应触发 hint）
-        app.session_mgr.sessions[1].ui.textarea = crate::app::build_textarea(false);
-        app.session_mgr.sessions[1].ui.textarea.insert_str("hello");
-
-        // 渲染
-        handle
-            .terminal
-            .draw(|f| main_ui::render(f, &mut app))
-            .unwrap();
-        let snap = handle.snapshot();
-        let snap_text = snap.join("\n");
-
-        // session 0 的 hint 应包含 channel（字母序中较早，始终在视口前 10 项内）
-        assert!(
-            snap_text.contains("/channel"),
-            "session 0 输入 / 后应显示 channel 命令\n实际输出:\n{}",
-            snap_text
-        );
-
-        // 切到 session 1，输入 /
-        app.session_mgr.active = 1;
-        app.session_mgr.sessions[1].ui.textarea = crate::app::build_textarea(false);
-        app.session_mgr.sessions[1].ui.textarea.insert_str("/");
-
-        handle
-            .terminal
-            .draw(|f| main_ui::render(f, &mut app))
-            .unwrap();
-        let snap2 = handle.snapshot();
-        let snap2_text = snap2.join("\n");
-
-        // session 1 的 hint 应包含 channel（字母序中较早）
-        assert!(
-            snap2_text.contains("/channel"),
-            "session 1 输入 / 后应显示 channel 命令\n实际输出:\n{}",
-            snap2_text
-        );
-    }
-
-    #[tokio::test]
-    async fn test_split_session_both_have_slash_hint_shows_on_both() {
-        use crate::ui::main_ui;
-        let (mut app, mut handle) = App::new_headless(120, 40).await;
-
-        // 创建第二个 session
-        app.new_session();
-        assert_eq!(app.session_mgr.sessions.len(), 2);
-
-        // 两个 session 都输入 /
-        app.session_mgr.sessions[0].ui.textarea = crate::app::build_textarea(false);
-        app.session_mgr.sessions[0].ui.textarea.insert_str("/");
-        app.session_mgr.sessions[1].ui.textarea = crate::app::build_textarea(false);
-        app.session_mgr.sessions[1].ui.textarea.insert_str("/");
-
-        // session 0 active
-        app.session_mgr.active = 0;
-
-        handle
-            .terminal
-            .draw(|f| main_ui::render(f, &mut app))
-            .unwrap();
-        let snap = handle.snapshot();
-        let snap_text = snap.join("\n");
-
-        // hint 中 /channel 应出现 2 次（左列和右列各一次）
-        let channel_count = snap_text.matches("/channel").count();
-        assert!(
-            channel_count >= 2,
-            "两个 session 都输入 /，/channel 应出现至少 2 次，实际 {} 次\n输出:\n{}",
-            channel_count,
-            snap_text
-        );
-    }
-
-    #[tokio::test]
-    async fn test_split_session_left_inactive_shows_model_with_m_prefix() {
-        use crate::ui::main_ui;
-        let (mut app, mut handle) = App::new_headless(120, 40).await;
-
-        // 创建第二个 session
-        app.new_session();
-        assert_eq!(app.session_mgr.sessions.len(), 2);
-
-        // 模拟用户场景：右侧 session (1) 是活跃的，左侧 session (0) 输入了 /m
-        app.session_mgr.active = 1;
-        app.session_mgr.sessions[0].ui.textarea = crate::app::build_textarea(false);
-        app.session_mgr.sessions[0].ui.textarea.insert_str("/m");
-
-        handle
-            .terminal
-            .draw(|f| main_ui::render(f, &mut app))
-            .unwrap();
-        let snap = handle.snapshot();
-        let snap_text = snap.join("\n");
-
-        // 左侧 session (非活跃) 的 hint 应包含 model
-        assert!(
-            snap_text.contains("/mcp")
-                || snap_text.contains("/memory")
-                || snap_text.contains("/model"),
-            "左侧 session 输入 /m，应至少显示 m 开头的命令\n输出:\n{}",
-            snap_text
-        );
-        assert!(
-            snap_text.contains("/model"),
-            "左侧 session 输入 /m，应显示 /model\n输出:\n{}",
-            snap_text,
-        );
-    }
-
-    /// 验证 /split 命令 dispatch 后 session 0 的 CommandRegistry 不会被清空
-    #[tokio::test]
-    async fn test_split_command_preserves_session0_command_registry() {
-        use crate::ui::main_ui;
-        let (mut app, mut handle) = App::new_headless(120, 40).await;
-
-        // 初始只有 1 个 session
-        assert_eq!(app.session_mgr.sessions.len(), 1);
-        app.session_mgr.active = 0;
-
-        // 验证 session 0 初始有所有命令
-        let cmds_before: Vec<String> = app.session_mgr.sessions[0]
-            .commands
-            .command_registry
-            .match_prefix("", &app.services.lc)
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect();
-        assert!(
-            cmds_before.contains(&"model".to_string()),
-            "split 前应有 model 命令"
-        );
-
-        // 模拟 dispatch 路径：take → dispatch "/split" → put back
-        let session_idx = app.session_mgr.active;
-        let registry = std::mem::take(
-            &mut app.session_mgr.sessions[session_idx]
-                .commands
-                .command_registry,
-        );
-        let _known = registry.dispatch(&mut app, "/split");
-        app.session_mgr.sessions[session_idx]
-            .commands
-            .command_registry = registry;
-
-        // 验证：现在有 2 个 session，active 是 1
-        assert_eq!(app.session_mgr.sessions.len(), 2);
-        assert_eq!(app.session_mgr.active, 1);
-
-        // 关键验证：session 0 的 registry 未被清空
-        let cmds_after: Vec<String> = app.session_mgr.sessions[0]
-            .commands
-            .command_registry
-            .match_prefix("m", &app.services.lc)
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect();
-        assert!(
-            cmds_after.contains(&"model".to_string()),
-            "/split 后 session 0 应仍有 model 命令，实际 m 前缀匹配: {:?}",
-            cmds_after
-        );
-        assert!(
-            cmds_after.contains(&"mcp".to_string()),
-            "/split 后 session 0 应仍有 mcp 命令"
-        );
-        assert!(
-            cmds_after.contains(&"memory".to_string()),
-            "/split 后 session 0 应仍有 memory 命令"
-        );
-
-        // 额外验证：session 1 的 hint 正常
-        app.session_mgr.sessions[1].ui.textarea = crate::app::build_textarea(false);
-        app.session_mgr.sessions[1].ui.textarea.insert_str("/m");
-        handle
-            .terminal
-            .draw(|f| main_ui::render(f, &mut app))
-            .unwrap();
-        let snap = handle.snapshot();
-        let snap_text = snap.join("\n");
-        assert!(
-            snap_text.contains("/model"),
-            "session 1 输入 /m，应显示 /model\n输出:\n{}",
-            snap_text
-        );
-    }
-
-    #[tokio::test]
-    async fn test_split_session_panel_independence() {
-        let (mut app, _handle) = App::new_headless(120, 40).await;
-
-        // 创建第二个 session
-        app.new_session();
-        assert_eq!(app.session_mgr.sessions.len(), 2);
-
-        // 在 session 0 打开 Model 面板
-        app.session_mgr.active = 0;
-        app.open_model_panel();
-        assert!(
-            app.session_mgr.sessions[0]
-                .session_panels
-                .is_active(PanelKind::Model),
-            "session 0 应有 Model 面板"
-        );
-        assert!(
-            !app.session_mgr.sessions[1].session_panels.is_any_open(),
-            "session 1 不应有面板"
-        );
-
-        // 在 session 1 打开 Login 面板（需要 peri_config）
-        app.session_mgr.active = 1;
-        app.services.peri_config = Some(crate::config::PeriConfig::default());
-        app.open_login_panel();
-        assert!(
-            app.session_mgr.sessions[1]
-                .session_panels
-                .is_active(PanelKind::Login),
-            "session 1 应有 Login 面板"
-        );
-        // session 0 的面板不应被关闭
-        assert!(
-            app.session_mgr.sessions[0]
-                .session_panels
-                .is_active(PanelKind::Model),
-            "session 0 的 Model 面板不应被关闭"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_split_session_global_panel_closes_all_session_panels() {
-        let (mut app, _handle) = App::new_headless(120, 40).await;
-
-        app.new_session();
-        assert_eq!(app.session_mgr.sessions.len(), 2);
-
-        // session 0 打开 Model 面板
-        app.session_mgr.active = 0;
-        app.open_model_panel();
-
-        // session 1 打开全局 Status 面板 → 应关闭所有 session 面板
-        app.session_mgr.active = 1;
-        app.open_status_panel(0);
-        assert!(
-            app.global_panels.is_active(PanelKind::Status),
-            "应有 Status 全局面板"
-        );
-        assert!(
-            !app.session_mgr.sessions[0].session_panels.is_any_open(),
-            "session 0 的 Model 面板应被关闭"
-        );
-        assert!(
-            !app.session_mgr.sessions[1].session_panels.is_any_open(),
-            "session 1 不应有 session 面板"
-        );
-    }
-}
-
 // ── Auto-compact deferred during background tasks ──────────────────────
 
 // ── Background Agent SubAgentGroup 消失诊断 ───────────────────────────
 
 /// 统计 view_messages 中 SubAgentGroup 的数量
 fn bg_diag_count_subagent_groups(app: &App) -> usize {
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current()
         .messages
         .view_messages
         .iter()
@@ -3415,11 +2397,8 @@ fn bg_diag_count_subagent_groups(app: &App) -> usize {
 }
 
 /// 打印当前 view_messages 的摘要（诊断用）
-#[allow(dead_code)]
 fn bg_diag_print_vms(app: &App, label: &str) {
-    let vms = &app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages;
+    let vms = &app.session_mgr.current().messages.view_messages;
     eprintln!("\n=== {} (total: {}) ===", label, vms.len());
     for (i, vm) in vms.iter().enumerate() {
         match vm {
@@ -3455,11 +2434,11 @@ fn bg_diag_print_vms(app: &App, label: &str) {
             MessageViewModel::ToolCallGroup { category, .. } => {
                 eprintln!("  [{}] ToolCallGroup({:?})", i, category);
             }
-            MessageViewModel::SystemNote { content } => {
+            MessageViewModel::SystemNote { content, .. } => {
                 let preview: String = content.chars().take(40).collect();
                 eprintln!("  [{}] SystemNote({})", i, preview);
             }
-            MessageViewModel::CacheWarning { content } => {
+            MessageViewModel::CacheWarning { content, .. } => {
                 let preview: String = content.chars().take(40).collect();
                 eprintln!("  [{}] CacheWarning({})", i, preview);
             }
@@ -3484,19 +2463,16 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     // Step 1: 模拟用户消息（begin_round + AddMessage）
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .pipeline
         .begin_round();
     app.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::user(
         "run background agent".into(),
     )));
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
 
     bg_diag_print_vms(&app, "Step 1: After UserBubble");
 
@@ -3547,12 +2523,12 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
     bg_diag_print_vms(&app, "Step 4: After StateSnapshot");
 
     // Step 5: Done (with background task still running)
-    app.session_mgr.sessions[app.session_mgr.active].background_agents =
-        vec![crate::app::RunningBgAgent {
-            agent_name: "code-reviewer".to_string(),
-            instance_id: "test-inst".to_string(),
-            started_at: std::time::Instant::now(),
-        }];
+    app.session_mgr.current_mut().background_agents = vec![crate::app::RunningBgAgent {
+        agent_name: "code-reviewer".to_string(),
+        instance_id: "test-inst".to_string(),
+        started_at: std::time::Instant::now(),
+        tool_count: 0,
+    }];
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
     bg_diag_print_vms(&app, "Step 5: After Done");
@@ -3562,7 +2538,8 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
         count_after_done >= 1,
         "After Done: SubAgentGroup should exist, but count={}. VMs:\n{:?}",
         count_after_done,
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .messages
             .view_messages
             .iter()
@@ -3572,9 +2549,7 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
 
     // 验证 agent_done_pending_bg 被设置
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .agent
-            .agent_done_pending_bg,
+        app.session_mgr.current_mut().agent.agent_done_pending_bg,
         "Done with !background_agents.is_empty() should set agent_done_pending_bg = true"
     );
 
@@ -3598,7 +2573,7 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
 
     // 验证 pending_bg_continuation 被设置
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr.current_mut()
             .agent
             .pending_bg_continuation
             .is_some(),
@@ -3618,7 +2593,8 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
     // submit_message 调用 begin_round + AddMessage(UserBubble) + 启动新 agent
 
     // 模拟 submit_message 的 begin_round
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .pipeline
         .begin_round();
@@ -3626,12 +2602,8 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
     app.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::user(
         "[bg continuation] process result".into(),
     )));
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
 
     bg_diag_print_vms(&app, "Step 7: After continuation begin_round + UserBubble");
 
@@ -3652,7 +2624,7 @@ async fn test_diagnostic_bg_subagent_group_disappears() {
         "BUG REPRODUCED: SubAgentGroup disappeared during continuation! After Done={}, After continuation={}. VMs:\n{:?}",
         count_after_done,
         count_final,
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr.current_mut()
             .messages
             .view_messages
             .iter()
@@ -3690,19 +2662,16 @@ async fn test_diagnostic_fork_plus_background_subagent_group() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     // Step 1: 用户消息
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .pipeline
         .begin_round();
     app.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::user(
         "run fork in background".into(),
     )));
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
 
     // Step 2: SubAgentStart — fork+background 场景
     // map_executor_event 从 input 中读取 run_in_background=true，设置 is_background=true
@@ -3718,9 +2687,7 @@ async fn test_diagnostic_fork_plus_background_subagent_group() {
 
     // 验证 background_agents 被 push
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .background_agents
-            .len(),
+        app.session_mgr.current_mut().background_agents.len(),
         1,
         "SubAgentStart with is_background=true should push to background_agents"
     );
@@ -3741,9 +2708,7 @@ async fn test_diagnostic_fork_plus_background_subagent_group() {
 
     // 验证 background_agents 仍为 1（SubAgentEnd 不移除）
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .background_agents
-            .len(),
+        app.session_mgr.current_mut().background_agents.len(),
         1,
         "SubAgentEnd should NOT remove from background_agents (only BackgroundTaskCompleted does)"
     );
@@ -3779,9 +2744,7 @@ async fn test_diagnostic_fork_plus_background_subagent_group() {
 
     // 验证 agent_done_pending_bg 被设置（因为 !background_agents.is_empty()）
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .agent
-            .agent_done_pending_bg,
+        app.session_mgr.current_mut().agent.agent_done_pending_bg,
         "Done with !background_agents.is_empty() should set agent_done_pending_bg = true"
     );
 
@@ -3803,19 +2766,16 @@ async fn test_diagnostic_fork_plus_background_subagent_group() {
     // agent_done_pending_bg = true, background_agents.len() = 1, 但没有 BackgroundTaskCompleted
 
     // 模拟下一轮用户发消息（真实场景中用户可能等待后发新消息）
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .pipeline
         .begin_round();
     app.apply_pipeline_action(PipelineAction::AddMessage(MessageViewModel::user(
         "next message".into(),
     )));
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
 
     // 新一轮 StateSnapshot
     app.push_agent_event(AgentEvent::StateSnapshot(vec![BaseMessage::ai("OK")]));
@@ -3834,7 +2794,7 @@ async fn test_diagnostic_fork_plus_background_subagent_group() {
 
     // 验证 background_agents.len() 仍为 1（永远不会被清除）
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active].background_agents.len(),
+        app.session_mgr.current_mut().background_agents.len(),
         1,
         "background_agents should still have 1 entry (no BackgroundTaskCompleted will ever arrive for fork path)"
     );
@@ -3849,14 +2809,11 @@ async fn test_thinking_mode_user_message_survives_rebuild() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
     // 1. 模拟 submit_message：设置 round_start_vm_idx，添加 UserBubble
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
     let user_vm = MessageViewModel::user("explain recursion".into());
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .view_messages
         .push(user_vm);
@@ -3877,10 +2834,7 @@ async fn test_thinking_mode_user_message_survives_rebuild() {
 
     // 此时 view_messages 应只有 UserBubble（reasoning 不创建 VM）
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .messages
-            .view_messages
-            .len(),
+        app.session_mgr.current_mut().messages.view_messages.len(),
         1,
         "thinking 阶段应只有 UserBubble"
     );
@@ -3903,7 +2857,8 @@ async fn test_thinking_mode_user_message_survives_rebuild() {
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
     app.flush_rebuild();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     handle
         .terminal
@@ -3933,14 +2888,11 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
     let (mut app, mut handle) = App::new_headless(120, 30).await;
 
     // 1. submit_message
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
     let user_vm = MessageViewModel::user("show me main.rs".into());
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .view_messages
         .push(user_vm);
@@ -4004,7 +2956,8 @@ async fn test_thinking_toolcall_text_rebuild_preserves_user() {
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
     app.flush_rebuild();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     handle
         .terminal
@@ -4033,12 +2986,12 @@ async fn test_bg_completed_before_done_triggers_continuation() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     // 模拟后台任务已启动
-    app.session_mgr.sessions[app.session_mgr.active].background_agents =
-        vec![crate::app::RunningBgAgent {
-            agent_name: "code-reviewer".to_string(),
-            instance_id: "test-inst".to_string(),
-            started_at: std::time::Instant::now(),
-        }];
+    app.session_mgr.current_mut().background_agents = vec![crate::app::RunningBgAgent {
+        agent_name: "code-reviewer".to_string(),
+        instance_id: "test-inst".to_string(),
+        started_at: std::time::Instant::now(),
+        tool_count: 0,
+    }];
 
     // 竞态：BackgroundTaskCompleted 先于 Done 到达
     app.push_agent_event(AgentEvent::BackgroundTaskCompleted {
@@ -4055,14 +3008,16 @@ async fn test_bg_completed_before_done_triggers_continuation() {
 
     // 断言：pre_done_bg_completions 被 Done 消费并转为 pending_bg_continuation
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .agent
             .pre_done_bg_completions
             .is_empty(),
         "Done 处理后 pre_done_bg_completions 应被清空"
     );
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .agent
             .pending_bg_continuation
             .is_some(),
@@ -4077,16 +3032,18 @@ async fn test_bg_completed_before_done_triggers_continuation() {
 async fn test_multiple_bg_completed_before_done() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
-    app.session_mgr.sessions[app.session_mgr.active].background_agents = vec![
+    app.session_mgr.current_mut().background_agents = vec![
         crate::app::RunningBgAgent {
             agent_name: "reviewer-1".to_string(),
             instance_id: "test-inst-1".to_string(),
             started_at: std::time::Instant::now(),
+            tool_count: 0,
         },
         crate::app::RunningBgAgent {
             agent_name: "reviewer-2".to_string(),
             instance_id: "test-inst-2".to_string(),
             started_at: std::time::Instant::now(),
+            tool_count: 0,
         },
     ];
 
@@ -4114,9 +3071,7 @@ async fn test_multiple_bg_completed_before_done() {
     app.process_pending_events();
 
     // 断言���最后一个使 count 归零的任务通知被暂存并由 Done 消费
-    let continuation = &app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .pending_bg_continuation;
+    let continuation = &app.session_mgr.current_mut().agent.pending_bg_continuation;
     assert!(
         continuation.is_some(),
         "多后台任务 Done 前完成时应设置 pending_bg_continuation"
@@ -4127,7 +3082,8 @@ async fn test_multiple_bg_completed_before_done() {
         "continuation 应包含最后一个（使 count 归零的）任务结果"
     );
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .agent
             .pre_done_bg_results
             .is_empty(),
@@ -4140,25 +3096,24 @@ async fn test_multiple_bg_completed_before_done() {
 async fn test_bg_completed_after_done_unchanged() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
-    app.session_mgr.sessions[app.session_mgr.active].background_agents =
-        vec![crate::app::RunningBgAgent {
-            agent_name: "worker".to_string(),
-            instance_id: "test-inst".to_string(),
-            started_at: std::time::Instant::now(),
-        }];
+    app.session_mgr.current_mut().background_agents = vec![crate::app::RunningBgAgent {
+        agent_name: "worker".to_string(),
+        instance_id: "test-inst".to_string(),
+        started_at: std::time::Instant::now(),
+        tool_count: 0,
+    }];
 
     // 正常路径：Done 先到
     app.push_agent_event(AgentEvent::Done);
     app.process_pending_events();
 
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .agent
-            .agent_done_pending_bg,
+        app.session_mgr.current_mut().agent.agent_done_pending_bg,
         "Done 有后台任务时应设 agent_done_pending_bg"
     );
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .agent
             .pre_done_bg_completions
             .is_empty(),
@@ -4178,14 +3133,16 @@ async fn test_bg_completed_after_done_unchanged() {
     app.process_pending_events();
 
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .agent
             .pending_bg_continuation
             .is_some(),
         "正常路径：BackgroundTaskCompleted 在 Done 后应设 pending_bg_continuation"
     );
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .agent
             .pre_done_bg_results
             .is_empty(),
@@ -4199,12 +3156,14 @@ async fn test_submit_message_clears_pre_done_completions() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     // 模拟暂存状态（不通过事件流，直接设置）
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .agent
         .pre_done_bg_completions
         .push("buffered notification".to_string());
     assert!(
-        !app.session_mgr.sessions[app.session_mgr.active]
+        !app.session_mgr
+            .current_mut()
             .agent
             .pre_done_bg_completions
             .is_empty(),
@@ -4212,19 +3171,17 @@ async fn test_submit_message_clears_pre_done_completions() {
     );
 
     // 模拟 submit_message 中的清理（通过设置必要字段后直接调用清理逻辑）
-    app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .agent_done_pending_bg = false;
-    app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .pending_bg_continuation = None;
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr.current_mut().agent.agent_done_pending_bg = false;
+    app.session_mgr.current_mut().agent.pending_bg_continuation = None;
+    app.session_mgr
+        .current_mut()
         .agent
         .pre_done_bg_completions
         .clear();
 
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr
+            .current_mut()
             .agent
             .pre_done_bg_completions
             .is_empty(),
@@ -4238,14 +3195,11 @@ async fn test_background_agents_lifecycle() {
     let (mut app, _handle) = App::new_headless(120, 30).await;
 
     // 设置 view_messages 基础状态
-    app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .round_start_vm_idx = app.session_mgr.sessions[app.session_mgr.active]
-        .messages
-        .view_messages
-        .len();
+    app.session_mgr.current_mut().messages.round_start_vm_idx =
+        app.session_mgr.current_mut().messages.view_messages.len();
     let user_vm = MessageViewModel::user("test query".into());
-    app.session_mgr.sessions[app.session_mgr.active]
+    app.session_mgr
+        .current_mut()
         .messages
         .view_messages
         .push(user_vm);
@@ -4260,14 +3214,12 @@ async fn test_background_agents_lifecycle() {
     });
     app.process_pending_events();
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .background_agents
-            .len(),
+        app.session_mgr.current_mut().background_agents.len(),
         1,
         "SubAgentStart(bg) 应增加 background_agents"
     );
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active].background_agents[0].agent_name,
+        app.session_mgr.current_mut().background_agents[0].agent_name,
         "code-reviewer"
     );
 
@@ -4280,9 +3232,7 @@ async fn test_background_agents_lifecycle() {
     });
     app.process_pending_events();
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .background_agents
-            .len(),
+        app.session_mgr.current_mut().background_agents.len(),
         2,
         "两个后台 agent 应有 2 条记录"
     );
@@ -4299,19 +3249,17 @@ async fn test_background_agents_lifecycle() {
     });
     app.process_pending_events();
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .background_agents
-            .len(),
+        app.session_mgr.current_mut().background_agents.len(),
         1,
         "完成后应只剩 1 个 agent"
     );
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active].background_agents[0].agent_name,
+        app.session_mgr.current_mut().background_agents[0].agent_name,
         "explorer"
     );
 
     // 设置聚焦到 explorer
-    app.session_mgr.sessions[app.session_mgr.active].focused_instance_id = Some("inst-002".into());
+    app.session_mgr.current_mut().focused_instance_id = Some("inst-002".into());
 
     // 完成聚焦的 agent → 自动退出聚焦
     app.push_agent_event(AgentEvent::BackgroundTaskCompleted {
@@ -4325,13 +3273,81 @@ async fn test_background_agents_lifecycle() {
     });
     app.process_pending_events();
     assert!(
-        app.session_mgr.sessions[app.session_mgr.active]
-            .background_agents
-            .is_empty(),
+        app.session_mgr.current_mut().background_agents.is_empty(),
         "所有 agent 完成后列表应为空"
     );
     assert_eq!(
-        app.session_mgr.sessions[app.session_mgr.active].focused_instance_id, None,
+        app.session_mgr.current_mut().focused_instance_id,
+        None,
         "聚焦的 agent 完成后应自动退出聚焦"
+    );
+}
+
+// ── Compact Loading / TextSelection 修复回归 ──────────────────────────────
+
+/// 验证 compact completed 后 loading 保持（统一由 Done 事件结束）
+#[tokio::test]
+async fn test_compact_completed_preserves_loading() {
+    use peri_agent::messages::BaseMessage;
+
+    let (mut app, _handle) = App::new_headless(80, 24).await;
+
+    // compact started
+    let (consume, _, _) = app.handle_compact_started();
+    assert!(consume);
+    assert!(app.session_mgr.current().ui.loading);
+
+    // compact completed
+    let msgs = vec![BaseMessage::human("summary")];
+    let (consume, _, _) = app.handle_compact_completed("summary".into(), vec![], vec![], 0, msgs);
+    assert!(consume);
+    // compact completed 后 loading 应保持（等待 Done 事件）
+    assert!(
+        app.session_mgr.current().ui.loading,
+        "compact completed 后 loading 应保持，由 Done 事件结束"
+    );
+}
+
+/// 验证 compact 后 text_selection 被清理
+#[tokio::test]
+async fn test_compact_clears_text_selection() {
+    use peri_agent::messages::BaseMessage;
+
+    let (mut app, _handle) = App::new_headless(80, 24).await;
+
+    // 模拟用户有活跃的 text_selection
+    app.session_mgr
+        .current_mut()
+        .ui
+        .text_selection
+        .start_drag(50, 10);
+    app.session_mgr
+        .current_mut()
+        .ui
+        .text_selection
+        .update_drag(60, 20);
+    assert!(app.session_mgr.current_mut().ui.text_selection.is_active());
+
+    // compact started 应清理选区
+    app.handle_compact_started();
+    assert!(
+        !app.session_mgr.current().ui.text_selection.is_active(),
+        "text_selection 应在 compact_started 时被清理"
+    );
+
+    // 再次设置选区
+    app.session_mgr
+        .current_mut()
+        .ui
+        .text_selection
+        .start_drag(5, 3);
+    assert!(app.session_mgr.current_mut().ui.text_selection.is_active());
+
+    // compact completed 也应清理选区
+    let msgs = vec![BaseMessage::human("summary")];
+    app.handle_compact_completed("summary".into(), vec![], vec![], 0, msgs);
+    assert!(
+        !app.session_mgr.current().ui.text_selection.is_active(),
+        "text_selection 应在 compact_completed 时被清理"
     );
 }

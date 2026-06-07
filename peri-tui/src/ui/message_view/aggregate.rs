@@ -1,5 +1,7 @@
-use super::tools::{AgentSummary, ToolCategory, ToolEntry};
-use super::MessageViewModel;
+use super::{
+    tools::{AgentSummary, ToolCategory, ToolEntry},
+    MessageViewModel,
+};
 
 /// 将 view_messages 中相邻的只读 ToolBlock 聚合为 ToolCallGroup（支持跨类别，跳过空 thinking bubble）
 pub fn aggregate_tool_groups(messages: &mut Vec<MessageViewModel>) {
@@ -55,11 +57,14 @@ pub fn aggregate_tail_tool_groups(messages: &mut Vec<MessageViewModel>, from_idx
                     }
                     break;
                 }
-                result.push(MessageViewModel::ToolCallGroup {
+                let mut vm = MessageViewModel::ToolCallGroup {
                     category: cat,
                     tools: entries,
                     collapsed: true,
-                });
+                    content_hash: 0,
+                };
+                vm.recompute_hash();
+                result.push(vm);
                 i = j;
                 continue;
             }
@@ -130,6 +135,15 @@ pub fn aggregate_batch_groups(messages: &mut Vec<MessageViewModel>) {
                     continue;
                 }
             }
+            // 容忍 Agent ToolBlock 出现在连续的 SubAgentGroup 之间
+            // （transform.rs 中 messages_to_view_models 会为每个 Agent 工具
+            //   同时产出 ToolBlock+SubAgentGroup，ToolBlock 不应打断聚合）
+            if let MessageViewModel::ToolBlock { tool_name, .. } = &messages[i] {
+                if tool_name == "Agent" {
+                    i += 1;
+                    continue;
+                }
+            }
             break;
         }
 
@@ -147,6 +161,7 @@ pub fn aggregate_batch_groups(messages: &mut Vec<MessageViewModel>) {
                 *batch_agents = batch_summaries;
                 *collapsed = true;
             }
+            merged.recompute_hash();
             result.push(merged);
         }
     }

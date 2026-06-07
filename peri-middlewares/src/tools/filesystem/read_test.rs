@@ -24,11 +24,11 @@
         let tool = ReadFileTool::new(dir.path().to_str().unwrap());
         let result = tool
             .invoke(serde_json::json!({"file_path": "nonexistent.txt"}))
-            .await
-            .unwrap();
+            .await;
+        let err_msg = result.unwrap_err().to_string();
         assert!(
-            result.contains("File not found"),
-            "should report not found: {result}"
+            err_msg.contains("File not found"),
+            "should report not found: {err_msg}"
         );
     }
 
@@ -87,11 +87,11 @@
         let tool = ReadFileTool::new(dir.path().to_str().unwrap());
         let result = tool
             .invoke(serde_json::json!({"file_path": "short.txt", "offset": 999}))
-            .await
-            .unwrap();
+            .await;
+        let err_msg = result.unwrap_err().to_string();
         assert!(
-            result.contains("exceeds file length"),
-            "offset 超出文件长度应返回错误而非 panic: {result}"
+            err_msg.contains("exceeds file length"),
+            "offset 超出文件长度应返回错误而非 panic: {err_msg}"
         );
     }
 
@@ -106,11 +106,11 @@
         let tool = ReadFileTool::new(dir.path().to_str().unwrap());
         let result = tool
             .invoke(serde_json::json!({"file_path": "huge.txt"}))
-            .await
-            .unwrap();
+            .await;
+        let err_msg = result.unwrap_err().to_string();
         assert!(
-            result.contains("File too large"),
-            "超大文件应返回 File too large 错误: {result}"
+            err_msg.contains("File too large"),
+            "超大文件应返回 File too large 错误: {err_msg}"
         );
     }
 

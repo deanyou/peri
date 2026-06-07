@@ -8,12 +8,16 @@ use ratatui::{
 
 use peri_widgets::BorderedPanel;
 
-use crate::app::login_panel::{LoginEditField, LoginPanel, LoginPanelMode};
-use crate::app::App;
-use crate::ui::theme;
+use crate::{
+    app::{
+        login_panel::{LoginEditField, LoginPanel, LoginPanelMode},
+        App,
+    },
+    ui::theme,
+};
 
 /// /login 面板渲染（底部展开区）
-pub(crate) fn render_login_panel(f: &mut Frame, panel: &LoginPanel, app: &mut App, area: Rect) {
+pub(crate) fn render_login_panel(f: &mut Frame, panel: &mut LoginPanel, app: &mut App, area: Rect) {
     let lc = &app.services.lc;
     let border_color = match panel.mode {
         LoginPanelMode::Browse => theme::BORDER,
@@ -38,9 +42,7 @@ pub(crate) fn render_login_panel(f: &mut Frame, panel: &LoginPanel, app: &mut Ap
     .border_style(Style::default().fg(border_color))
     .render(f, area);
 
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_area = Some(inner);
+    app.session_mgr.current_mut().ui.panel_area = Some(inner);
 
     let active_provider_id = app
         .services
@@ -122,68 +124,52 @@ pub(crate) fn render_login_panel(f: &mut Frame, panel: &LoginPanel, app: &mut Ap
 
         LoginPanelMode::Edit | LoginPanelMode::New => {
             let mut lines: Vec<Line> = vec![Line::from("")];
-            let fields: &[(LoginEditField, &str, &str, usize)] = &[
-                (
-                    LoginEditField::Name,
-                    "Name        ",
-                    &panel.buf_name,
-                    panel.cur_name,
-                ),
-                (LoginEditField::Type, "Type        ", &panel.buf_type, 0),
-                (
-                    LoginEditField::BaseUrl,
-                    "Base URL    ",
-                    &panel.buf_base_url,
-                    panel.cur_base_url,
-                ),
-                (
-                    LoginEditField::ApiKey,
-                    "API Key     ",
-                    &panel.buf_api_key,
-                    panel.cur_api_key,
-                ),
-                (
-                    LoginEditField::OpusModel,
-                    "Opus Model  ",
-                    &panel.buf_opus_model,
-                    panel.cur_opus_model,
-                ),
-                (
-                    LoginEditField::SonnetModel,
-                    "Sonnet Model",
-                    &panel.buf_sonnet_model,
-                    panel.cur_sonnet_model,
-                ),
-                (
-                    LoginEditField::HaikuModel,
-                    "Haiku Model ",
-                    &panel.buf_haiku_model,
-                    panel.cur_haiku_model,
-                ),
+
+            let fields: &[(LoginEditField, &str)] = &[
+                (LoginEditField::Name, "Name        "),
+                (LoginEditField::Type, "Type        "),
+                (LoginEditField::BaseUrl, "Base URL    "),
+                (LoginEditField::ApiKey, "API Key     "),
+                (LoginEditField::OpusModel, "Opus Model  "),
+                (LoginEditField::SonnetModel, "Sonnet Model"),
+                (LoginEditField::HaikuModel, "Haiku Model "),
             ];
 
-            for (field, label, value, cursor) in fields {
+            for (field, label) in fields {
                 let is_active = *field == panel.edit_field;
-                let value_display = if *field == LoginEditField::Type {
-                    let types = ["openai", "anthropic"];
-                    types
-                        .iter()
-                        .map(|t| {
-                            if *t == *value {
-                                format!("[{}]", t)
-                            } else {
-                                t.to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("  ")
-                } else if *field == LoginEditField::ApiKey && !is_active {
-                    mask_api_key(value)
-                } else if is_active {
-                    let (before, after) = crate::app::edit_display_parts(value, *cursor);
-                    format!("{}█{}", before, after)
+                let value = match field {
+                    LoginEditField::Type => {
+                        let types = ["openai", "anthropic"];
+                        types
+                            .iter()
+                            .map(|t| {
+                                if *t == panel.buf_type {
+                                    format!("[{}]", t)
+                                } else {
+                                    t.to_string()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("  ")
+                    }
+                    LoginEditField::Name => panel.field_name.value(),
+                    LoginEditField::BaseUrl => panel.field_base_url.value(),
+                    LoginEditField::ApiKey => {
+                        if is_active {
+                            panel.field_api_key.value()
+                        } else {
+                            mask_api_key(&panel.field_api_key.value())
+                        }
+                    }
+                    LoginEditField::OpusModel => panel.field_opus_model.value(),
+                    LoginEditField::SonnetModel => panel.field_sonnet_model.value(),
+                    LoginEditField::HaikuModel => panel.field_haiku_model.value(),
+                };
+
+                let value_display = if is_active {
+                    format!("{}█", value)
                 } else {
-                    value.to_string()
+                    value
                 };
 
                 let (label_style, value_style) = if is_active {
@@ -282,8 +268,12 @@ fn mask_api_key(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::login_panel::{LoginEditField, LoginPanel, LoginPanelMode};
-    use crate::app::App;
-    use crate::config::ProviderConfig;
+    use crate::{
+        app::{
+            login_panel::{LoginEditField, LoginPanel, LoginPanelMode},
+            App,
+        },
+        config::ProviderConfig,
+    };
     include!("login_test.rs");
 }

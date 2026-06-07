@@ -39,7 +39,7 @@
     async fn test_render_done_page() {
         let mut wizard = SetupWizardPanel::new();
         wizard.step = SetupStep::Done;
-        wizard.providers[0].api_key = "sk-ant-test1234xyz".to_string();
+        wizard.providers[0].field_api_key.set_value("sk-ant-test1234xyz");
         let (_, handle) = render_headless(wizard).await;
         assert!(handle.contains("Complete"));
     }

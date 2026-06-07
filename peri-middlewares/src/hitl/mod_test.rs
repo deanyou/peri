@@ -368,3 +368,40 @@ async fn test_process_batch_accept_edits_mixed() {
     );
     assert!(results[2].is_ok(), "read_file 应放行");
 }
+
+/// Broker 挂起时 before_tool 会无限等待，文档化当前的同步阻塞缺陷。
+/// broker.request 会无限等待用户响应。
+/// 真实场景中如果用户长时间不操作，before_tool 将永久阻塞。
+#[tokio::test]
+async fn test_broker_hang_rejects_with_timeout() {
+    // 构造一个永不返回的 broker（模拟用户迟迟不点击审批按钮）
+    struct HangingBroker;
+    #[async_trait]
+    impl UserInteractionBroker for HangingBroker {
+        async fn request(&self, _ctx: InteractionContext) -> InteractionResponse {
+            // 永不返回，模拟 broker 挂起
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+    }
+
+    let mw = HumanInTheLoopMiddleware::new(Arc::new(HangingBroker), default_requires_approval)
+        .with_broker_timeout(std::time::Duration::from_millis(500));
+    let mut state = AgentState::new("/tmp");
+    let tc = make_tool_call("Bash");
+
+    let result = mw.before_tool(&mut state, &tc).await;
+
+    // 修复后：broker_timeout 内置超时保护，应返回 ToolRejected 而非永久阻塞
+    assert!(
+        result.is_err(),
+        "挂起 broker 应触发超时拒绝，实际: {:?}",
+        result
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, AgentError::ToolRejected { reason, .. } if reason.contains("超时")),
+        "拒绝应为 ToolRejected 且原因包含超时，实际: {:?}",
+        err
+    );
+}

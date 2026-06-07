@@ -1,16 +1,11 @@
 use std::time::Instant;
 
-use peri_middlewares::prelude::SkillMetadata;
-use peri_middlewares::prelude::TodoItem;
+use peri_middlewares::prelude::{SkillMetadata, TodoItem};
 
-use super::langfuse_state::LangfuseState;
-use super::AgentComm;
-use super::CommandSystem;
-use super::MessageState;
-use super::SessionMetadata;
-use super::UiState;
-use crate::command::CommandRegistry;
-use crate::thread::ThreadId;
+use super::{
+    langfuse_state::LangfuseState, AgentComm, CommandSystem, MessageState, SessionMetadata, UiState,
+};
+use crate::{command::CommandRegistry, thread::ThreadId};
 
 /// 正在运行的后台 SubAgent
 #[derive(Clone, Debug)]
@@ -18,6 +13,8 @@ pub struct RunningBgAgent {
     pub agent_name: String,
     pub instance_id: String,
     pub started_at: Instant,
+    /// 已执行的工具调用数（由 BgToolStep 事件实时递增）
+    pub tool_count: usize,
 }
 
 /// 独立聊天会话：封装一个对话的完整 UI 状态、Agent 通信状态和持久化上下文。
@@ -43,18 +40,23 @@ impl ChatSession {
         skills: Vec<SkillMetadata>,
         lc: &crate::i18n::LcRegistry,
         diff_enabled: bool,
+        streaming_mode: Option<String>,
     ) -> Self {
         let (render_tx, render_cache, render_notify) =
             crate::ui::render_thread::spawn_render_thread(80);
         let commands = CommandSystem::new(command_registry, skills.clone(), lc);
+        let mut messages = MessageState::new(
+            cwd.clone(),
+            render_tx.clone(),
+            std::sync::Arc::clone(&render_cache),
+            std::sync::Arc::clone(&render_notify),
+        );
+        if let Some(ref mode) = streaming_mode {
+            messages.pipeline.init_streaming_mode_from_config(mode);
+        }
         Self {
             ui: UiState::new(super::build_textarea(false), &cwd, diff_enabled),
-            messages: MessageState::new(
-                cwd.clone(),
-                render_tx.clone(),
-                std::sync::Arc::clone(&render_cache),
-                std::sync::Arc::clone(&render_notify),
-            ),
+            messages,
             session_panels: super::panel_manager::PanelManager::new(),
             commands,
             metadata: SessionMetadata::new(),

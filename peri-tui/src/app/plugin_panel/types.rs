@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
+use super::super::FieldTextarea;
 pub use peri_middlewares::plugin::InstallScope;
-use peri_widgets::InputState;
 
 use super::super::panel_list::PanelList;
 
@@ -193,7 +193,7 @@ pub struct PluginPanel {
 
     // --- Discover 视图状态 ---
     pub discover_plugins: Vec<DiscoverPlugin>,
-    pub discover_search: InputState,
+    pub discover_search: FieldTextarea,
     pub discover_searching: bool,
     pub discover_list: PanelList<DiscoverPlugin>,
     pub discover_loading: bool,
@@ -207,7 +207,7 @@ pub struct PluginPanel {
     pub marketplace_confirm_delete: Option<usize>,
     pub marketplace_updating: HashSet<String>,
     /// 添加 marketplace 输入框
-    pub add_marketplace_input: InputState,
+    pub add_marketplace_input: FieldTextarea,
     /// 是否处于添加 marketplace 模式
     pub add_marketplace_active: bool,
 

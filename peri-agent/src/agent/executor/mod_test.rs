@@ -1,8 +1,12 @@
 use super::*;
-use crate::agent::react::{AgentInput, Reasoning};
-use crate::agent::state::AgentState;
-use crate::messages::BaseMessage;
-use crate::tools::BaseTool;
+use crate::{
+    agent::{
+        react::{AgentInput, Reasoning},
+        state::AgentState,
+    },
+    messages::BaseMessage,
+    tools::BaseTool,
+};
 use std::time::{Duration, Instant};
 
 // ─── Mock LLM：第一步返回两个并发工具调用，第二步返回最终答案 ───────────
@@ -567,8 +571,7 @@ async fn test_execute_no_system_accumulation_across_calls() {
 /// 验证 TextChunk/ToolStart/ToolEnd 序列化后含 message_id 字段
 #[test]
 fn test_agent_event_message_id_serialization() {
-    use crate::agent::events::AgentEvent;
-    use crate::messages::MessageId;
+    use crate::{agent::events::AgentEvent, messages::MessageId};
 
     let mid = MessageId::new();
 
@@ -1191,8 +1194,10 @@ async fn test_state_snapshot_no_overlap() {
 /// 被 prepend 的 System 消息。这些消息不应泄露到 agent_state_messages。
 #[tokio::test]
 async fn test_state_snapshot_excludes_system_messages() {
-    use crate::agent::events::{AgentEvent, FnEventHandler};
-    use crate::middleware::r#trait::Middleware;
+    use crate::{
+        agent::events::{AgentEvent, FnEventHandler},
+        middleware::r#trait::Middleware,
+    };
     use std::sync::{Arc, Mutex};
 
     struct AnswerLLM;
@@ -1440,4 +1445,78 @@ async fn test_set_notification_rx() {
         .await
         .unwrap();
     assert_eq!(output.text, "ok");
+}
+
+// ─── A4: LLM 错误路径下 cleanup_prepended 行为测试 ──────────────────────
+
+/// 验证 LLM 返回错误时 execute() 的 ? 传播行为：
+/// LLM 错误（如 400）通过 ? 传播出函数，跳过 cleanup_prepended，
+/// 导致 prepend 的 system 消息泄漏到 state。ACP 层通过
+/// strip_leaked_prepends 补偿清理此泄漏。
+///
+/// 此测试验证当前行为，确保未来修改 executor 清理逻辑时与 ACP 层协调。
+#[tokio::test]
+async fn test_llm_error_cleanup_prepended_behavior() {
+    use crate::middleware::r#trait::Middleware;
+
+    // 中间件：before_agent 中 prepend system 消息
+    struct PrependSystemMiddleware;
+    #[async_trait::async_trait]
+    impl<S: State> Middleware<S> for PrependSystemMiddleware {
+        fn name(&self) -> &str {
+            "PrependSystem"
+        }
+        async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
+            state.prepend_message(BaseMessage::system("middleware prepend content"));
+            Ok(())
+        }
+    }
+
+    // LLM：第一次调用就返回 400 错误
+    struct ErrorLLM;
+    #[async_trait::async_trait]
+    impl ReactLLM for ErrorLLM {
+        async fn generate_reasoning(
+            &self,
+            _messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
+        ) -> AgentResult<Reasoning> {
+            Err(AgentError::LlmHttpError {
+                status: 400,
+                message: "模拟 LLM 错误".to_string(),
+            })
+        }
+    }
+
+    let agent = ReActAgent::new(ErrorLLM)
+        .max_iterations(5)
+        .with_system_prompt("main system prompt".to_string())
+        .add_middleware(Box::new(PrependSystemMiddleware));
+
+    let mut state = AgentState::new("/tmp");
+    let result = agent
+        .execute(AgentInput::text("hello"), &mut state, None)
+        .await;
+
+    // LLM 错误应正确传播
+    assert!(
+        matches!(&result, Err(AgentError::LlmHttpError { status: 400, .. })),
+        "应返回 LlmHttpError(400)，实际: {:?}",
+        result
+    );
+
+    // A4 修复后验证：cleanup_prepended 在错误路径上也执行，system 消息被正确清理
+    let messages = state.messages();
+    let system_count = messages.iter().filter(|m| m.is_system()).count();
+    let human_count = messages
+        .iter()
+        .filter(|m| matches!(m, BaseMessage::Human { .. }))
+        .count();
+
+    assert_eq!(human_count, 1, "state 中应有 1 条 Human 消息");
+    assert_eq!(
+        system_count, 0,
+        "LLM 错误路径下 system 消息应被清理，实际有 {system_count} 条"
+    );
 }

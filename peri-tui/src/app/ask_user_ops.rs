@@ -2,8 +2,9 @@ use super::*;
 
 impl App {
     pub fn ask_user_next_tab(&mut self) {
-        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
-            [self.session_mgr.active]
+        if let Some(InteractionPrompt::Questions(p)) = self
+            .session_mgr
+            .current_mut()
             .agent
             .interaction_prompt
             .as_mut()
@@ -13,8 +14,9 @@ impl App {
     }
 
     pub fn ask_user_prev_tab(&mut self) {
-        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
-            [self.session_mgr.active]
+        if let Some(InteractionPrompt::Questions(p)) = self
+            .session_mgr
+            .current_mut()
             .agent
             .interaction_prompt
             .as_mut()
@@ -24,8 +26,9 @@ impl App {
     }
 
     pub fn ask_user_move(&mut self, delta: isize) {
-        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
-            [self.session_mgr.active]
+        if let Some(InteractionPrompt::Questions(p)) = self
+            .session_mgr
+            .current_mut()
             .agent
             .interaction_prompt
             .as_mut()
@@ -45,8 +48,9 @@ impl App {
 
     /// 页面级滚动（Ctrl+U 上翻 / Ctrl+D 下翻 / 鼠标滚轮）
     pub fn ask_user_scroll(&mut self, lines: i16) {
-        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
-            [self.session_mgr.active]
+        if let Some(InteractionPrompt::Questions(p)) = self
+            .session_mgr
+            .current_mut()
             .agent
             .interaction_prompt
             .as_mut()
@@ -65,8 +69,9 @@ impl App {
     }
 
     pub fn ask_user_toggle(&mut self) {
-        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
-            [self.session_mgr.active]
+        if let Some(InteractionPrompt::Questions(p)) = self
+            .session_mgr
+            .current_mut()
             .agent
             .interaction_prompt
             .as_mut()
@@ -76,15 +81,16 @@ impl App {
     }
 
     pub fn ask_user_edit_key(&mut self, input: tui_textarea::Input) {
-        if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
-            [self.session_mgr.active]
+        if let Some(InteractionPrompt::Questions(p)) = self
+            .session_mgr
+            .current_mut()
             .agent
             .interaction_prompt
             .as_mut()
         {
             let q = p.current();
             if q.in_custom_input {
-                crate::app::handle_edit_key(&mut q.custom_input, &mut q.custom_cursor, input);
+                q.custom_input.input(input);
             }
         }
     }
@@ -93,7 +99,9 @@ impl App {
     /// 若当前问题没有选中任何选项（且不在自定义输入模式），自动选中光标所在选项。
     pub fn ask_user_confirm(&mut self) {
         let all_done = {
-            let p = match self.session_mgr.sessions[self.session_mgr.active]
+            let p = match self
+                .session_mgr
+                .current_mut()
                 .agent
                 .interaction_prompt
                 .as_mut()
@@ -105,7 +113,7 @@ impl App {
             // 没有选中任何选项且不在自定义输入模式：自动选中当前光标行
             if !q.in_custom_input
                 && !q.selected.iter().any(|&v| v)
-                && q.custom_input.trim().is_empty()
+                && q.custom_input.value().trim().is_empty()
             {
                 q.toggle_current();
             }
@@ -113,11 +121,10 @@ impl App {
         };
 
         if all_done {
-            self.session_mgr.sessions[self.session_mgr.active]
-                .agent
-                .pending_ask_user = None;
-            if let Some(InteractionPrompt::Questions(p)) = self.session_mgr.sessions
-                [self.session_mgr.active]
+            self.session_mgr.current_mut().agent.pending_ask_user = None;
+            if let Some(InteractionPrompt::Questions(p)) = self
+                .session_mgr
+                .current_mut()
                 .agent
                 .interaction_prompt
                 .take()
@@ -133,14 +140,17 @@ impl App {
                     .map(|(header, answer)| format!("[{}] {}", header, answer))
                     .collect();
                 let vm = MessageViewModel::user(answer_lines.join("\n"));
-                self.session_mgr.sessions[self.session_mgr.active]
+                self.session_mgr
+                    .current_mut()
                     .messages
                     .view_messages
                     .push(vm);
                 self.render_rebuild();
 
                 // ACP 模式：通过 transport 回传结构化响应
-                let acp_request_id = self.session_mgr.sessions[self.session_mgr.active]
+                let acp_request_id = self
+                    .session_mgr
+                    .current_mut()
                     .agent
                     .pending_acp_request_id
                     .take();
@@ -176,7 +186,7 @@ impl App {
                                     .into_iter()
                                     .next()
                                     .or_else(|| {
-                                        let s = q.custom_input.trim().to_string();
+                                        let s = q.custom_input.value().trim().to_string();
                                         if s.is_empty() {
                                             None
                                         } else {

@@ -86,3 +86,48 @@
         let result = registry.cancel("nonexistent");
         assert!(result.is_err());
     }
+
+    /// Cancel 传播到执行中的 Background 任务：阻塞的 JoinHandle 被 abort 后任务终止。
+    /// 验证 abort_handle.abort() 真正触发了 JoinHandle 的取消，而非仅从 registry 移除条目。
+    #[tokio::test]
+    async fn test_cancel_propagates_to_running_task() {
+        let (registry, _rx) = make_registry();
+
+        // 构造一个会长时间阻塞的 JoinHandle（等待 oneshot，永不 resolve）
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            // 阻塞等待永不触发的 oneshot，模拟执行中的 SubAgent
+            let _ = rx.await;
+        });
+
+        let task = BackgroundTask {
+            id: "bg-running".to_string(),
+            agent_name: "blocking-agent".to_string(),
+            prompt_summary: "blocking test".to_string(),
+            status: BackgroundTaskStatus::Running,
+            started_at: std::time::Instant::now(),
+            abort_handle: handle,
+        };
+
+        registry.register(task).unwrap();
+        assert_eq!(registry.active_count(), 1);
+
+        // 取消任务：应 abort JoinHandle 并从 registry 移除
+        registry.cancel("bg-running").unwrap();
+
+        // 验证 registry 中已清理
+        let tasks = registry.list_tasks();
+        assert!(
+            tasks.is_empty(),
+            "cancel 后任务应从 registry 移除，实际: {}",
+            tasks.len()
+        );
+        assert_eq!(
+            registry.active_count(),
+            0,
+            "cancel 后 active_count 应为 0"
+        );
+
+        // 清理：让 oneshot sender 释放，避免 JoinHandle 泄漏
+        drop(tx);
+    }

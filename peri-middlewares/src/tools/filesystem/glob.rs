@@ -128,7 +128,7 @@ impl BaseTool for GlobFilesTool {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let pattern = input["pattern"]
             .as_str()
-            .ok_or("Missing pattern parameter")?;
+            .ok_or("The 'pattern' parameter is required for the Glob tool.")?;
 
         let search_root = if let Some(p) = input["path"].as_str() {
             resolve_path(&self.cwd, p)
@@ -137,10 +137,7 @@ impl BaseTool for GlobFilesTool {
         };
 
         if !search_root.exists() {
-            return Ok(format!(
-                "Error: Directory not found: {}",
-                search_root.display()
-            ));
+            return Err(format!("Error: Directory not found: {}", search_root.display()).into());
         }
 
         let mut results = Vec::new();

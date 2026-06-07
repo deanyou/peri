@@ -8,7 +8,7 @@ TUI 领域负责交互式终端界面的实现，包括渲染引擎、事件处�
 
 - 双线程渲染：独立渲染线程计算 Markdown 解析（pulldown-cmark）和行包装，UI 线程只从 `RenderCache` 读取可见行，按需重绘
 - 事件处理：crossterm 输入拦截、命令解析（`/` 前缀）、弹窗状态管理
-- 命令系统：`/model`、`/history`、`/clear`、`/help`、`/compact`、`/config`、`/cost`、`/context`、`/memory`、`/mcp`、`/loop`、`/cron`、`/agents`、`/effort`、`/rename`、`/doctor`；Command trait 支持 alias 机制
+- 命令系统：`/model`、`/history`、`/clear`、`/help`、`/compact`、`/config`、`/cost`、`/context`、`/memory`、`/mcp`、`/loop`、`/cron`、`/agents`、`/effort`、`/rename`；Command trait 支持 alias 机制
 - 多会话管理：SQLite 持久化，`/history` 面板按 cwd 过滤当前工作区对话
 - 弹窗系统：HITL 审批弹窗、AskUser 问答弹窗（支持 header 短标签 + 选项 description + 动态高度计算）、Model/Agents/Thread/Relay 配置面板
 - SubAgent 层级展示：SubAgentGroup 可折叠块，滑动窗口显示最近 4 步，显示格式 `Agent(type) #hash`，颜色区分状态（前台绿色、后台运行中黄色、错误红色）
@@ -112,7 +112,7 @@ submit_message(text)
 | 面板组件化 | PanelKind/PanelState 枚举 + PanelComponent trait + PanelManager，双实例（session/global），PanelContext 解耦借用 |
 | SubAgent 显示 | 格式 `Agent(type) #hash`，颜色映射（ERROR/WARNING/SAGE），is_background + bg_hash 字段 |
 | 配置系统 | CLAUDE.local.md 支持、`@import` 外部引用（深度上限 3）、claudeMdExcludes glob 过滤、`$schema` passthrough |
-| TUI 命令 | `/effort` 切换推理力度、`/rename` 设置会话标题、`/doctor` 健康检查 |
+| TUI 命令 | `/effort` 切换推理力度、`/rename` 设置会话标题 |
 | 配色方案 | v1.1 降噪：橙色仅用于输入框，工具名 bash=ACCENT/写操作=WARNING/只读=MUTED，面板边框 MUTED |
 | Setup Wizard | 三步引导（Provider → API Key → Model Alias），save_setup() 原子写回 settings.json |
 | Welcome Card | 空消息时 ASCII Art Logo + 功能亮点，窄屏降级为文字标题 |
@@ -494,7 +494,7 @@ submit_message(text)
 - CLAUDE.local.md 追加到主文件内容末尾，不入库的个人配置
 - @import 外部文件引用，递归解析深度上限 3，循环检测
 - claudeMdExcludes glob 模式跳过特定路径的 CLAUDE.md
-- /effort 命令调整推理力度，/rename 命令修改会话标题，/doctor 健康检查
+- /effort 命令调整推理力度，/rename 命令修改会话标题
 **归档:** [链接](../../archive/feature_20260510_F001_simple-compat-features/)
 **归档日期:** 2026-05-13
 
@@ -877,6 +877,131 @@ submit_message(text)
 **问题本质:** 鼠标事件处理器使用简单线性公式，与 ratatui Scrollbar::part_lengths() 的 thumb 定位公式不一致
 **通用模式:** UI 组件的鼠标交互必须复刻组件库自己的坐标计算公式，不能使用简化的线性近似
 **涉及文件:** peri-tui/src/ui/main_ui/message_area.rs, peri-tui/src/event/mod.rs, peri-widgets/src/scrollable.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-30-render-event-unbounded-channel
+
+**摘要:** RenderThread 事件通道使用 UnboundedChannel，极端情况下可能内存膨胀
+**状态:** Fixed
+**归档日期:** 2026-05-31
+**关键词:** 有界通道, 背压, 内存膨胀, 渲染线程
+**问题本质:** 无界通道在极端场景（LLM 快速输出 + resize 风暴 + 大量 compact 事件）下事件积压导致内存无界增长
+**通用模式:** 生产者-消费者场景中使用有界通道 + 背压防止内存无界增长；紧急事件可用 try_send + 覆盖策略
+**涉及文件:** peri-tui/src/ui/render_thread.rs, peri-tui/src/app/message_pipeline/mod.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-30-no-explicit-frame-rate-limit
+
+**摘要:** TUI 渲染缺少显式帧率限制，loading 动画期间持续满帧重绘
+**状态:** Fixed
+**归档日期:** 2026-05-31
+**关键词:** 帧率限制, CPU 占用, loading 动画, 渲染节流
+**问题本质:** loading 状态为 true 时每次事件循环都触发 terminal.draw()，无时间间隔检查
+**通用模式:** 动画/loading 场景需要显式帧率限制（如 30 FPS），避免 CPU 空转
+**涉及文件:** peri-tui/src/main.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-30-migrate-widgets-to-widgetref
+
+**摘要:** peri-widgets 组件未使用 WidgetRef，渲染路径存在不必要克隆
+**状态:** Fixed
+**归档日期:** 2026-05-31
+**关键词:** WidgetRef, 所有权, 克隆, ratatui, 渲染优化
+**问题本质:** 标准 Widget trait 消费所有权，流式输出每 100ms 重绘导致频繁重建和克隆
+**通用模式:** 高频渲染场景使用引用渲染模式（WidgetRef/unstable-widget-ref feature）避免所有权转移
+**涉及文件:** peri-widgets/src/markdown/mod.rs, peri-tui/Cargo.toml
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-31-interaction-popup-textarea-not-disabled
+
+**摘要:** 交互弹窗激活时底部常驻输入框未失效
+**状态:** Fixed
+**归档日期:** 2026-05-31
+**关键词:** 弹窗, Paste 事件, IME, 事件路由, 终端光标
+**问题本质:** Paste 和 Mouse 事件不走弹窗键盘拦截路径，导致输入泄漏到底层 textarea
+**通用模式:** 事件系统中每类事件（Key/Paste/Mouse）都需独立检查弹窗/模态状态；终端 IME 预编辑窗口依赖可见光标作为锚点，不能简单隐藏
+**架构影响:** 终端 IME 兼容性要求光标可见性与输入焦点解耦
+**涉及文件:** peri-tui/src/event/mod.rs, peri-tui/src/ui/main_ui/mod.rs, peri-tui/src/event/keyboard/popups.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-30-table-holdback-during-streaming
+
+**摘要:** 流式 Markdown 表格渲染缺少 holdback 机制，显示不完整列
+**状态:** Fixed
+**归档日期:** 2026-05-31
+**关键词:** 表格, 流式, holdback, Markdown 解析, 列对齐
+**问题本质:** Markdown 表格在流式输出中列数不完整时被提前渲染，导致列错位和视觉闪烁
+**通用模式:** 流式渲染中结构性内容（表格、列表、代码块）需要完整性检测后再提交；不完整行保持 holdback 状态
+**涉及文件:** peri-tui/src/ui/markdown/mod.rs, peri-tui/src/app/message_pipeline/mod.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-30-markdown-parse-lru-cache
+
+**摘要:** TUI Markdown 解析缺少 LRU 缓存，每次渲染完整重解析
+**状态:** Fixed
+**归档日期:** 2026-05-31
+**关键词:** LRU 缓存, Markdown 解析, pulldown-cmark, 性能优化
+**问题本质:** Markdown 解析无缓存，resize/RebuildAll 时重复解析相同内容造成 CPU 开销
+**通用模式:** 纯计算 + 输入不变的场景使用缓存（key = content_hash + 上下文参数如 max_width）
+**涉及文件:** peri-widgets/src/markdown/mod.rs, peri-tui/src/ui/render_thread.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-29-ctrl-c-priority-chain-clear-input
+
+**摘要:** Ctrl+C 改为优先级链：清空输入框 → 中断 Agent → 退出
+**状态:** Fixed
+**归档日期:** 2026-05-31
+**关键词:** Ctrl+C, 优先级链, 中断, 事件处理, 交互设计
+**问题本质:** Ctrl+C 行为缺少优先级层次，输入框有内容时直接中断 Agent 或进入 quit-pending
+**通用模式:** 全局快捷键应设计优先级链（从局部到全局），避免误操作；shell 风格交互中 Ctrl+C 先清空输入行是用户预期
+**涉及文件:** peri-tui/src/event/keyboard/normal_keys.rs, peri-tui/src/app/mod.rs
+**CLAUDE.md 链接:** false
+
+### issue_2026-05-31-at-mention-blocking-glob-search
+
+- **摘要:** @ mention 文件搜索性能差 + 多目录搜不到
+- **状态:** Fixed
+- **归档日期:** 2026-06-03
+- **关键词:** at-mention 文件搜索, glob 性能, walkdir, 线程隔离
+- **问题本质:** glob::glob() 深度优先遍历无法跳过大目录(node_modules/target)，MAX_GLOB_RESULTS 截断导致有效结果丢失；spawn_blocking 占用 tokio 线程池不释放
+- **通用模式:** 文件系统遍历应用 walkdir + should_skip_dir 在目录层级过滤，而非 glob 后截断；CPU/内存密集搜索应放独立线程 + idle 自动退出，不占 tokio 线程池
+- **技术决策:** 从 glob crate 迁移到 walkdir + should_skip_dir（对齐 GlobFilesTool），搜索从 spawn_blocking 改为 std::thread::spawn + mpsc + recv_timeout idle 退出
+- **涉及文件:** peri-tui/src/app/at_mention/file_search.rs, peri-tui/src/app/at_mention/mod.rs, peri-tui/src/event/keyboard.rs
+
+### issue_2026-06-02-rewind-loses-messages-esc-unresponsive
+
+- **摘要:** Rewind 回退后前文消息全部丢失 + 双击 ESC 偶发无响应
+- **状态:** Fixed
+- **归档日期:** 2026-06-03
+- **关键词:** Rewind 消息丢失, RebuildAll, 双击 ESC, rewind_pending_since
+- **问题本质:** handle_rewind_completed 只把保留消息放入 pipeline.completed 但未触发 VM 转换，RebuildAll 的 tail_vms 只有 rewind 通知，保留消息永远不渲染；兜底分支无差别重置 rewind_pending_since 导致双击序列被中间事件中断
+- **通用模式:** pipeline 操作后必须确保 completed 消息被渲染（通过 messages_to_view_models 或 StateSnapshot 触发）；双击/连续按键检测不应在兜底分支重置状态，应在明确的用户输入分支处理
+- **架构影响:** rewind 与 compact 共享 pipeline 操作但 rewind 没有后续 agent 执行来触发 StateSnapshot，需自行处理渲染
+- **涉及文件:** peri-tui/src/app/agent_compact.rs, peri-tui/src/event/keyboard/normal_keys.rs
+
+### issue_2026-06-01-remove-split-multi-session
+
+- **摘要:** 移除 /split 多 session 分屏功能
+- **状态:** Fixed
+- **归档日期:** 2026-06-03
+- **关键词:** 多 session 分屏, SessionManager, 架构简化, /split 移除
+- **问题本质:** TUI 层维护多 session 并发分屏功能增加 ~900 处 session_mgr 引用，但用户实际需求被 tmux 等工具覆盖，投入产出不成比例
+- **通用模式:** 低使用率功能的大面积架构复杂度应及时清理；终端应用的多窗口需求应交给终端复用工具而非应用自身
+- **架构影响:** SessionManager 保留但限制 len=1，多列布局改单列，删除 /split 命令和 Ctrl+N/P/W 快捷键
+- **技术决策:** 完全移除 TUI 多 session 并发分屏，保留 ACP 层 SessionStore 的多 session 存储（用于 /history 恢复）
+- **涉及文件:** peri-tui/src/command/session/split.rs, peri-tui/src/app/session_manager.rs, peri-tui/src/ui/main_ui/mod.rs
+
+
+### issue_2026-05-24-config-panel-interaction-redesign
+**摘要:** Config 面板交互混乱，需整体重新设计
+**状态:** Verified
+**归档日期:** 2026-06-06
+**关键词:** Config 面板, 即时生效, 编辑模式简化, 按键一致性
+**问题本质:** Config 面板采用 Browse/Edit 两步式操作模式，6 个字段混在一起，不同字段类型的按键行为不一致（Space 在布尔字段是切换、在文本字段是空格），用户无法预测按键效果。修复方案是从两步模式改为直编辑+即时生效模式。
+**通用模式:** 配置类面板应优先采用直编辑+即时生效模式（修改即保存），而非 Enter 确认后再保存的模态编辑。不同字段类型的按键操作应保持一致性——布尔/选择用 Space/方向键切换，文本用键盘输入+失焦保存。
+**架构影响:** 新增面板组件的交互设计应遵循：直编辑 > 多步模式、即时保存 > 确认保存、分组标签 > 平铺列表、按键行为按字段类型一致而非按当前模式变化。
+**技术决策:** 即改即走的配置交互模式
+**涉及文件:** peri-tui/src/app/config_panel.rs, peri-tui/src/ui/main_ui/panels/config.rs, peri-tui/src/app/panel_config.rs, peri-tui/src/command/core/config.rs
 **CLAUDE.md 链接:** false
 
 ---

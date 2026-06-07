@@ -1,23 +1,29 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_agent::agent::events::{AgentEvent, AgentEventHandler};
-use peri_agent::agent::react::{AgentInput, ReactLLM};
-use peri_agent::agent::AgentCancellationToken;
-use peri_agent::messages::BaseMessage;
-use peri_agent::thread::ThreadStore;
-use peri_agent::tools::BaseTool;
+use peri_agent::{
+    agent::{
+        events::{AgentEvent, AgentEventHandler},
+        react::{AgentInput, ReactLLM},
+        AgentCancellationToken,
+    },
+    messages::BaseMessage,
+    thread::ThreadStore,
+    tools::BaseTool,
+};
 
-use crate::agent_define::{AgentDefineMiddleware, AgentOverrides};
-use crate::claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue};
-use crate::hooks::types::{HookEvent, RegisteredHook};
-use crate::subagent::background::BackgroundTaskRegistry;
-use crate::subagent::built_in_agents::get_built_in_agent;
+use crate::tool_search::core_tools::TOOL_AGENT;
+use crate::{
+    agent_define::{AgentDefineMiddleware, AgentOverrides},
+    claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue},
+    hooks::types::{HookEvent, RegisteredHook},
+    subagent::{background::BackgroundTaskRegistry, built_in_agents::get_built_in_agent},
+};
 use parking_lot::RwLock;
 
-use super::build_agent::CancelPolicy;
-use super::fire_subagent_lifecycle_hooks_static;
-use super::format_subagent_result;
+use super::{
+    build_agent::CancelPolicy, fire_subagent_lifecycle_hooks_static, format_subagent_result,
+};
 
 /// RAII guard that calls deregister on drop (panic-safe cleanup).
 pub(crate) struct DeregisterGuard {
@@ -45,7 +51,7 @@ Fork mode (fork: true):
 
 Usage:
 - Provide a clear, self-contained task description via the prompt parameter. The sub-agent has no access to the parent conversation history
-- Specify subagent_type matching an existing agent definition file. When not provided, creates a fork of the current agent
+- **subagent_type is REQUIRED** unless fork=true. Specify an agent ID matching an existing agent definition file. Do NOT omit this parameter unless you intend to fork the current agent
 - The sub-agent inherits the parent's tool set by default, excluding Agent itself (to prevent recursion)
 - Agent definitions may restrict available tools via the tools and disallowedTools fields in frontmatter
 - The sub-agent executes in isolated state — it cannot access the parent's message history or intermediate results
@@ -269,7 +275,7 @@ impl SubAgentTool {
 #[async_trait]
 impl BaseTool for SubAgentTool {
     fn name(&self) -> &str {
-        "Agent"
+        TOOL_AGENT
     }
 
     fn description(&self) -> &str {
@@ -291,7 +297,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). Must exactly match an agent definition file at .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md. When empty or not provided, creates a fork of the current agent with all tools"
+                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). Must exactly match an agent definition file at .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md. REQUIRED unless fork=true. When not provided and fork is not set, the call will fail with an error"
                 },
                 "name": {
                     "type": "string",
@@ -323,7 +329,7 @@ impl BaseTool for SubAgentTool {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
-            None => return Ok("Error: missing required parameter prompt".to_string()),
+            None => return Err("Error: missing required parameter prompt".into()),
         };
         let subagent_type = input
             .get("subagent_type")
@@ -357,16 +363,16 @@ impl BaseTool for SubAgentTool {
         let agent_id = match &subagent_type {
             Some(id) => id.clone(),
             None => {
-                return Ok(
+                return Err(
                     "Error: please provide subagent_type parameter to specify the agent type, or use fork: true for fork mode"
-                        .to_string(),
+                        .into(),
                 )
             }
         };
 
         let agent_def = match self.load_agent_def(&agent_id, &cwd) {
             Ok(a) => a,
-            Err(e) => return Ok(e),
+            Err(e) => return Err(e.into()),
         };
 
         let build_result = self

@@ -1,13 +1,14 @@
 //! 后台 Agent 管理栏——显示运行中的后台 SubAgent 列表
 
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem};
-use ratatui::Frame;
+use ratatui::{
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{List, ListItem},
+    Frame,
+};
 
 use crate::app::App;
-use crate::ui::message_view::MessageViewModel;
 
 /// 固定调色板（最多 8 种颜色循环）
 const AGENT_COLORS: &[Color] = &[
@@ -38,9 +39,7 @@ fn format_elapsed(start: std::time::Instant) -> String {
 
 /// 计算 bar 需要的高度（0 = 隐藏）
 pub(crate) fn bg_bar_height(app: &App) -> u16 {
-    let count = app.session_mgr.sessions[app.session_mgr.active]
-        .background_agents
-        .len();
+    let count = app.session_mgr.current().background_agents.len();
     if count == 0 {
         0
     } else {
@@ -50,32 +49,14 @@ pub(crate) fn bg_bar_height(app: &App) -> u16 {
     }
 }
 
-/// 从 view_messages 中查找指定 instance_id 的 SubAgentGroup 的 total_steps
-fn find_total_steps(view_messages: &[MessageViewModel], instance_id: &str) -> usize {
-    for vm in view_messages.iter().rev() {
-        if let MessageViewModel::SubAgentGroup {
-            instance_id: Some(iid),
-            total_steps,
-            ..
-        } = vm
-        {
-            if iid == instance_id {
-                return *total_steps;
-            }
-        }
-    }
-    0
-}
-
 pub(crate) fn render_bg_agent_bar(f: &mut Frame, app: &mut App, area: Rect) {
     if area.height == 0 {
         return;
     }
 
-    let session = &app.session_mgr.sessions[app.session_mgr.active];
+    let session = &app.session_mgr.current();
     let agents = &session.background_agents;
     let focused_id = &session.focused_instance_id;
-    let view_messages = &session.messages.view_messages;
     let visible_count = agents.len().min(4);
     let total_items = 1 + visible_count;
     let cursor = session.ui.bg_bar_cursor.map(|c| c.min(total_items - 1));
@@ -104,8 +85,8 @@ pub(crate) fn render_bg_agent_bar(f: &mut Frame, app: &mut App, area: Rect) {
         let is_selected = cursor == Some(i + 1);
 
         let elapsed = format_elapsed(agent.started_at);
+        let steps = agent.tool_count;
         let name_preview: String = agent.agent_name.chars().take(20).collect();
-        let steps = find_total_steps(view_messages, &agent.instance_id);
         let style = if is_selected {
             Style::default().add_modifier(Modifier::REVERSED)
         } else if is_focused {

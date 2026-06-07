@@ -18,31 +18,190 @@
 //! 但在 "finalize 边界"（ToolStart / ToolEnd / Done）会 reconcile 最后的
 //! AssistantBubble，确保最终状态与 restore 路径完全一致。
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use peri_agent::messages::{BaseMessage, ToolCallRequest};
 
-use crate::app::events::AgentEvent;
-use crate::app::tool_display;
-#[allow(unused_imports)]
-use crate::ui::message_view::{aggregate_tool_groups, ContentBlockView, MessageViewModel};
+use crate::app::{events::AgentEvent, tool_display};
+use crate::ui::message_view::MessageViewModel;
+use crate::ui::message_view::{instance_hash, parse_bg_hash};
 
 mod reconcile;
 mod transform;
 
 pub use crate::ui::message_view::aggregate_batch_groups;
 pub use reconcile::PipelineAction;
-#[allow(unused_imports)]
-pub(crate) use reconcile::{
-    add_thinking_tail_snapshot, extract_tail_lines, merge_frozen_subagents,
-};
+#[cfg(test)]
+use reconcile::{extract_tail_lines, merge_frozen_subagents};
+
+// ─── 流式渲染模式 ──────────────────────────────────────────────────────────
+
+/// 流式渲染模式：控制 LLM 输出时的渲染粒度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum StreamingMode {
+    /// 逐 token 实时渲染 + 自适应帧率（默认）
+    #[default]
+    Streaming,
+    /// 按 Markdown block 粒度整块渲染（段落/代码块完成后渲染）
+    Block,
+    /// 不渲染流式内容，LLM 完成后一次性显示
+    None,
+}
+
+// ─── 自适应分块策略 ──────────────────────────────────────────────────────────
+
+/// 排空计划：控制每次 check_throttle 的消费量
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DrainPlan {
+    /// 正常模式：提交一行（单次 RebuildAll）
+    Single,
+    /// 积压模式：一次性排空所有积压行（单次 RebuildAll 含全部内容）
+    Batch,
+}
+
+/// 分块模式（内部状态）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChunkingMode {
+    /// 平滑模式：逐行提交
+    Smooth,
+    /// 追赶模式：批量排空
+    CatchUp,
+}
+
+/// 自适应分块策略：根据队列压力在 Smooth/CatchUp 模式间动态切换。
+///
+/// Smooth 模式（默认）：每次 tick 提交一行，保证流畅感。
+/// CatchUp 模式：队列积压时一次性排空，快速收敛显示。
+///
+/// 进入 CatchUp 条件（满足任一）：
+/// - 队列深度 >= `queue_depth_threshold`（默认 8 行）
+/// - 最老行年龄 >= `oldest_age_threshold`（默认 120ms）
+///
+/// 退出 CatchUp 条件（同时满足）：
+/// - 队列深度 <= `exit_depth`（默认 2 行）
+/// - 最老行年龄 <= `exit_age`（默认 40ms）
+pub(crate) struct AdaptiveChunkingPolicy {
+    /// 当前是否处于 CatchUp 模式
+    pub(crate) mode: ChunkingMode,
+    /// 累积的未消费行数（按换行符计）
+    pub(crate) pending_lines: usize,
+    /// 首个未消费 chunk 的到达时间（用于计算最老行年龄）
+    pub(crate) oldest_chunk_at: Option<Instant>,
+    /// 进入 CatchUp 的队列深度阈值
+    queue_depth_threshold: usize,
+    /// 进入 CatchUp 的最老行年龄阈值
+    oldest_age_threshold: Duration,
+    /// 退出 CatchUp 的队列深度阈值
+    exit_depth: usize,
+    /// 退出 CatchUp 的最老行年龄阈值
+    exit_age: Duration,
+}
+
+impl AdaptiveChunkingPolicy {
+    /// 使用默认参数创建策略
+    fn new() -> Self {
+        Self {
+            mode: ChunkingMode::Smooth,
+            pending_lines: 0,
+            oldest_chunk_at: None,
+            queue_depth_threshold: 8,
+            oldest_age_threshold: Duration::from_millis(120),
+            exit_depth: 2,
+            exit_age: Duration::from_millis(40),
+        }
+    }
+
+    /// 通知策略有新的 chunk 到达。
+    /// 按换行符统计行数，并记录首个 chunk 的时间戳。
+    fn on_chunk(&mut self, chunk: &str) {
+        let new_lines = chunk.lines().count().max(1);
+        self.pending_lines += new_lines;
+        if self.oldest_chunk_at.is_none() {
+            self.oldest_chunk_at = Some(Instant::now());
+        }
+    }
+
+    /// 通知策略有新的推理 chunk 到达（同样累积压力）
+    fn on_reasoning_chunk(&mut self) {
+        self.pending_lines += 1;
+        if self.oldest_chunk_at.is_none() {
+            self.oldest_chunk_at = Some(Instant::now());
+        }
+    }
+
+    /// 检查当前是否应该触发重绘，若触发则返回 DrainPlan。
+    ///
+    /// 策略逻辑：
+    /// - Smooth 模式：检查基础节流间隔（最小 16ms，约 60fps），满足则返回 Single
+    /// - CatchUp 模式：立即返回 Batch，无节流间隔限制
+    /// - 每次调用检查是否需要模式切换
+    fn check(&mut self) -> Option<DrainPlan> {
+        if self.pending_lines == 0 {
+            return None;
+        }
+
+        self.update_mode();
+
+        match self.mode {
+            ChunkingMode::Smooth => Some(DrainPlan::Single),
+            ChunkingMode::CatchUp => Some(DrainPlan::Batch),
+        }
+    }
+
+    /// 消费后排空积压计数
+    fn drain(&mut self) {
+        self.pending_lines = 0;
+        self.oldest_chunk_at = None;
+    }
+
+    /// 重置策略状态（用于 done/interrupt/begin_round）
+    fn reset(&mut self) {
+        self.mode = ChunkingMode::Smooth;
+        self.pending_lines = 0;
+        self.oldest_chunk_at = None;
+    }
+
+    /// 根据队列深度和最老行年龄更新模式
+    fn update_mode(&mut self) {
+        let now = Instant::now();
+        let oldest_age = self
+            .oldest_chunk_at
+            .map(|t| now.duration_since(t))
+            .unwrap_or(Duration::ZERO);
+
+        match self.mode {
+            ChunkingMode::Smooth => {
+                // 进入 CatchUp：满足任一条件
+                if self.pending_lines >= self.queue_depth_threshold
+                    || oldest_age >= self.oldest_age_threshold
+                {
+                    self.mode = ChunkingMode::CatchUp;
+                }
+            }
+            ChunkingMode::CatchUp => {
+                // 退出 CatchUp：同时满足两个条件
+                if self.pending_lines <= self.exit_depth && oldest_age <= self.exit_age {
+                    self.mode = ChunkingMode::Smooth;
+                }
+            }
+        }
+    }
+
+    /// 当前是否处于 CatchUp 模式（诊断用）
+    #[allow(dead_code)]
+    fn is_catch_up(&self) -> bool {
+        self.mode == ChunkingMode::CatchUp
+    }
+}
 
 // ─── 管线内部状态 ────────────────────────────────────────────────────────────
 
 /// 已开始但未结束的工具调用
 pub(crate) struct PendingTool {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 用于工具调用匹配，reconcile 阶段读取
     tool_call_id: String,
     name: String,
     input: serde_json::Value,
@@ -55,29 +214,6 @@ pub(crate) struct CompletedTool {
     input: serde_json::Value,
     output: String,
     is_error: bool,
-}
-
-/// 从字符串生成短 hash（FNV-1a，6 位十六进制，确定性）。
-///
-/// 用于为每个 Agent 实例生成唯一的显示标识符。
-fn instance_hash(s: &str) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in s.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{:06x}", hash as u32)
-}
-
-/// 从后台任务结果字符串中解析 task_id 短格式（前 8 位）。
-///
-/// 输入格式: `"Background task bg-{uuid} started..."`
-/// 输出: `Some("{前8位}")` 或 `None`（解析失败时优雅降级）
-fn parse_bg_hash(result: &str) -> Option<String> {
-    result
-        .strip_prefix("Background task bg-")
-        .and_then(|rest| rest.split(' ').next())
-        .map(|uuid| uuid.chars().take(8).collect())
 }
 
 /// 活跃 SubAgent 执行状态
@@ -105,9 +241,6 @@ struct BatchInfo {
     started: usize,
     /// 已完成的 agent 数
     completed: usize,
-    /// 批次开始时的 subagent_stack 深度（用于交叉验证）
-    #[allow(dead_code)]
-    stack_depth: usize,
 }
 
 // ─── MessagePipeline ─────────────────────────────────────────────────────────
@@ -139,10 +272,20 @@ pub struct MessagePipeline {
     /// 批次检测状态（连续的 SubAgentStart/SubAgentEnd 跟踪）
     active_batch: Option<BatchInfo>,
     // ── 节流状态 ──
-    /// 是否有待发射的节流 RebuildAll（有流式 chunk 积累但尚未发射）
-    throttle_armed: bool,
-    /// 上次节流发射的时间
+    /// 自适应分块策略（替代固定 100ms 节流）
+    adaptive_policy: AdaptiveChunkingPolicy,
+    /// 上次节流发射的时间（Smooth 模式下的最小间隔守卫）
     throttle_last_fire: Option<Instant>,
+    // ── 流式渲染模式 ──
+    /// 当前流式渲染模式
+    streaming_mode: StreamingMode,
+    // ── Block 模式缓冲 ──
+    /// Block 模式下累积未完成 block 的 chunk
+    block_buffer: String,
+    /// Block 模式下是否处于代码围栏内部
+    inside_code_fence: bool,
+    /// Block 模式下是否有待 flush 的内容
+    block_pending_flush: bool,
     // ── 轮次追踪 ──
     /// 本轮开始时 completed 的长度（用于区分首轮 StateSnapshot 前/后）
     completed_len_at_round_start: usize,
@@ -164,8 +307,12 @@ impl MessagePipeline {
             subagent_stack: Vec::new(),
             frozen_subagent_vms: Vec::new(),
             active_batch: None,
-            throttle_armed: false,
+            adaptive_policy: AdaptiveChunkingPolicy::new(),
             throttle_last_fire: None,
+            streaming_mode: StreamingMode::default(),
+            block_buffer: String::new(),
+            inside_code_fence: false,
+            block_pending_flush: false,
             completed_len_at_round_start: 0,
             has_snapshot_this_round: false,
         }
@@ -173,6 +320,36 @@ impl MessagePipeline {
 
     pub fn cwd(&self) -> &str {
         &self.cwd
+    }
+
+    /// 获取当前流式渲染模式
+    pub(crate) fn streaming_mode(&self) -> StreamingMode {
+        self.streaming_mode
+    }
+
+    /// 设置流式渲染模式。切换时强制 flush Block 缓冲区。
+    pub(crate) fn set_streaming_mode(&mut self, mode: StreamingMode) {
+        if self.streaming_mode == StreamingMode::Block && mode != StreamingMode::Block {
+            self.flush_block_buffer();
+        }
+        self.streaming_mode = mode;
+        self.inside_code_fence = false;
+        tracing::info!(?mode, "streaming mode changed");
+    }
+
+    /// 从配置字符串设置初始模式（"streaming" / "block" / "none"）
+    pub fn init_streaming_mode_from_config(&mut self, mode_str: &str) {
+        let mode = match mode_str {
+            "block" => StreamingMode::Block,
+            "none" => StreamingMode::None,
+            _ => StreamingMode::Streaming,
+        };
+        self.streaming_mode = mode;
+    }
+
+    /// 检查 Block 模式是否有待 flush 的内容
+    pub(crate) fn has_pending_block_flush(&self) -> bool {
+        self.block_pending_flush || !self.block_buffer.is_empty()
     }
 
     /// 统一事件处理入口：将 AgentEvent 转换为 PipelineAction 列表。
@@ -188,29 +365,30 @@ impl MessagePipeline {
                     if let Some(ref aid) = source_agent_id {
                         if let Some(sub) = self.find_running_subagent_mut(aid) {
                             Self::push_chunk_to_subagent(sub, &chunk);
+                            self.adaptive_policy.on_chunk(&chunk);
                         }
                     } else if self.in_subagent() {
                         // 顺序执行时 last() 就是当前 subagent（事件顺序到达）
                         if let Some(sub) = self.subagent_stack.last_mut() {
                             Self::push_chunk_to_subagent(sub, &chunk);
+                            self.adaptive_policy.on_chunk(&chunk);
                         }
                     } else {
                         self.push_chunk(&chunk);
+                        // push_chunk 内部已调用 adaptive_policy.on_chunk()
                     }
-                    self.throttle_armed = true;
                 }
                 vec![PipelineAction::None]
             }
             AgentEvent::AiReasoning(text) => {
                 if self.in_subagent() {
-                    // SubAgent 内部推理：更新 subagent 状态，arm throttle
+                    // SubAgent 内部推理：更新 subagent 状态，通知策略
                     if let Some(_sub) = self.subagent_stack.last_mut() {
-                        // 推理内容不直接显示，但需要 arm throttle 以刷新 SubAgentGroup
+                        self.adaptive_policy.on_reasoning_chunk();
                     }
-                    self.throttle_armed = true;
                 } else {
                     self.push_reasoning(&text);
-                    self.throttle_armed = true;
+                    // push_reasoning 内部已调用 adaptive_policy.on_reasoning_chunk()
                 }
                 vec![PipelineAction::None]
             }
@@ -227,7 +405,8 @@ impl MessagePipeline {
                 // (= round_start_vm_idx) 触发重建，同时包含流式文本和工具调用。
                 // 之前此处使用 prefix_len: 0 会导致 view_messages 被全部替换，
                 // 随后 request_rebuild() 用旧的 round_start_vm_idx 做 drain 时 panic。
-                self.throttle_armed = false;
+                self.adaptive_policy.drain();
+                self.force_flush_block();
 
                 if let Some(ref aid) = source_agent_id {
                     let cwd = self.cwd.clone();
@@ -271,7 +450,8 @@ impl MessagePipeline {
                 is_error,
                 source_agent_id,
             } => {
-                self.throttle_armed = false;
+                self.adaptive_policy.drain();
+                self.force_flush_block();
                 if let Some(ref aid) = source_agent_id {
                     if let Some(sub) = self.find_running_subagent_mut(aid) {
                         Self::update_tool_end_in_subagent(sub, &tool_call_id, &output, is_error);
@@ -346,6 +526,7 @@ impl MessagePipeline {
                     // 否则子 Agent 的全部内部消息会污染父 Agent 的消息历史。
                     vec![PipelineAction::None]
                 } else {
+                    self.force_flush_block();
                     self.set_completed(msgs);
                     vec![PipelineAction::None]
                 }
@@ -362,6 +543,7 @@ impl MessagePipeline {
             | AgentEvent::CompactStarted
             | AgentEvent::CompactCompleted { .. }
             | AgentEvent::CompactError(_)
+            | AgentEvent::RewindCompleted { .. }
             | AgentEvent::TokenUsageUpdate { .. }
             | AgentEvent::LlmRetrying { .. }
             | AgentEvent::ContextWarning { .. }
@@ -371,7 +553,8 @@ impl MessagePipeline {
             | AgentEvent::BackgroundTaskCompleted { .. }
             | AgentEvent::McpActionCompleted { .. }
             | AgentEvent::PluginActionCompleted { .. }
-            | AgentEvent::LspDiagnostics { .. } => {
+            | AgentEvent::LspDiagnostics { .. }
+            | AgentEvent::BgToolStep { .. } => {
                 vec![PipelineAction::None]
             }
         }
@@ -381,12 +564,75 @@ impl MessagePipeline {
 
     /// 追加流式文本 chunk
     pub fn push_chunk(&mut self, chunk: &str) {
-        self.current_ai_text.push_str(chunk);
+        match self.streaming_mode {
+            StreamingMode::Streaming => {
+                self.current_ai_text.push_str(chunk);
+                self.adaptive_policy.on_chunk(chunk);
+            }
+            StreamingMode::Block => {
+                if self.push_chunk_block(chunk) {
+                    self.flush_block_buffer();
+                }
+            }
+            StreamingMode::None => {
+                self.current_ai_text.push_str(chunk);
+            }
+        }
     }
 
     /// 追加推理 chunk
     pub fn push_reasoning(&mut self, text: &str) {
         self.current_ai_reasoning.push_str(text);
+        self.adaptive_policy.on_reasoning_chunk();
+    }
+
+    // ─── Block 模式缓冲区管理 ────────────────────────────────────────────
+
+    /// Block 模式下追加 chunk 到缓冲区并检测 block 边界。返回 true 表示检测到边界。
+    fn push_chunk_block(&mut self, chunk: &str) -> bool {
+        self.block_buffer.push_str(chunk);
+
+        if self.inside_code_fence {
+            if self.detect_code_fence_close() {
+                self.inside_code_fence = false;
+                return true;
+            }
+        } else {
+            if self.block_buffer.contains("\n\n") {
+                return true;
+            }
+            if self.detect_code_fence_open() {
+                self.inside_code_fence = true;
+            }
+        }
+        false
+    }
+
+    fn detect_code_fence_open(&self) -> bool {
+        self.block_buffer
+            .lines()
+            .last()
+            .is_some_and(|line| line.trim_start().starts_with("```"))
+    }
+
+    fn detect_code_fence_close(&self) -> bool {
+        self.block_buffer
+            .lines()
+            .last()
+            .is_some_and(|line| line.trim() == "```")
+    }
+
+    fn flush_block_buffer(&mut self) {
+        if !self.block_buffer.is_empty() {
+            self.current_ai_text.push_str(&self.block_buffer);
+            self.block_buffer.clear();
+            self.block_pending_flush = true;
+        }
+    }
+
+    fn force_flush_block(&mut self) {
+        self.flush_block_buffer();
+        self.inside_code_fence = false;
     }
 
     /// 工具调用开始（内部版本，只更新状态，不返回 PipelineAction）
@@ -424,14 +670,12 @@ impl MessagePipeline {
                 bg_hash: Some(instance_hash(tool_call_id)),
             });
             // 批次检测：第一个 agent 创建批次，后续递增
-            let stack_depth = self.subagent_stack.len() - 1;
             if let Some(ref mut batch) = self.active_batch {
                 batch.started += 1;
             } else {
                 self.active_batch = Some(BatchInfo {
                     started: 1,
                     completed: 0,
-                    stack_depth,
                 });
             }
         } else {
@@ -473,7 +717,7 @@ impl MessagePipeline {
                 } else {
                     // 前台 agent 路径：冻结 SubAgentGroup
                     sub.is_running = false;
-                    let vm = MessageViewModel::SubAgentGroup {
+                    let mut vm = MessageViewModel::SubAgentGroup {
                         agent_id: sub.agent_id.clone(),
                         task_preview: sub.task_preview.clone(),
                         total_steps: sub.total_steps,
@@ -486,7 +730,9 @@ impl MessagePipeline {
                         bg_hash: sub.bg_hash.clone(),
                         batch_agents: Vec::new(),
                         instance_id: Some(sub.instance_id.clone()),
+                        content_hash: 0,
                     };
+                    vm.recompute_hash();
                     sub.finalized_vm = Some(vm.clone());
                     // 立即冻结：RebuildAll 可能在下一个 StateSnapshot 前触发
                     self.frozen_subagent_vms.push(vm);
@@ -566,6 +812,7 @@ impl MessagePipeline {
                 if tc_id == tool_call_id {
                     *content = output.to_string();
                     *err = is_error;
+                    vm.recompute_hash();
                     break;
                 }
             }
@@ -585,7 +832,8 @@ impl MessagePipeline {
         self.current_ai_finalized = false;
         self.pending_tools.clear();
         self.completed_tools.clear();
-        self.throttle_armed = false;
+        self.adaptive_policy.reset();
+        self.force_flush_block();
         self.throttle_last_fire = None;
         self.active_batch = None;
         self.drain_subagent_stack();
@@ -597,7 +845,8 @@ impl MessagePipeline {
         self.current_ai_finalized = false;
         self.pending_tools.clear();
         self.completed_tools.clear();
-        self.throttle_armed = false;
+        self.adaptive_policy.reset();
+        self.force_flush_block();
         self.throttle_last_fire = None;
         self.active_batch = None;
         self.drain_subagent_stack();
@@ -612,46 +861,166 @@ impl MessagePipeline {
         for sub in self.subagent_stack.drain(..) {
             if sub.finalized_vm.is_none() && !sub.is_running {
                 // 未 finalized 但已停止：异常残留，构建一个基本 VM 保留显示
-                self.frozen_subagent_vms
-                    .push(MessageViewModel::SubAgentGroup {
-                        agent_id: sub.agent_id,
-                        task_preview: sub.task_preview,
-                        total_steps: sub.total_steps,
-                        recent_messages: sub.recent_messages,
-                        is_running: false,
-                        collapsed: false,
-                        final_result: None,
-                        is_error: false,
-                        is_background: sub.is_background,
-                        bg_hash: sub.bg_hash,
-                        batch_agents: Vec::new(),
-                        instance_id: Some(sub.instance_id),
-                    });
+                let mut vm = MessageViewModel::SubAgentGroup {
+                    agent_id: sub.agent_id,
+                    task_preview: sub.task_preview,
+                    total_steps: sub.total_steps,
+                    recent_messages: sub.recent_messages,
+                    is_running: false,
+                    collapsed: false,
+                    final_result: None,
+                    is_error: false,
+                    is_background: sub.is_background,
+                    bg_hash: sub.bg_hash,
+                    batch_agents: Vec::new(),
+                    instance_id: Some(sub.instance_id),
+                    content_hash: 0,
+                };
+                vm.recompute_hash();
+                self.frozen_subagent_vms.push(vm);
             } else if sub.finalized_vm.is_none() && sub.is_running && sub.is_background {
                 // 后台 agent 仍在运行：冻结以保留当前 recent_messages，
                 // 后续 BackgroundTaskCompleted 会直接更新 view_messages
-                self.frozen_subagent_vms
-                    .push(MessageViewModel::SubAgentGroup {
-                        agent_id: sub.agent_id,
-                        task_preview: sub.task_preview,
-                        total_steps: sub.total_steps,
-                        recent_messages: sub.recent_messages,
-                        is_running: true,
-                        collapsed: false,
-                        final_result: None,
-                        is_error: false,
-                        is_background: true,
-                        bg_hash: sub.bg_hash,
-                        batch_agents: Vec::new(),
-                        instance_id: Some(sub.instance_id),
-                    });
+                let mut vm = MessageViewModel::SubAgentGroup {
+                    agent_id: sub.agent_id,
+                    task_preview: sub.task_preview,
+                    total_steps: sub.total_steps,
+                    recent_messages: sub.recent_messages,
+                    is_running: true,
+                    collapsed: false,
+                    final_result: None,
+                    is_error: false,
+                    is_background: true,
+                    bg_hash: sub.bg_hash,
+                    batch_agents: Vec::new(),
+                    instance_id: Some(sub.instance_id),
+                    content_hash: 0,
+                };
+                vm.recompute_hash();
+                self.frozen_subagent_vms.push(vm);
             }
             // 已 finalized（finalized_vm.is_some()）的不推入——tool_end_internal 已处理
             // 仍在运行的前台 agent（is_running && !is_background）不推入
         }
     }
 
-    /// 清空所有状态
+    /// BackgroundTaskCompleted 到达后，同步更新管线状态。
+    ///
+    /// 更新 subagent_stack 中匹配的后台 SubAgentState（标记 is_running=false、
+    /// push finalized VM 到 frozen_subagent_vms），同时更新 frozen_subagent_vms
+    /// 中已冻结但未完成的 SubAgentGroup VM（Done 先于 BG Complete 到达的情况）。
+    ///
+    pub fn notify_bg_completed(
+        &mut self,
+        instance_id: Option<&str>,
+        agent_name: &str,
+        output: &str,
+        success: bool,
+        steps: usize,
+    ) {
+        // 1. 更新 subagent_stack 中仍在运行的匹配 SubAgentState
+        //    优先按 instance_id 精确匹配，回退到 agent_name
+        let sub_pos = instance_id
+            .and_then(|iid| {
+                self.subagent_stack
+                    .iter()
+                    .position(|s| s.instance_id == iid && s.is_running && s.is_background)
+            })
+            .or_else(|| {
+                self.subagent_stack
+                    .iter()
+                    .position(|s| s.agent_id == agent_name && s.is_running && s.is_background)
+            });
+
+        if let Some(pos) = sub_pos {
+            let sub = &mut self.subagent_stack[pos];
+            sub.is_running = false;
+            // 仿照前台 agent 的 tool_end_internal 路径：
+            // 创建 finalized VM 并推入 frozen_subagent_vms，标记 finalized_vm
+            // 防止 drain_subagent_stack 重复创建。
+            let mut vm = MessageViewModel::SubAgentGroup {
+                agent_id: sub.agent_id.clone(),
+                task_preview: sub.task_preview.clone(),
+                total_steps: steps,
+                recent_messages: std::mem::take(&mut sub.recent_messages),
+                is_running: false,
+                collapsed: false,
+                final_result: Some(output.to_string()),
+                is_error: !success,
+                is_background: true,
+                bg_hash: sub.bg_hash.clone(),
+                batch_agents: Vec::new(),
+                instance_id: Some(sub.instance_id.clone()),
+                content_hash: 0,
+            };
+            vm.recompute_hash();
+            sub.finalized_vm = Some(vm.clone());
+            self.frozen_subagent_vms.push(vm);
+            tracing::debug!(
+                instance_id = %sub.instance_id,
+                agent_name = %agent_name,
+                "[bg-diag] notify_bg_completed: updated SubAgentState + pushed frozen VM"
+            );
+        }
+
+        // 2. 更新 frozen_subagent_vms 中已冻结但 is_running=true 的 VM
+        //    （Done → drain_subagent_stack 先于 BG Complete 的情况）
+        //    两遍匹配：优先 instance_id 精确匹配，回退 agent_name
+        if let Some(ref iid) = instance_id {
+            for vm in &mut self.frozen_subagent_vms {
+                match vm {
+                    MessageViewModel::SubAgentGroup {
+                        instance_id: Some(vm_iid),
+                        is_running,
+                        is_background,
+                        final_result,
+                        is_error,
+                        total_steps,
+                        ..
+                    } if *is_running && *is_background && vm_iid == *iid => {
+                        *is_running = false;
+                        *final_result = Some(output.to_string());
+                        *is_error = !success;
+                        *total_steps = steps;
+                        vm.recompute_hash();
+                        tracing::debug!(
+                            iid,
+                            "[bg-diag] notify_bg_completed: updated frozen VM by instance_id"
+                        );
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // 兜底：按 agent_name 匹配
+        for vm in &mut self.frozen_subagent_vms {
+            match vm {
+                MessageViewModel::SubAgentGroup {
+                    agent_id,
+                    is_running,
+                    is_background,
+                    final_result,
+                    is_error,
+                    total_steps,
+                    ..
+                } if *is_running && *is_background && agent_id == agent_name => {
+                    *is_running = false;
+                    *final_result = Some(output.to_string());
+                    *is_error = !success;
+                    *total_steps = steps;
+                    vm.recompute_hash();
+                    tracing::debug!(
+                        agent_name,
+                        "[bg-diag] notify_bg_completed: updated frozen VM by agent_name"
+                    );
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.completed.clear();
         self.current_ai_text.clear();
@@ -716,7 +1085,7 @@ impl MessagePipeline {
     pub fn begin_round(&mut self) {
         self.completed_len_at_round_start = self.completed.len();
         self.has_snapshot_this_round = false;
-        self.throttle_armed = false;
+        self.adaptive_policy.reset();
         self.throttle_last_fire = None;
         // 清空上一轮的 frozen_subagent_vms，防止跨轮次累积导致新轮次的
         // SubAgentGroup 按位置错误匹配到旧轮的 frozen VM（而非本轮的）。
@@ -725,23 +1094,54 @@ impl MessagePipeline {
 
     // ── 节流机制 ──────────────────────────────────────────────────────────────
 
-    /// 检查节流计时器，若 100ms 已过则发射 RebuildAll。
+    /// 检查自适应节流策略，根据流式渲染模式决定是否发射 RebuildAll。
+    ///
+    /// - Streaming 模式：自适应分块策略（Smooth/CatchUp）
+    /// - Block 模式：检测 block_pending_flush 标记
+    /// - None 模式：始终返回 None（不触发流式重绘）
+    ///
     /// 由 poll_agent() 每帧调用。
     pub fn check_throttle(&mut self, prefix_len: usize) -> Option<PipelineAction> {
-        if !self.throttle_armed {
-            return None;
+        match self.streaming_mode {
+            StreamingMode::Streaming => self.check_throttle_streaming(prefix_len),
+            StreamingMode::Block => self.check_throttle_block(prefix_len),
+            StreamingMode::None => None,
         }
-        let now = Instant::now();
-        let should_fire = match self.throttle_last_fire {
-            None => true,
-            Some(last) => now.duration_since(last) >= Duration::from_millis(100),
-        };
-        if should_fire {
-            self.throttle_last_fire = Some(now);
-            self.throttle_armed = false;
-            return Some(self.build_rebuild_all(prefix_len));
+    }
+
+    fn check_throttle_streaming(&mut self, prefix_len: usize) -> Option<PipelineAction> {
+        let plan = self.adaptive_policy.check()?;
+
+        match plan {
+            DrainPlan::Single => {
+                let now = Instant::now();
+                let min_interval = Duration::from_millis(16);
+                let should_fire = match self.throttle_last_fire {
+                    None => true,
+                    Some(last) => now.duration_since(last) >= min_interval,
+                };
+                if !should_fire {
+                    return None;
+                }
+                self.throttle_last_fire = Some(now);
+                self.adaptive_policy.drain();
+                Some(self.build_rebuild_all(prefix_len))
+            }
+            DrainPlan::Batch => {
+                self.throttle_last_fire = Some(Instant::now());
+                self.adaptive_policy.drain();
+                Some(self.build_rebuild_all(prefix_len))
+            }
         }
-        None
+    }
+
+    fn check_throttle_block(&mut self, prefix_len: usize) -> Option<PipelineAction> {
+        if self.block_pending_flush {
+            self.block_pending_flush = false;
+            Some(self.build_rebuild_all(prefix_len))
+        } else {
+            None
+        }
     }
 
     /// 获取已完成的 BaseMessages（用于持久化）
@@ -760,6 +1160,13 @@ impl MessagePipeline {
         self.has_snapshot_this_round = true;
         self.pending_tools.clear();
         self.completed_tools.clear();
+    }
+
+    /// 返回 completed 的条数和估算堆内存（字节），供 /gc 诊断用
+    pub fn completed_stats(&self) -> (usize, usize) {
+        let count = self.completed.len();
+        let bytes = super::super::command::core::gc::estimate_messages_heap(&self.completed);
+        (count, bytes)
     }
 
     /// 从外部加载全量 BaseMessages（用于历史恢复后覆盖），并清除所有状态

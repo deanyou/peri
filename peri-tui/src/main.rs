@@ -13,19 +13,78 @@ use ratatui::{
     prelude::*,
 };
 use std::io;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use peri_acp::transport::mpsc::mpsc_transport_pair;
-use peri_tui::acp_client::AcpTuiClient;
-use peri_tui::acp_server::{run_acp_server, AcpServerConfig};
-use peri_tui::app::App;
-use peri_tui::event;
-use peri_tui::ui;
-use std::sync::Arc;
+use peri_tui::{
+    acp_client::AcpTuiClient,
+    acp_server::{run_acp_server, AcpServerConfig},
+    app::App,
+    event, ui,
+};
+
+#[cfg(not(target_os = "windows"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod acp_stdio;
 mod cli_args;
 mod cli_plugin;
 mod cli_print;
+
+// ─── Panic Hook（TUI 专用）───────────────────────────────────────────────────
+
+/// 全局 panic 通知通道 sender（OnceLock 保证只初始化一次）
+static PANIC_NOTIFY: OnceLock<tokio::sync::mpsc::UnboundedSender<String>> = OnceLock::new();
+
+/// 格式化 panic 信息为可读字符串（消息 + 位置 + backtrace）
+fn format_panic_message(panic_info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    };
+
+    let location = panic_info
+        .location()
+        .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+        .unwrap_or_else(|| "unknown location".to_string());
+
+    // 自动捕获 backtrace（无需手动设置 RUST_BACKTRACE=1）
+    let backtrace = std::backtrace::Backtrace::capture();
+    let bt_str = match backtrace.status() {
+        std::backtrace::BacktraceStatus::Captured => format!("\n{}", backtrace),
+        _ => String::new(),
+    };
+
+    format!("'{}'\n  at {}{}", payload, location, bt_str)
+}
+
+/// 安装自定义 panic hook：
+/// - 通过 tracing::error! 记录到日志文件（不写 stderr）
+/// - 通过 PANIC_NOTIFY 通道通知 TUI
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        let msg = format_panic_message(panic_info);
+        tracing::error!("thread panicked at {}", msg);
+        if let Some(tx) = PANIC_NOTIFY.get() {
+            let _ = tx.send(msg);
+        }
+    }));
+}
+
+/// 创建 panic 通知通道并安装自定义 panic hook。
+/// 必须在 enable_raw_mode() 之前调用。
+/// 返回 UnboundedReceiver 供 TUI 消费。
+pub fn init_panic_notify() -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = PANIC_NOTIFY.set(tx);
+    install_panic_hook();
+    rx
+}
 
 // ─── CLI 定义 ──────────────────────────────────────────────────────────────
 
@@ -246,6 +305,10 @@ fn inject_settings_override(source: &str) {
 // ─── 入口 ──────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
+    // Set jemalloc MALLOC_CONF env vars BEFORE any allocation.
+    // Must be the very first line — jemalloc reads these during init.
+    peri_tui::alloc_config::init_alloc_conf();
+
     // 最先注入环境变量（进程环境变量优先）
     inject_env_from_settings();
 
@@ -254,7 +317,8 @@ fn main() -> Result<()> {
     // -p/--print 模式（优先级高于子命令）
     if cli.print.is_some() {
         let rt = tokio::runtime::Builder::new_multi_thread()
-            .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB) — saves ~32 MB RSS on 8-core
+            .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
+            .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
             .enable_all()
             .build()?;
         return rt.block_on(cli_print::run_print(
@@ -294,14 +358,16 @@ fn main() -> Result<()> {
             agent: _,
         }) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB) — saves ~32 MB RSS on 8-core
+                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
+                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
                 .enable_all()
                 .build()?;
             rt.block_on(acp_stdio::run_acp_stdio(cwd))
         }
         Some(Commands::Update) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB) — saves ~32 MB RSS on 8-core
+                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
+                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
                 .enable_all()
                 .build()?;
             rt.block_on(async {
@@ -317,7 +383,8 @@ fn main() -> Result<()> {
         }
         Some(Commands::Sync { action, server }) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB) — saves ~32 MB RSS on 8-core
+                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
+                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
                 .enable_all()
                 .build()?;
             rt.block_on(async {
@@ -334,7 +401,8 @@ fn main() -> Result<()> {
         }
         Some(Commands::Plugin { action }) => {
             let rt = tokio::runtime::Builder::new_multi_thread()
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB) — saves ~32 MB RSS on 8-core
+                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
+                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
                 .enable_all()
                 .build()?;
             rt.block_on(async {
@@ -355,7 +423,7 @@ fn main() -> Result<()> {
 // ─── TUI 模式 ──────────────────────────────────────────────────────────────
 
 /// TUI 模式启动选项
-#[allow(dead_code)]
+#[allow(dead_code)] // 部分 CLI 桥接字段尚未接入
 struct TuiOptions {
     approve: bool,
     permission_mode: Option<String>,
@@ -389,8 +457,13 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
     // 的内部 runtime 与应用 runtime 完全隔离，避免嵌套 runtime drop panic。
     let _telemetry = peri_agent::telemetry::init_tracing("agent-tui");
 
+    // 安装自定义 panic hook，必须在 enable_raw_mode() 之前，
+    // 否则 Rust 默认 panic hook 的 stderr 输出会破坏 TUI 画面。
+    let panic_notify_rx = init_panic_notify();
+
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB) — saves ~32 MB RSS on 8-core
+        .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
+        .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
         .enable_all()
         .build()?;
 
@@ -409,7 +482,7 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
         let mut terminal = Terminal::new(backend)?;
 
         // 运行应用
-        let result = run_app(&mut terminal, &opts).await;
+        let result = run_app(&mut terminal, &opts, panic_notify_rx).await;
 
         // 恢复终端
         disable_raw_mode()?;
@@ -439,8 +512,12 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     tui_opts: &TuiOptions,
+    panic_notify_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Result<()> {
     let mut app = App::new().await;
+
+    // 接入 panic hook 通知通道
+    app.services.panic_notify_rx = Some(panic_notify_rx);
 
     // 根据环境变量/CLI 参数设置初始权限模式
     {
@@ -546,23 +623,21 @@ async fn run_app(
             .map(|pd| pd.all_skill_dirs.clone())
             .unwrap_or_default();
         let plugin_skills = peri_middlewares::skills::list_skills(&plugin_skill_dirs);
-        for session in &mut app.session_mgr.sessions {
-            session
-                .commands
-                .command_registry
-                .register_plugin_commands(plugin_commands.clone());
-        }
-        for session in &mut app.session_mgr.sessions {
-            let existing_names: std::collections::HashSet<String> = session
-                .commands
-                .skills
-                .iter()
-                .map(|s| s.name.clone())
-                .collect();
-            for skill in &plugin_skills {
-                if !existing_names.contains(&skill.name) {
-                    session.commands.skills.push(skill.clone());
-                }
+        app.session_mgr
+            .current_mut()
+            .commands
+            .command_registry
+            .register_plugin_commands(plugin_commands.clone());
+        let session = app.session_mgr.current_mut();
+        let existing_names: std::collections::HashSet<String> = session
+            .commands
+            .skills
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        for skill in &plugin_skills {
+            if !existing_names.contains(&skill.name) {
+                session.commands.skills.push(skill.clone());
             }
         }
     }
@@ -603,10 +678,14 @@ async fn run_app(
                 .map(|pd| pd.all_hooks.clone())
                 .unwrap_or_default();
 
-            // Build hook groups from plugin hooks + local hooks
+            // Build hook groups from plugin hooks + global hooks + local hooks
             let mut hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
             if !plugin_hooks.is_empty() {
                 hook_groups.push(plugin_hooks);
+            }
+            let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
+            if !global_hooks.is_empty() {
+                hook_groups.push(global_hooks);
             }
             let local_hooks =
                 peri_middlewares::hooks::loader::load_settings_local_hooks(&app.services.cwd);
@@ -616,6 +695,11 @@ async fn run_app(
 
             let flat_hooks: Vec<peri_middlewares::hooks::RegisteredHook> =
                 hook_groups.iter().flatten().cloned().collect();
+            tracing::info!(
+                groups = hook_groups.len(),
+                total_hooks = flat_hooks.len(),
+                "Hook groups assembled for ACP server"
+            );
 
             // Create session-level tool_search_index and shared_tools
             let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
@@ -648,12 +732,8 @@ async fn run_app(
                         None
                     }
                 },
+                config_path: peri_tui::config::config_path(),
             };
-
-            // Store shared Arc references so config changes (setup wizard,
-            // login panel, model panel) can be synced into the ACP server.
-            app.services.acp_provider = Some(server_config.provider.clone());
-            app.services.acp_peri_config = Some(server_config.peri_config.clone());
 
             let (client_transport, server_transport) = mpsc_transport_pair();
             tokio::spawn(async move {
@@ -664,36 +744,34 @@ async fn run_app(
             // Spawn notification pump
             acp_client.spawn_pump();
             // Wire notification receiver to active session's AgentComm
-            app.session_mgr.sessions[app.session_mgr.active]
-                .agent
-                .acp_notification_rx = Some(notification_rx);
+            app.session_mgr.current_mut().agent.acp_notification_rx = Some(notification_rx);
             app.acp_client = Some(acp_client);
         }
     }
 
     // Spinner tick 驱动：每次渲染前推进一帧
-    app.session_mgr.sessions[app.session_mgr.active]
-        .spinner_state
-        .advance_tick();
+    app.session_mgr.current_mut().spinner_state.advance_tick();
 
     // 初始全量绘制一次
     terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
+    let mut last_render = Instant::now();
+
+    /// loading 动画帧率限制间隔（约 30 FPS）。
+    /// 仅在 loading=true 且无用户事件的 poll 超时路径生效，
+    /// 用户交互（键盘/鼠标/resize）始终立即渲染。
+    const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
     'event_loop: loop {
-        // 推进所有 session 的 Spinner 动画帧
-        for i in 0..app.session_mgr.sessions.len() {
-            app.session_mgr.sessions[i].spinner_state.advance_tick();
-        }
-        // 轮询所有 session 的 agent 结果
+        // 推进 Spinner 动画帧
+        app.session_mgr.current_mut().spinner_state.advance_tick();
+        // 轮询 agent 结果
         let mut agent_updated = false;
-        for i in 0..app.session_mgr.sessions.len() {
-            let prev_active = app.session_mgr.active;
-            app.session_mgr.active = i;
-            agent_updated |= app.poll_agent();
-            app.session_mgr.active = prev_active;
-        }
+        agent_updated |= app.poll_agent();
+        agent_updated |= app.poll_at_mention();
         // 轮询后台事件（MCP OAuth 等）
         let bg_updated = app.poll_background_events();
+        // 轮询 panic hook 通知
+        let panic_updated = app.poll_panic_notifications();
         // 检查 cron 定时触发
         app.poll_cron_triggers();
 
@@ -703,36 +781,75 @@ async fn run_app(
                 event::Action::Submit(input) => {
                     app.submit_message(input);
                     terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
+                    last_render = Instant::now();
                 }
                 event::Action::Redraw => {
                     // 有用户交互（键盘/鼠标/resize）→ 始终重绘
                     terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
+                    last_render = Instant::now();
                 }
             },
             None => {
                 // 无用户事件（poll 超时）：在阻塞结束后重新读取缓存版本
                 // 这样能捕获渲染线程在等待期间发出的更新
-                let cache_version = app.session_mgr.sessions[app.session_mgr.active]
+                let cache_version = app
+                    .session_mgr
+                    .current_mut()
                     .messages
                     .render_cache
                     .read()
                     .version;
-                let cache_updated = cache_version
-                    != app.session_mgr.sessions[app.session_mgr.active]
-                        .messages
-                        .last_render_version;
-                if cache_updated
-                    || agent_updated
-                    || bg_updated
-                    || app.session_mgr.sessions[app.session_mgr.active].ui.loading
-                {
-                    terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
+                let cache_updated =
+                    cache_version != app.session_mgr.current_mut().messages.last_render_version;
+                let loading = app.session_mgr.current_mut().ui.loading;
+                let should_render =
+                    cache_updated || agent_updated || bg_updated || panic_updated || loading;
+                if should_render {
+                    let now = Instant::now();
+                    // loading 路径：限制帧率到 TARGET_FRAME_INTERVAL，降低 CPU 开销
+                    // 非 loading 路径（cache_updated/agent_updated/bg_updated）始终立即渲染
+                    if !loading || now.duration_since(last_render) >= TARGET_FRAME_INTERVAL {
+                        terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
+                        last_render = now;
+                    }
                 }
             }
         }
         // /exit 或 /quit 命令设置的退出标志
         if app.global_ui.quit_requested {
             break 'event_loop;
+        }
+    }
+
+    // Fire SessionEnd hooks before shutdown
+    {
+        let mut hooks = app
+            .services
+            .plugin_data
+            .as_ref()
+            .map(|pd| pd.all_hooks.clone())
+            .unwrap_or_default();
+        hooks.extend(peri_middlewares::hooks::loader::load_global_settings_hooks());
+        hooks.extend(peri_middlewares::hooks::loader::load_settings_local_hooks(
+            &app.services.cwd,
+        ));
+        if !hooks.is_empty() {
+            let cwd = app.services.cwd.clone();
+            let provider_name = app.services.provider_name.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    peri_middlewares::hooks::middleware::fire_standalone_lifecycle_hooks(
+                        &hooks,
+                        peri_middlewares::hooks::types::HookEvent::SessionEnd,
+                        &cwd,
+                        "",
+                        "",
+                        &provider_name,
+                        None,
+                    )
+                    .await;
+                })
+            });
         }
     }
 
@@ -744,7 +861,9 @@ async fn run_app(
     }
 
     // 等待最后一次 Langfuse flush 完成，防止 runtime drop 前 batcher 数据丢失
-    if let Some(handle) = app.session_mgr.sessions[app.session_mgr.active]
+    if let Some(handle) = app
+        .session_mgr
+        .current_mut()
         .langfuse
         .langfuse_flush_handle
         .take()

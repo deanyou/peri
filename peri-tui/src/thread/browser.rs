@@ -1,15 +1,14 @@
-use std::any::Any;
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
-use ratatui::layout::Rect;
-use ratatui::Frame;
+use ratatui::{layout::Rect, Frame};
 use tui_textarea::Input;
 
-use peri_widgets::InputState;
-
-use crate::app::panel_component::PanelComponent;
-use crate::app::panel_manager::{EventResult, PanelContext, PanelKind};
-use crate::app::App;
+use crate::app::FieldTextarea;
+use crate::app::{
+    panel_component::PanelComponent,
+    panel_manager::{EventResult, PanelContext, PanelKind},
+    App,
+};
 
 use super::{ThreadId, ThreadMeta, ThreadStore};
 
@@ -26,7 +25,7 @@ pub struct ThreadBrowser {
     /// 是否处于删除确认状态
     pub confirm_delete: bool,
     /// 搜索输入状态
-    pub search_query: InputState,
+    pub search_query: FieldTextarea,
     /// 搜索框是否聚焦
     pub search_focused: bool,
     /// 当前 cwd 的 git 分支
@@ -48,7 +47,7 @@ impl ThreadBrowser {
             store,
             scroll_offset: 0,
             confirm_delete: false,
-            search_query: InputState::new(),
+            search_query: FieldTextarea::single_line(),
             search_focused: true,
             branch,
             filtered_indices,
@@ -157,13 +156,12 @@ impl PanelComponent for ThreadBrowser {
                 } => {
                     self.confirm_delete = false;
                     if let Some(title) = self.delete_selected() {
-                        ctx.session_mgr.sessions[ctx.session_mgr.active]
-                            .messages
-                            .view_messages
-                            .push(crate::ui::message_view::MessageViewModel::system(format!(
-                                "\u{5df2}\u{5220}\u{9664}\u{5bf9}\u{8bdd}: {}",
+                        ctx.session_mgr.current_mut().messages.view_messages.push(
+                            crate::ui::message_view::MessageViewModel::system(format!(
+                                "已删除对话: {}",
                                 title
-                            )));
+                            )),
+                        );
                     }
                     // if empty after delete, close
                     if self.total() == 0 {
@@ -186,8 +184,8 @@ impl PanelComponent for ThreadBrowser {
                     ..
                 } => EventResult::Consumed,
                 Input { key: Key::Esc, .. } => {
-                    if !self.search_query.value().is_empty() {
-                        self.search_query.set_value(String::new());
+                    if !self.search_query.is_empty() {
+                        self.search_query.clear();
                         self.refresh_filter();
                         EventResult::Consumed
                     } else {
@@ -200,7 +198,7 @@ impl PanelComponent for ThreadBrowser {
                     ..
                 } => {
                     if let Ok(text) = arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                        self.search_query.paste(&text);
+                        self.search_query.insert_text(&text);
                         self.refresh_filter();
                     }
                     EventResult::Consumed
@@ -208,7 +206,12 @@ impl PanelComponent for ThreadBrowser {
                 Input {
                     key: Key::Char(c), ..
                 } => {
-                    self.search_query.insert(c);
+                    self.search_query.input(Input {
+                        key: Key::Char(c),
+                        ctrl: false,
+                        alt: false,
+                        shift: false,
+                    });
                     self.refresh_filter();
                     EventResult::Consumed
                 }
@@ -216,33 +219,63 @@ impl PanelComponent for ThreadBrowser {
                     key: Key::Backspace,
                     ..
                 } => {
-                    self.search_query.backspace();
+                    self.search_query.input(Input {
+                        key: Key::Backspace,
+                        ctrl: false,
+                        alt: false,
+                        shift: false,
+                    });
                     self.refresh_filter();
                     EventResult::Consumed
                 }
                 Input {
                     key: Key::Delete, ..
                 } => {
-                    self.search_query.delete();
+                    self.search_query.input(Input {
+                        key: Key::Delete,
+                        ctrl: false,
+                        alt: false,
+                        shift: false,
+                    });
                     self.refresh_filter();
                     EventResult::Consumed
                 }
                 Input { key: Key::Left, .. } => {
-                    self.search_query.cursor_left();
+                    self.search_query.input(Input {
+                        key: Key::Left,
+                        ctrl: false,
+                        alt: false,
+                        shift: false,
+                    });
                     EventResult::Consumed
                 }
                 Input {
                     key: Key::Right, ..
                 } => {
-                    self.search_query.cursor_right();
+                    self.search_query.input(Input {
+                        key: Key::Right,
+                        ctrl: false,
+                        alt: false,
+                        shift: false,
+                    });
                     EventResult::Consumed
                 }
                 Input { key: Key::Home, .. } => {
-                    self.search_query.cursor_home();
+                    self.search_query.input(Input {
+                        key: Key::Home,
+                        ctrl: false,
+                        alt: false,
+                        shift: false,
+                    });
                     EventResult::Consumed
                 }
                 Input { key: Key::End, .. } => {
-                    self.search_query.cursor_end();
+                    self.search_query.input(Input {
+                        key: Key::End,
+                        ctrl: false,
+                        alt: false,
+                        shift: false,
+                    });
                     EventResult::Consumed
                 }
                 // Down / Tab -> exit search
@@ -312,7 +345,7 @@ impl PanelComponent for ThreadBrowser {
 
     fn handle_paste(&mut self, text: &str, _ctx: &mut PanelContext<'_>) -> EventResult {
         if self.search_focused {
-            self.search_query.paste(text);
+            self.search_query.insert_text(text);
             self.refresh_filter();
         }
         EventResult::Consumed
@@ -399,15 +432,12 @@ impl PanelComponent for ThreadBrowser {
         }
         if self.search_focused {
             return vec![
-                (
-                    "\u{2193}/Tab".to_string(),
-                    _lc.tr("hint-plugin-exit-search"),
-                ),
+                ("↓/Tab".to_string(), _lc.tr("hint-plugin-exit-search")),
                 ("Esc".to_string(), _lc.tr("key-close")),
             ];
         }
         vec![
-            ("\u{2191}\u{2193}".to_string(), _lc.tr("key-move")),
+            ("↑↓".to_string(), _lc.tr("key-move")),
             ("Enter".to_string(), _lc.tr("key-confirm")),
             ("/".to_string(), _lc.tr("hint-plugin-search")),
             ("Ctrl+D".to_string(), _lc.tr("key-delete")),

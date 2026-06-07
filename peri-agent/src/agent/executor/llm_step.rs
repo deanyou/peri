@@ -1,13 +1,17 @@
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::events::AgentEvent;
-use crate::agent::react::{ReactLLM, Reasoning};
-use crate::agent::state::State;
-use crate::error::{AgentError, AgentResult};
-use crate::llm::types::StreamingContext;
-use crate::messages::MessageId;
-use crate::tools::BaseTool;
+use crate::{
+    agent::{
+        events::AgentEvent,
+        react::{ReactLLM, Reasoning},
+        state::State,
+    },
+    error::{AgentError, AgentResult},
+    llm::types::StreamingContext,
+    messages::MessageId,
+    tools::BaseTool,
+};
 
 use super::ReActAgent;
 
@@ -22,7 +26,7 @@ pub(crate) async fn call_llm<L: ReactLLM, S: State>(
     // ── LLM 推理（与 cancel 竞争）────────────────────────────────────
     agent.emit(AgentEvent::LlmCallStart {
         step,
-        messages: state.messages().to_vec(),
+        messages: Arc::new(state.messages().to_vec()),
         tools: tool_refs.iter().map(|t| t.definition()).collect(),
     });
 
@@ -55,7 +59,26 @@ pub(crate) async fn call_llm<L: ReactLLM, S: State>(
                         model: agent.llm.model_name(),
                         output: format!("ERROR: {}", e),
                         usage: None,
+                        stop_reason: None,
                     });
+                    let http_status = match &e {
+                        AgentError::LlmHttpError { status, .. } => Some(*status as u32),
+                        _ => None,
+                    };
+                    let rid = state.get_context("run_id").map(|s| s.to_owned());
+                    crate::metrics::emit(
+                        "llm.error",
+                        serde_json::json!({
+                            "model": agent.llm.model_name(),
+                            "provider": "unknown",
+                            "error": e.to_string(),
+                            "step": step,
+                            "http_status": http_status,
+                            "request_id": state.token_tracker().last_request_id,
+                        }),
+                        state.get_context("session_id"),
+                        rid.as_deref(),
+                    );
                     agent.chain.run_on_error(state, &e).await?;
                     return Err(e);
                 }
@@ -73,10 +96,23 @@ pub(crate) async fn call_llm<L: ReactLLM, S: State>(
             model: agent.llm.model_name(),
             output: llm_output,
             usage: reasoning.usage.clone(),
+            stop_reason: Some(reasoning.stop_reason.clone()),
         });
         // 自动累积 token 用量到 state
         if let Some(ref usage) = reasoning.usage {
             state.token_tracker_mut().accumulate(usage);
+            if usage.output_tokens > 4000 {
+                crate::metrics::emit(
+                    "threshold.token_spike",
+                    serde_json::json!({
+                        "input_tokens": usage.input_tokens,
+                        "output_tokens": usage.output_tokens,
+                        "model": agent.llm.model_name(),
+                    }),
+                    state.get_context("session_id"),
+                    state.get_context("run_id"),
+                );
+            }
             // 使用 ContextBudget（若已设置）进行上下文用量监控
             if let Some(ref budget) = agent.context_budget {
                 let tracker = state.token_tracker();

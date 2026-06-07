@@ -8,40 +8,46 @@ use ratatui::{
 
 use peri_widgets::BorderedPanel;
 
-use crate::app::App;
-use crate::ui::theme;
+use crate::{app::App, ui::theme};
 
-/// 统一候选项：命令或 Skill，按名称排序后扁平展示
+/// 统一候选项：命令、Skill 或 Agent 命令，按名称排序后扁平展示
 enum HintItem<'a> {
     Cmd { name: &'a str, desc: &'a str },
     Skill { name: &'a str, desc: &'a str },
+    AgentCmd { name: &'a str },
 }
 
 const MAX_VIEWPORT: usize = 10;
 
-/// 统一提示浮层：输入 / 前缀时展示命令和 Skills 候选（前缀匹配优先，再按字母顺序排列）
+/// 统一提示浮层：基于 slash_hint 状态展示命令和 Skills 候选（前缀匹配优先，再按字母顺序排列）
 pub(crate) fn render_unified_hint(f: &mut Frame, app: &App, input_area: Rect) {
-    let first_line = app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .textarea
-        .lines()
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("");
-    if !first_line.starts_with('/') {
+    let slash_hint = &app.session_mgr.current().ui.slash_hint;
+    if !slash_hint.active {
         return;
     }
+    let prefix = slash_hint.prefix.as_str();
 
-    let prefix = first_line.trim_start_matches('/');
-    let cmd_candidates: Vec<(String, String)> = app.session_mgr.sessions[app.session_mgr.active]
+    let cmd_candidates: Vec<(String, String)> = app
+        .session_mgr
+        .current()
         .commands
         .command_registry
         .match_prefix(prefix, &app.services.lc);
-    let skill_candidates: Vec<_> = app.session_mgr.sessions[app.session_mgr.active]
+    let skill_candidates: Vec<_> = app
+        .session_mgr
+        .current()
         .commands
         .skills
         .iter()
         .filter(|s| prefix.is_empty() || s.name.contains(prefix))
+        .collect();
+    let agent_cmd_candidates: Vec<_> = app
+        .session_mgr
+        .current()
+        .commands
+        .agent_commands
+        .iter()
+        .filter(|n| prefix.is_empty() || n.contains(prefix))
         .collect();
 
     // 合并排序：前缀匹配优先，再按名称字母序
@@ -58,13 +64,16 @@ pub(crate) fn render_unified_hint(f: &mut Frame, app: &App, input_area: Rect) {
             desc: &skill.description,
         });
     }
+    for name in &agent_cmd_candidates {
+        items.push(HintItem::AgentCmd { name });
+    }
     items.sort_by(|a, b| {
         let a_starts = a.name().starts_with(prefix) as u8;
         let b_starts = b.name().starts_with(prefix) as u8;
-        // 前缀匹配优先 > 命令优先于 Skill > 字母序
+        // 前缀匹配优先 > 命令 > Skill > AgentCmd > 字母序
         b_starts
             .cmp(&a_starts)
-            .then_with(|| b.is_cmd().cmp(&a.is_cmd()))
+            .then_with(|| b.rank().cmp(&a.rank()))
             .then_with(|| a.name().cmp(b.name()))
     });
 
@@ -73,9 +82,7 @@ pub(crate) fn render_unified_hint(f: &mut Frame, app: &App, input_area: Rect) {
     }
 
     let total = items.len();
-    let cursor = app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .hint_cursor;
+    let cursor = app.session_mgr.current().ui.hint_cursor;
 
     // 计算视口：根据光标位置确定滚动偏移
     let viewport = MAX_VIEWPORT.min(total);
@@ -206,6 +213,7 @@ impl<'a> HintItem<'a> {
         match self {
             HintItem::Cmd { name, .. } => name,
             HintItem::Skill { name, .. } => name,
+            HintItem::AgentCmd { name } => name,
         }
     }
 
@@ -213,11 +221,16 @@ impl<'a> HintItem<'a> {
         match self {
             HintItem::Cmd { desc, .. } => desc,
             HintItem::Skill { desc, .. } => desc,
+            HintItem::AgentCmd { .. } => "",
         }
     }
 
-    /// 命令优先于 Skill
-    fn is_cmd(&self) -> bool {
-        matches!(self, HintItem::Cmd { .. })
+    /// 排序优先级：命令 > Skill > AgentCmd
+    fn rank(&self) -> u8 {
+        match self {
+            HintItem::Cmd { .. } => 2,
+            HintItem::Skill { .. } => 1,
+            HintItem::AgentCmd { .. } => 0,
+        }
     }
 }

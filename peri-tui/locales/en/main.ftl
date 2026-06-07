@@ -30,9 +30,7 @@ command-plugin-description = Manage plugins (browse, install, uninstall)
 command-config-description = Global configuration (autocompact, language, system prompt overrides)
 command-hooks-description = View Hook configuration
 command-effort-description = View or set reasoning effort (low/medium/high/xhigh/max)
-command-doctor-description = Diagnose configuration completeness
 command-rename-description = View or modify current session title
-command-split-description = Create a new split session
 command-lang-description = Switch interface language (e.g. /lang zh-CN)
 command-setup-description = Open setup wizard to configure providers
 command-agent-description = Set Agent definition, switch different Agent roles
@@ -70,18 +68,6 @@ rename-current-title = Current title: { $title }
 rename-updated = Session title updated to: { $name }
 rename-failed = Rename failed: { $error }
 rename-untitled = (untitled)
-
-# doctor command
-doctor-header = Doctor check results:
-doctor-settings-missing = Missing  Cannot get home directory
-doctor-no-api-key = Missing  No API Key set (ANTHROPIC_API_KEY or OPENAI_API_KEY)
-doctor-no-provider = No Provider  No provider configured
-doctor-provider-not-found = No Provider  active_provider_id '{ $id }' not found
-doctor-no-mcp = None  No MCP servers configured
-doctor-mcp-not-init = None  .mcp.json exists but MCP not initialized
-doctor-no-alias = No Alias  No model aliases configured
-doctor-no-alias-no-provider = No Alias  No active Provider
-doctor-no-alias-not-configured = No Alias  Not configured
 
 # lang command
 lang-switched = Language switched to { $lang }
@@ -234,6 +220,8 @@ config-desc-persona = Override system prompt persona (empty = default)
 config-desc-tone = Override system prompt tone (empty = default)
 config-desc-proactiveness = low / medium / high — agent initiative level
 config-desc-diff = (ON/OFF — show inline diff for Write/Edit tools)
+config-field-streaming = Streaming Mode
+config-desc-streaming = streaming / block / none — render granularity for LLM output
 
 # ---- Login Panel ----
 

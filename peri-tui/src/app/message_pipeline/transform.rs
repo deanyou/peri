@@ -1,9 +1,12 @@
 use peri_agent::messages::BaseMessage;
 
-use crate::app::tool_display;
-use crate::ui::markdown::parse_markdown_default;
-use crate::ui::message_view::{
-    aggregate_tool_groups, tool_color, ContentBlockView, MessageViewModel,
+use crate::{
+    app::tool_display,
+    ui::{
+        markdown::parse_markdown_default,
+        message_view::{aggregate_tool_groups, tool_color, ContentBlockView, MessageViewModel},
+        theme,
+    },
 };
 
 use super::MessagePipeline;
@@ -25,12 +28,15 @@ impl MessagePipeline {
         if !self.current_ai_text.trim().is_empty() {
             let rendered = parse_markdown_default(&self.current_ai_text);
             let rendered_prefix_lines = rendered.lines.len();
+            let mut scanner = crate::ui::markdown::TableHoldbackScanner::new();
+            scanner.set_streaming(true);
             blocks.push(ContentBlockView::Text {
                 raw: self.current_ai_text.clone(),
                 rendered,
                 dirty: false,
                 rendered_prefix_len: self.current_ai_text.len(),
                 rendered_prefix_lines,
+                holdback_scanner: scanner,
             });
         }
         for tc in &self.current_ai_tool_calls {
@@ -40,11 +46,14 @@ impl MessagePipeline {
                 });
             }
         }
-        MessageViewModel::AssistantBubble {
+        let mut vm = MessageViewModel::AssistantBubble {
             blocks,
             is_streaming: true,
             collapsed: false,
-        }
+            content_hash: 0,
+        };
+        vm.recompute_hash();
+        vm
     }
 
     /// 从规范 BaseMessage[] 构建完整的 MessageViewModel[]。
@@ -69,6 +78,51 @@ impl MessagePipeline {
 
             let vm =
                 MessageViewModel::from_base_message_with_cwd(msg, &prev_ai_tool_calls, Some(cwd));
+
+            // Agent 工具：除了 SubAgentGroup（执行详情），
+            // 还插入 ToolBlock（发起调用的位置）
+            if let BaseMessage::Tool {
+                tool_call_id,
+                content,
+                is_error,
+                ..
+            } = msg
+            {
+                if let Some((_, tool_name, input)) = prev_ai_tool_calls
+                    .iter()
+                    .find(|(id, _, _)| id == tool_call_id)
+                {
+                    if tool_name == "Agent" {
+                        let display_name = tool_display::format_tool_name(tool_name);
+                        let args_display =
+                            tool_display::format_tool_args(tool_name, input, Some(cwd));
+                        let color = if *is_error {
+                            theme::ERROR
+                        } else {
+                            tool_color(tool_name)
+                        };
+                        let mut tb = MessageViewModel::ToolBlock {
+                            tool_name: tool_name.clone(),
+                            tool_call_id: tool_call_id.clone(),
+                            display_name,
+                            args_display,
+                            content: if *is_error {
+                                content.text_content()
+                            } else {
+                                String::new()
+                            },
+                            is_error: *is_error,
+                            collapsed: true,
+                            color,
+                            diff_lines: None,
+                            content_hash: 0,
+                        };
+                        tb.recompute_hash();
+                        vms.push(tb);
+                    }
+                }
+            }
+            MessageViewModel::from_base_message_with_cwd(msg, &prev_ai_tool_calls, Some(cwd));
 
             if let MessageViewModel::AssistantBubble { blocks, .. } = &vm {
                 let has_visible = blocks.iter().any(|b| match b {
@@ -121,7 +175,7 @@ impl MessagePipeline {
     ) -> MessageViewModel {
         let display_name = tool_display::format_tool_name(name);
         let args_display = tool_display::format_tool_args(name, input, Some(&self.cwd));
-        MessageViewModel::ToolBlock {
+        let mut vm = MessageViewModel::ToolBlock {
             tool_name: name.to_string(),
             tool_call_id: tool_call_id.to_string(),
             display_name,
@@ -131,6 +185,9 @@ impl MessagePipeline {
             collapsed: true,
             color: tool_color(name),
             diff_lines: None,
-        }
+            content_hash: 0,
+        };
+        vm.recompute_hash();
+        vm
     }
 }

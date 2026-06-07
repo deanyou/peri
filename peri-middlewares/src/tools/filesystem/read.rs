@@ -119,7 +119,7 @@ impl BaseTool for ReadFileTool {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let file_path = input["file_path"]
             .as_str()
-            .ok_or("Missing file_path parameter")?;
+            .ok_or("The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file.")?;
 
         let offset = input["offset"].as_u64().unwrap_or(0) as usize;
         let limit = input["limit"].as_u64().unwrap_or(MAX_LINES as u64) as usize;
@@ -150,20 +150,20 @@ impl BaseTool for ReadFileTool {
 
         let content = match std::fs::metadata(&resolved) {
             Ok(meta) if meta.len() > MAX_FILE_SIZE => {
-                return Ok(format!(
+                return Err(format!(
                     "Error: File too large ({} bytes, max {} bytes). Use offset/limit to read portions.",
                     meta.len(),
                     MAX_FILE_SIZE
-                ));
+                ).into());
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(format!("Error: File not found at {file_path}"));
+                return Err(format!("Error: File not found at {file_path}").into());
             }
             Err(e) => return Err(e.into()),
             _ => match std::fs::read_to_string(&resolved) {
                 Ok(c) => c,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(format!("Error: File not found at {file_path}"));
+                    return Err(format!("Error: File not found at {file_path}").into());
                 }
                 Err(e) => return Err(e.into()),
             },
@@ -171,11 +171,12 @@ impl BaseTool for ReadFileTool {
 
         let lines: Vec<&str> = content.split('\n').collect();
         if offset >= lines.len() {
-            return Ok(format!(
+            return Err(format!(
                 "Error: offset {} exceeds file length ({} lines)",
                 offset,
                 lines.len()
-            ));
+            )
+            .into());
         }
         let start = offset;
         let end = (start + limit).min(lines.len());

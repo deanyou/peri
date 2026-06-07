@@ -1,5 +1,7 @@
 use tui_textarea::Input;
 
+use crate::app::FieldTextarea;
+
 use super::{
     test_connectivity, FormField, FormMode, MigratedProvider, ProviderType, SetupSource, SetupStep,
     SetupWizardPanel, LANGUAGE_OPTIONS,
@@ -232,10 +234,8 @@ fn handle_edit(wizard: &mut SetupWizardPanel, input: Input) -> Option<SetupWizar
                 let mp = &mut wizard.providers[wizard.active_provider];
                 mp.provider_type.cycle();
                 Some(SetupWizardAction::Redraw)
-            } else if wizard.form_focus.is_text_input() {
-                let mp = &mut wizard.providers[wizard.active_provider];
-                let (buf, cursor) = provider_field_buf(mp, wizard.form_focus)?;
-                if crate::app::handle_edit_key(buf, cursor, input) {
+            } else if let Some(field) = get_active_field(wizard) {
+                if field.input(input) {
                     Some(SetupWizardAction::Redraw)
                 } else {
                     None
@@ -252,10 +252,8 @@ fn handle_edit(wizard: &mut SetupWizardPanel, input: Input) -> Option<SetupWizar
                 let mp = &mut wizard.providers[wizard.active_provider];
                 mp.provider_type.cycle();
                 Some(SetupWizardAction::Redraw)
-            } else if wizard.form_focus.is_text_input() {
-                let mp = &mut wizard.providers[wizard.active_provider];
-                let (buf, cursor) = provider_field_buf(mp, wizard.form_focus)?;
-                if crate::app::handle_edit_key(buf, cursor, input) {
+            } else if let Some(field) = get_active_field(wizard) {
+                if field.input(input) {
                     Some(SetupWizardAction::Redraw)
                 } else {
                     None
@@ -269,13 +267,16 @@ fn handle_edit(wizard: &mut SetupWizardPanel, input: Input) -> Option<SetupWizar
         } => {
             if wizard.form_focus == FormField::TestConnectivity {
                 let mp = &wizard.providers[wizard.active_provider];
-                wizard.connectivity_result = Some(test_connectivity(&mp.base_url));
+                wizard.connectivity_result = Some(test_connectivity(&mp.field_base_url.value()));
                 Some(SetupWizardAction::Redraw)
             } else if wizard.form_focus == FormField::Confirm {
                 let mp = &wizard.providers[wizard.active_provider];
-                if !mp.provider_id.trim().is_empty()
-                    && !mp.api_key.trim().is_empty()
-                    && mp.aliases.iter().all(|a| !a.model_id.trim().is_empty())
+                if !mp.field_provider_id.value().trim().is_empty()
+                    && !mp.field_api_key.value().trim().is_empty()
+                    && mp
+                        .aliases
+                        .iter()
+                        .all(|a| !a.field_model_id.value().trim().is_empty())
                 {
                     wizard.form_mode = FormMode::Browse;
                     Some(SetupWizardAction::Redraw)
@@ -291,16 +292,12 @@ fn handle_edit(wizard: &mut SetupWizardPanel, input: Input) -> Option<SetupWizar
             Some(SetupWizardAction::Redraw)
         }
         _ => {
-            if !wizard.form_focus.is_text_input() {
-                return None;
-            }
-            let mp = &mut wizard.providers[wizard.active_provider];
-            let (buf, cursor) = match provider_field_buf(mp, wizard.form_focus) {
-                Some(pair) => pair,
-                None => return None,
-            };
-            if crate::app::handle_edit_key(buf, cursor, input) {
-                Some(SetupWizardAction::Redraw)
+            if let Some(field) = get_active_field(wizard) {
+                if field.input(input) {
+                    Some(SetupWizardAction::Redraw)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -308,17 +305,25 @@ fn handle_edit(wizard: &mut SetupWizardPanel, input: Input) -> Option<SetupWizar
     }
 }
 
-fn provider_field_buf(
+fn get_active_field(wizard: &mut SetupWizardPanel) -> Option<&mut FieldTextarea> {
+    if !wizard.form_focus.is_text_input() {
+        return None;
+    }
+    let mp = &mut wizard.providers[wizard.active_provider];
+    provider_field_buf(mp, wizard.form_focus)
+}
+
+pub(crate) fn provider_field_buf(
     mp: &mut MigratedProvider,
     field: FormField,
-) -> Option<(&mut String, &mut usize)> {
+) -> Option<&mut FieldTextarea> {
     match field {
-        FormField::ProviderId => Some((&mut mp.provider_id, &mut mp.cur_provider_id)),
-        FormField::BaseUrl => Some((&mut mp.base_url, &mut mp.cur_base_url)),
-        FormField::ApiKey => Some((&mut mp.api_key, &mut mp.cur_api_key)),
-        FormField::OpusModel => Some((&mut mp.aliases[0].model_id, &mut mp.aliases[0].cursor)),
-        FormField::SonnetModel => Some((&mut mp.aliases[1].model_id, &mut mp.aliases[1].cursor)),
-        FormField::HaikuModel => Some((&mut mp.aliases[2].model_id, &mut mp.aliases[2].cursor)),
+        FormField::ProviderId => Some(&mut mp.field_provider_id),
+        FormField::BaseUrl => Some(&mut mp.field_base_url),
+        FormField::ApiKey => Some(&mut mp.field_api_key),
+        FormField::OpusModel => Some(&mut mp.aliases[0].field_model_id),
+        FormField::SonnetModel => Some(&mut mp.aliases[1].field_model_id),
+        FormField::HaikuModel => Some(&mut mp.aliases[2].field_model_id),
         _ => None,
     }
 }
@@ -348,18 +353,20 @@ pub fn build_wizard_config(wizard: &SetupWizardPanel) -> crate::config::PeriConf
         if !mp.selected {
             continue;
         }
-        if mp.provider_id.trim().is_empty() || mp.api_key.trim().is_empty() {
+        if mp.field_provider_id.value().trim().is_empty()
+            || mp.field_api_key.value().trim().is_empty()
+        {
             continue;
         }
         let provider = crate::config::ProviderConfig {
-            id: mp.provider_id.clone(),
+            id: mp.field_provider_id.value(),
             provider_type: mp.provider_type.type_str().to_string(),
-            api_key: mp.api_key.clone(),
-            base_url: mp.base_url.clone(),
+            api_key: mp.field_api_key.value(),
+            base_url: mp.field_base_url.value(),
             models: crate::config::ProviderModels {
-                opus: mp.aliases[0].model_id.clone(),
-                sonnet: mp.aliases[1].model_id.clone(),
-                haiku: mp.aliases[2].model_id.clone(),
+                opus: mp.aliases[0].field_model_id.value(),
+                sonnet: mp.aliases[1].field_model_id.value(),
+                haiku: mp.aliases[2].field_model_id.value(),
             },
             ..Default::default()
         };
@@ -384,7 +391,7 @@ pub fn save_setup_to(
     path: &std::path::Path,
 ) -> anyhow::Result<crate::config::PeriConfig> {
     let cfg = build_wizard_config(wizard);
-    crate::config::store::save_to(&cfg, path)?;
+    crate::config::save_to(&cfg, path)?;
     Ok(cfg)
 }
 

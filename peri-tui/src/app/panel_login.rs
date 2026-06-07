@@ -13,14 +13,17 @@ impl App {
 
     /// 关闭 /login 面板（不保存）
     pub fn close_login_panel(&mut self) {
-        self.session_mgr.sessions[self.session_mgr.active]
+        self.session_mgr
+            .current_mut()
             .session_panels
             .close_if(PanelKind::Login);
     }
 
     /// 选中（激活）光标处的 Provider
     pub fn login_panel_select_provider(&mut self) {
-        let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
+        let Some(panel) = self
+            .session_mgr
+            .current_mut()
             .session_panels
             .get_mut::<login_panel::LoginPanel>()
         else {
@@ -36,7 +39,8 @@ impl App {
         };
         panel.select_provider(cfg);
         if !selected_name.is_empty() {
-            self.session_mgr.sessions[self.session_mgr.active]
+            self.session_mgr
+                .current_mut()
                 .messages
                 .push_system_note(self.services.lc.tr_args(
                     "app-provider-activated",
@@ -44,7 +48,8 @@ impl App {
                 ));
         }
         if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
-            self.session_mgr.sessions[self.session_mgr.active]
+            self.session_mgr
+                .current_mut()
                 .messages
                 .push_system_note(self.services.lc.tr_args(
                     "app-config-save-failed",
@@ -55,25 +60,28 @@ impl App {
             self.services.provider_name = p.display_name().to_string();
             self.services.model_name = p.model_name().to_string();
         }
-        self.services.sync_peri_config_to_acp();
+        self.sync_acp_config();
         self.close_login_panel();
     }
 
     /// 保存 Login 面板的编辑/新建内容到 PeriConfig，自动激活并关闭面板
     pub fn login_panel_apply_edit(&mut self) {
-        let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
+        let Some(panel) = self
+            .session_mgr
+            .current_mut()
             .session_panels
             .get_mut::<login_panel::LoginPanel>()
         else {
             return;
         };
-        let edit_name = panel.buf_name.clone();
+        let edit_name = panel.field_name.value();
         let is_new = matches!(panel.mode, login_panel::LoginPanelMode::New);
         let Some(cfg) = self.services.peri_config.as_mut() else {
             return;
         };
         if !panel.apply_edit(cfg) {
-            self.session_mgr.sessions[self.session_mgr.active]
+            self.session_mgr
+                .current_mut()
                 .messages
                 .view_messages
                 .push(MessageViewModel::system(
@@ -93,7 +101,8 @@ impl App {
         } else {
             "app-provider-saved"
         };
-        self.session_mgr.sessions[self.session_mgr.active]
+        self.session_mgr
+            .current_mut()
             .messages
             .view_messages
             .push(MessageViewModel::system(
@@ -102,7 +111,8 @@ impl App {
                     .tr_args(key, &[("name".into(), display.into())]),
             ));
         if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
-            self.session_mgr.sessions[self.session_mgr.active]
+            self.session_mgr
+                .current_mut()
                 .messages
                 .view_messages
                 .push(MessageViewModel::system(self.services.lc.tr_args(
@@ -114,13 +124,15 @@ impl App {
             self.services.provider_name = p.display_name().to_string();
             self.services.model_name = p.model_name().to_string();
         }
-        self.services.sync_peri_config_to_acp();
+        self.sync_acp_config();
         self.close_login_panel();
     }
 
     /// 确认删除光标处的 Provider
     pub fn login_panel_confirm_delete(&mut self) {
-        let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
+        let Some(panel) = self
+            .session_mgr
+            .current_mut()
             .session_panels
             .get_mut::<login_panel::LoginPanel>()
         else {
@@ -136,7 +148,8 @@ impl App {
             .unwrap_or_default();
         panel.confirm_delete(cfg);
         if !deleted_name.is_empty() {
-            self.session_mgr.sessions[self.session_mgr.active]
+            self.session_mgr
+                .current_mut()
                 .messages
                 .view_messages
                 .push(MessageViewModel::system(self.services.lc.tr_args(
@@ -145,7 +158,8 @@ impl App {
                 )));
         }
         if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
-            self.session_mgr.sessions[self.session_mgr.active]
+            self.session_mgr
+                .current_mut()
                 .messages
                 .view_messages
                 .push(MessageViewModel::system(self.services.lc.tr_args(
@@ -157,6 +171,6 @@ impl App {
             self.services.provider_name = p.display_name().to_string();
             self.services.model_name = p.model_name().to_string();
         }
-        self.services.sync_peri_config_to_acp();
+        self.sync_acp_config();
     }
 }

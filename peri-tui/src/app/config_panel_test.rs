@@ -10,7 +10,7 @@ fn test_config_panel_from_config_defaults() {
     let panel = ConfigPanel::from_config(&cfg);
     assert_eq!(panel.cursor, ROW_AUTOCOMPACT);
     assert!(panel.buf_autocompact);
-    assert_eq!(panel.buf_threshold, "85");
+    assert_eq!(panel.field_threshold.value(), "85");
     assert!(panel.buf_language.is_empty());
     assert_eq!(panel.buf_proactiveness, "medium");
 }
@@ -27,6 +27,8 @@ fn test_config_panel_cursor_navigation() {
     panel.cursor_down();
     assert_eq!(panel.cursor, ROW_DIFF);
     panel.cursor_down();
+    assert_eq!(panel.cursor, ROW_STREAMING);
+    panel.cursor_down();
     assert_eq!(panel.cursor, ROW_PROACTIVENESS);
     panel.cursor_down();
     assert_eq!(panel.cursor, ROW_PERSONA);
@@ -42,6 +44,8 @@ fn test_config_panel_cursor_navigation() {
     assert_eq!(panel.cursor, ROW_PERSONA);
     panel.cursor_up();
     assert_eq!(panel.cursor, ROW_PROACTIVENESS);
+    panel.cursor_up();
+    assert_eq!(panel.cursor, ROW_STREAMING);
     panel.cursor_up();
     assert_eq!(panel.cursor, ROW_DIFF);
     panel.cursor_up();
@@ -122,8 +126,8 @@ fn test_config_panel_apply_edit_saves_to_config() {
     let mut cfg = PeriConfig::default();
     let mut panel = ConfigPanel::from_config(&cfg);
     panel.buf_language = "zh-CN".to_string();
-    panel.buf_persona = "Rust expert".to_string();
-    panel.buf_tone = "concise".to_string();
+    panel.field_persona.set_value("Rust expert");
+    panel.field_tone.set_value("concise");
     panel.buf_proactiveness = "high".to_string();
     panel.apply_edit(&mut cfg, &lc).unwrap();
     assert_eq!(cfg.config.language.as_deref(), Some("zh-CN"));
@@ -137,7 +141,7 @@ fn test_config_panel_apply_edit_compact_threshold() {
     let lc = make_lc();
     let mut cfg = PeriConfig::default();
     let mut panel = ConfigPanel::from_config(&cfg);
-    panel.buf_threshold = "90".to_string();
+    panel.field_threshold.set_value("90");
     panel.apply_edit(&mut cfg, &lc).unwrap();
     let compact = cfg.config.compact.unwrap();
     assert!((compact.auto_compact_threshold - 0.90).abs() < 0.001);
@@ -148,7 +152,7 @@ fn test_config_panel_apply_edit_invalid_threshold_clamps() {
     let lc = make_lc();
     let mut cfg = PeriConfig::default();
     let mut panel = ConfigPanel::from_config(&cfg);
-    panel.buf_threshold = "30".to_string();
+    panel.field_threshold.set_value("30");
     panel.apply_edit(&mut cfg, &lc).unwrap();
     let compact = cfg.config.compact.unwrap();
     assert!((compact.auto_compact_threshold - 0.50).abs() < 0.001);

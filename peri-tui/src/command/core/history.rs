@@ -1,5 +1,7 @@
-use crate::app::{App, MessageViewModel};
-use crate::command::Command;
+use crate::{
+    app::{App, MessageViewModel},
+    command::Command,
+};
 
 pub struct HistoryCommand;
 
@@ -17,8 +19,9 @@ impl Command for HistoryCommand {
     }
 
     fn execute(&self, app: &mut App, _args: &str) {
-        if app.session_mgr.sessions[app.session_mgr.active].ui.loading {
-            app.session_mgr.sessions[app.session_mgr.active]
+        if app.session_mgr.current_mut().ui.loading {
+            app.session_mgr
+                .current_mut()
                 .messages
                 .view_messages
                 .push(MessageViewModel::system(

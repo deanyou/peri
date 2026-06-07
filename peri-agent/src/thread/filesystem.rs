@@ -2,11 +2,12 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::path::PathBuf;
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::{fs, io::AsyncWriteExt};
 
-use crate::messages::BaseMessage;
-use crate::thread::{ThreadId, ThreadMeta, ThreadStore};
+use crate::{
+    messages::BaseMessage,
+    thread::{ThreadId, ThreadMeta, ThreadStore},
+};
 
 /// 基于文件系统的 ThreadStore 实现
 ///
@@ -239,6 +240,14 @@ impl ThreadStore for FilesystemThreadStore {
         let mut meta = self.load_meta(thread_id).await?;
         meta.cached_context = None;
         self.update_meta(thread_id, meta).await
+    }
+
+    async fn delete_messages(
+        &self,
+        _thread_id: &ThreadId,
+        _message_ids: &[crate::messages::MessageId],
+    ) -> Result<()> {
+        Ok(())
     }
 }
 

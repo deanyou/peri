@@ -1,17 +1,20 @@
 use tui_textarea::Input;
 
-use crate::app::panel_manager::{EventResult, PanelKind};
-use crate::app::App;
-use crate::{with_global_panels, with_session_panels};
+use crate::{
+    app::{
+        betas_panel::BetasPanel,
+        panel_manager::{EventResult, PanelKind},
+        App,
+    },
+    with_global_panels, with_session_panels,
+};
 
 use super::super::Action;
 
 /// PanelManager 分发：先处理 session panels，再处理 global panels
 pub(super) fn handle_panels(app: &mut App, input: &Input) -> Option<Action> {
     // Session panels: Model, Agent, Hooks, Login, Config, ThreadBrowser
-    let session_kind = app.session_mgr.sessions[app.session_mgr.active]
-        .session_panels
-        .active_kind();
+    let session_kind = app.session_mgr.current_mut().session_panels.active_kind();
     if matches!(
         session_kind,
         Some(PanelKind::Model)
@@ -23,26 +26,19 @@ pub(super) fn handle_panels(app: &mut App, input: &Input) -> Option<Action> {
     ) {
         with_session_panels!(app, |sp, ctx| {
             let result = sp.dispatch_key(input.clone(), &mut ctx);
-            let active_idx = app.session_mgr.active;
             match result {
                 EventResult::ClosePanel => {
                     sp.close();
-                    app.session_mgr.sessions[active_idx]
-                        .ui
-                        .panel_selection
-                        .clear();
-                    app.session_mgr.sessions[active_idx].ui.panel_area = None;
+                    app.session_mgr.current_mut().ui.panel_selection.clear();
+                    app.session_mgr.current_mut().ui.panel_area = None;
                 }
                 EventResult::OpenThread(thread_id) => {
                     sp.close();
-                    app.session_mgr.sessions[active_idx]
-                        .ui
-                        .panel_selection
-                        .clear();
-                    app.session_mgr.sessions[active_idx].ui.panel_area = None;
+                    app.session_mgr.current_mut().ui.panel_selection.clear();
+                    app.session_mgr.current_mut().ui.panel_area = None;
                     // with_session_panels! macro puts sp back at closure end,
                     // but OpenThread needs to put back first then call open_thread_with_feedback
-                    app.session_mgr.sessions[active_idx].session_panels = sp;
+                    app.session_mgr.current_mut().session_panels = sp;
                     // Early return prevents macro from putting back again
                     app.open_thread_with_feedback(thread_id);
                     return Some(Action::Redraw);
@@ -63,18 +59,15 @@ pub(super) fn handle_panels(app: &mut App, input: &Input) -> Option<Action> {
             | Some(PanelKind::Mcp)
             | Some(PanelKind::Cron)
             | Some(PanelKind::Plugin)
+            | Some(PanelKind::Betas)
     ) {
-        let active_idx = app.session_mgr.active;
         with_global_panels!(app, |pm, ctx| {
             let result = pm.dispatch_key(input.clone(), &mut ctx);
             match result {
                 EventResult::ClosePanel => {
                     pm.close();
-                    app.session_mgr.sessions[active_idx]
-                        .ui
-                        .panel_selection
-                        .clear();
-                    app.session_mgr.sessions[active_idx].ui.panel_area = None;
+                    app.session_mgr.current_mut().ui.panel_selection.clear();
+                    app.session_mgr.current_mut().ui.panel_area = None;
                 }
                 EventResult::OpenPanel(PanelKind::Memory) => {
                     app.global_panels = pm;
@@ -82,6 +75,19 @@ pub(super) fn handle_panels(app: &mut App, input: &Input) -> Option<Action> {
                         tracing::error!("Failed to open editor: {}", e);
                     }
                     return Some(Action::Redraw);
+                }
+                EventResult::Consumed
+                    if global_kind == Some(PanelKind::Betas) && is_toggle_key(input) =>
+                {
+                    // Beta 切换后即时保存
+                    if let Some(panel) = pm.get::<BetasPanel>() {
+                        if let Some(ref mut cfg) = ctx.services.peri_config {
+                            panel.apply_to_config(cfg);
+                            let _ =
+                                App::save_config(cfg, ctx.services.config_path_override.as_deref());
+                            ctx.sync_acp_config();
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -91,4 +97,25 @@ pub(super) fn handle_panels(app: &mut App, input: &Input) -> Option<Action> {
     }
 
     None
+}
+
+/// 判断是否为切换键（Left/Right/Space）
+fn is_toggle_key(input: &Input) -> bool {
+    use tui_textarea::Key;
+    matches!(
+        input,
+        Input {
+            key: Key::Left,
+            ctrl: false,
+            ..
+        } | Input {
+            key: Key::Right,
+            ctrl: false,
+            ..
+        } | Input {
+            key: Key::Char(' '),
+            ctrl: false,
+            ..
+        }
+    )
 }

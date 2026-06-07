@@ -36,3 +36,11 @@ Write the prompt as if briefing a smart colleague who just joined the project:
 - Summarize sub-agent results for the user — they are not directly visible
 - Launch multiple sub-agents in parallel by including multiple `tool_use` blocks in a single message
 - **Common mistake**: `subagent_type: "fork"` is WRONG. Use `fork: true` instead. `fork` is a separate boolean parameter, not a subagent_type value.
+
+## Background Tasks
+
+When you launch background tasks, the system sends a notification upon completion.
+- Inform the user that tasks are running
+- If you have other pending work, continue with it
+- Otherwise, output a brief waiting message and **do not call any tools** until the notification arrives
+- **AgentResult is NOT a polling tool** — it only returns already-completed results

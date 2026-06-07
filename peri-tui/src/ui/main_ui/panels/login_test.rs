@@ -16,25 +16,19 @@
             mode: LoginPanelMode::Browse,
             browse_list: crate::app::panel_list::PanelList::new(),
             edit_field: LoginEditField::Name,
-            buf_name: String::new(),
+            field_name: crate::app::FieldTextarea::single_line(),
             buf_type: String::new(),
-            buf_base_url: String::new(),
-            buf_api_key: String::new(),
-            buf_opus_model: String::new(),
-            buf_sonnet_model: String::new(),
-            buf_haiku_model: String::new(),
-            cur_name: 0,
-            cur_base_url: 0,
-            cur_api_key: 0,
-            cur_opus_model: 0,
-            cur_sonnet_model: 0,
-            cur_haiku_model: 0,
+            field_base_url: crate::app::FieldTextarea::single_line(),
+            field_api_key: crate::app::FieldTextarea::single_line(),
+            field_opus_model: crate::app::FieldTextarea::single_line(),
+            field_sonnet_model: crate::app::FieldTextarea::single_line(),
+            field_haiku_model: crate::app::FieldTextarea::single_line(),
         };
         panel.browse_list.set_items(vec![(); 1]);
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr.current_mut()
             .session_panels
             .open(crate::app::panel_manager::PanelState::Login(panel.clone()));
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr.current_mut()
             .session_panels
             .open(crate::app::panel_manager::PanelState::Login(panel));
         handle
@@ -67,24 +61,18 @@
             mode: LoginPanelMode::New,
             browse_list: crate::app::panel_list::PanelList::new(),
             edit_field: LoginEditField::Name,
-            buf_name: String::new(),
+            field_name: crate::app::FieldTextarea::single_line(),
             buf_type: "openai".to_string(),
-            buf_base_url: String::new(),
-            buf_api_key: String::new(),
-            buf_opus_model: String::new(),
-            buf_sonnet_model: String::new(),
-            buf_haiku_model: String::new(),
-            cur_name: 0,
-            cur_base_url: 0,
-            cur_api_key: 0,
-            cur_opus_model: 0,
-            cur_sonnet_model: 0,
-            cur_haiku_model: 0,
+            field_base_url: crate::app::FieldTextarea::single_line(),
+            field_api_key: crate::app::FieldTextarea::single_line(),
+            field_opus_model: crate::app::FieldTextarea::single_line(),
+            field_sonnet_model: crate::app::FieldTextarea::single_line(),
+            field_haiku_model: crate::app::FieldTextarea::single_line(),
         };
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr.current_mut()
             .session_panels
             .open(crate::app::panel_manager::PanelState::Login(panel.clone()));
-        app.session_mgr.sessions[app.session_mgr.active]
+        app.session_mgr.current_mut()
             .session_panels
             .open(crate::app::panel_manager::PanelState::Login(panel));
         handle

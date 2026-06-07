@@ -417,7 +417,33 @@ fn test_load_merged_config_full_with_plugin() {
     )
     .unwrap();
 
-    let (_config, plugin_sources) = load_merged_config_full(&cwd, &claude_home);
+    let (config, plugin_sources) = load_merged_config_full(&cwd, &claude_home);
+
+    // 验证 env 注入
+    let srv_config = config
+        .mcp_servers
+        .get("plugin:p1:srv1")
+        .expect("应有 plugin:p1:srv1 服务器");
+    let env = srv_config
+        .env
+        .as_ref()
+        .expect("插件 MCP server 应有 env 字段（自动注入）");
+    assert_eq!(
+        env.get("CLAUDE_PLUGIN_ROOT").unwrap(),
+        &plugin_dir.to_string_lossy().to_string(),
+        "CLAUDE_PLUGIN_ROOT 应为插件安装路径"
+    );
+    let expected_data = plugin_dir
+        .join(".claude-plugin")
+        .join("data")
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(
+        env.get("CLAUDE_PLUGIN_DATA").unwrap(),
+        &expected_data,
+        "CLAUDE_PLUGIN_DATA 应为插件数据路径"
+    );
+
     assert!(
         plugin_sources.contains_key("plugin:p1:srv1"),
         "plugin_sources should contain plugin:p1:srv1, got: {:?}",
@@ -519,4 +545,81 @@ fn test_load_merged_config_full_multiple_plugins() {
     );
     assert_eq!(plugin_sources.get("plugin:pa:srvA").unwrap(), "pa@alpha");
     assert_eq!(plugin_sources.get("plugin:pb:srvB1").unwrap(), "pb@beta");
+}
+
+#[test]
+fn test_load_merged_config_full_plugin_env_preserves_existing() {
+    use crate::plugin::types::{InstallScope, InstalledPlugin, InstalledPlugins};
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let claude_home = dir.path().join(".claude-test");
+    std::fs::create_dir_all(&claude_home).unwrap();
+
+    // 创建插件目录和 plugin.json（含 MCP server + 自定义 env）
+    let plugin_dir = claude_home
+        .join("plugins")
+        .join("cache")
+        .join("mkt")
+        .join("p2")
+        .join("1.0.0");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{
+            "name":"p2",
+            "version":"1.0.0",
+            "mcpServers":{
+                "srv2":{
+                    "command":"node",
+                    "args":["server.js"],
+                    "env":{"MY_VAR":"my_value"}
+                }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    // 创建 installed_plugins.json
+    std::fs::create_dir_all(claude_home.join("plugins")).unwrap();
+    let installed = InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: "p2@mkt".into(),
+            name: "p2".into(),
+            version: "1.0.0".into(),
+            marketplace: "mkt".into(),
+            install_path: plugin_dir.clone(),
+            scope: InstallScope::User,
+            project_path: None,
+        }],
+    };
+    std::fs::write(
+        claude_home.join("plugins").join("installed_plugins.json"),
+        serde_json::to_string(&installed).unwrap(),
+    )
+    .unwrap();
+
+    // 创建 settings.json 启用插件
+    std::fs::write(
+        claude_home.join("settings.json"),
+        r#"{"enabledPlugins":["p2@mkt"]}"#,
+    )
+    .unwrap();
+
+    let (config, _plugin_sources) = load_merged_config_full(&cwd, &claude_home);
+    let srv_config = config
+        .mcp_servers
+        .get("plugin:p2:srv2")
+        .expect("应有 plugin:p2:srv2 服务器");
+    let env = srv_config.env.as_ref().expect("应有 env 字段");
+    // 自定义 env 应保留
+    assert_eq!(env.get("MY_VAR").unwrap(), "my_value");
+    // CLAUDE_PLUGIN_ROOT 应被注入为实际路径
+    assert_eq!(
+        env.get("CLAUDE_PLUGIN_ROOT").unwrap(),
+        &plugin_dir.to_string_lossy().to_string()
+    );
+    // CLAUDE_PLUGIN_DATA 应也被注入
+    assert!(env.contains_key("CLAUDE_PLUGIN_DATA"));
 }

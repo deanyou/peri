@@ -26,7 +26,6 @@ pub fn build_available_commands(skills: &[SkillMetadata]) -> Vec<AvailableComman
         AvailableCommand::new("effort", "Configure LLM reasoning/thinking effort"),
         AvailableCommand::new("loop", "Control agent iteration loop"),
         AvailableCommand::new("history", "View and resume previous conversations"),
-        AvailableCommand::new("doctor", "Diagnose configuration and connection issues"),
         AvailableCommand::new("mcp", "Manage MCP (Model Context Protocol) servers"),
         AvailableCommand::new("hooks", "Manage Claude Code hooks"),
         AvailableCommand::new("plugin", "Manage installed plugins"),

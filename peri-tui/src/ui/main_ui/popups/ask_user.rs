@@ -5,23 +5,21 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use peri_widgets::{BorderedPanel, ScrollState, ScrollableArea, TabBar, TabState, TabStyle};
 
-use crate::app::App;
-use crate::ui::theme;
+use crate::{app::App, ui::theme};
 
 /// AskUser 批量弹窗（底部展开区）：header tab 行 + 编号选项列表
 ///
 /// 风格对齐 Claude Code 原生 AskUser UI：
 /// - Tab 栏带 ☐/✔ 状态标记
 /// - 选项编号格式（单选: `❯ 1. label`，多选: `❯ ● 1. label`）
-/// - 自定义输入合并为最后一个编号选项
+/// - 自定义输入合并为最后一个编号选项（使用 FieldTextarea overlay）
 pub(crate) fn render_ask_user_popup(f: &mut Frame, app: &mut App, area: Rect) {
-    let Some(crate::app::InteractionPrompt::Questions(prompt)) = &app.session_mgr.sessions
-        [app.session_mgr.active]
-        .agent
-        .interaction_prompt
+    let Some(crate::app::InteractionPrompt::Questions(prompt)) =
+        &app.session_mgr.current_mut().agent.interaction_prompt
     else {
         return;
     };
@@ -148,51 +146,88 @@ pub(crate) fn render_ask_user_popup(f: &mut Frame, app: &mut App, area: Rect) {
     // 自定义输入前加空行分隔
     lines.push(Line::from(""));
 
-    // 自定义输入作为最后一个编号选项
-    {
-        let custom_num = option_count + 1;
-        let is_cursor = cur.in_custom_input;
-        let cursor_mark = if is_cursor { "❯" } else { " " };
-        let display = if cur.custom_input.is_empty() && !is_cursor {
-            app.services.lc.tr("ask-user-placeholder")
-        } else if is_cursor {
-            let (before, after) =
-                crate::app::edit_display_parts(&cur.custom_input, cur.custom_cursor);
-            format!("{}█{}", before, after)
-        } else {
-            cur.custom_input.clone()
-        };
-        let style = if is_cursor {
-            Style::default()
-                .fg(theme::THINKING)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::MUTED)
-        };
+    // 记录 textarea label 在 lines 中的起始行号（用于后续 overlay）
+    let textarea_label_line = lines.len() as u16;
+
+    // 自定义输入 label 行（前缀 "❯ N. "）
+    let custom_num = option_count + 1;
+    let is_cursor = cur.in_custom_input;
+    let cursor_mark = if is_cursor { "❯" } else { " " };
+    let style = if is_cursor {
+        Style::default()
+            .fg(theme::THINKING)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::MUTED)
+    };
+    let prefix_str = format!("{} {}. ", cursor_mark, custom_num);
+    let prefix_width = UnicodeWidthStr::width(prefix_str.as_str()) as u16;
+
+    if cur.custom_input.is_empty() && !is_cursor {
+        // 空且未聚焦：显示 placeholder（无需 textarea overlay）
+        let placeholder = app.services.lc.tr("ask-user-placeholder");
         lines.push(Line::from(vec![
-            Span::styled(format!("{} {}. ", cursor_mark, custom_num), style),
-            Span::styled(display, style),
+            Span::styled(prefix_str, style),
+            Span::styled(placeholder, style),
         ]));
+    } else {
+        // 有内容或已聚焦：label 行 + textarea overlay 占位
+        lines.push(Line::from(Span::styled(prefix_str.clone(), style)));
+        // 为 textarea 额外行数预留空行（第 1 行在 label 行内，额外需要 render_height - 1 行）
+        let extra = cur.custom_input.render_height().saturating_sub(1);
+        for _ in 0..extra {
+            lines.push(Line::from(""));
+        }
     }
 
-    let mut scroll_state = ScrollState::with_offset(prompt.scroll_offset);
+    // 保存 overlay 参数（cur 借用在 ScrollableArea 后失效）
+    let needs_overlay = !cur.custom_input.is_empty() || is_cursor;
+    let ta_render_height = cur.custom_input.render_height();
+    let scroll_offset = prompt.scroll_offset;
+
+    let mut scroll_state = ScrollState::with_offset(scroll_offset);
     let metrics = ScrollableArea::new(Text::from(lines))
         .scrollbar_style(Style::default().fg(theme::MUTED))
         .render(f, content_area, &mut scroll_state);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_scrollbar_metrics = metrics;
+    app.session_mgr.current_mut().ui.panel_scrollbar_metrics = metrics;
     // 存储面板区域供鼠标事件路由
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_area = Some(area);
-    if let Some(crate::app::InteractionPrompt::Questions(p)) = app.session_mgr.sessions
-        [app.session_mgr.active]
+    app.session_mgr.current_mut().ui.panel_area = Some(area);
+    if let Some(crate::app::InteractionPrompt::Questions(p)) = app
+        .session_mgr
+        .current_mut()
         .agent
         .interaction_prompt
         .as_mut()
     {
         p.scrollbar_metrics = metrics;
         p.option_row_map = option_row_map;
+    }
+
+    // ── textarea overlay：在 label 行右侧渲染 FieldTextarea widget ──────────
+    if needs_overlay {
+        let visible_label_y = content_area.y + textarea_label_line.saturating_sub(scroll_offset);
+        if visible_label_y >= content_area.y
+            && visible_label_y < content_area.y + content_area.height
+        {
+            let ta_height =
+                ta_render_height.min(content_area.bottom().saturating_sub(visible_label_y));
+            let textarea_area = Rect {
+                x: content_area.x + prefix_width,
+                y: visible_label_y,
+                width: content_area.width.saturating_sub(prefix_width),
+                height: ta_height,
+            };
+            if textarea_area.width > 0 && textarea_area.height > 0 {
+                if let Some(crate::app::InteractionPrompt::Questions(p)) = app
+                    .session_mgr
+                    .current_mut()
+                    .agent
+                    .interaction_prompt
+                    .as_mut()
+                {
+                    p.current().custom_input.render(f, textarea_area);
+                }
+            }
+        }
     }
 }

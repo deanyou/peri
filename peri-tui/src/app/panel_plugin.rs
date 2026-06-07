@@ -13,7 +13,8 @@ impl App {
             let vm = crate::ui::message_view::MessageViewModel::system(
                 self.services.lc.tr("app-no-mcp-configured"),
             );
-            self.session_mgr.sessions[self.session_mgr.active]
+            self.session_mgr
+                .current_mut()
                 .messages
                 .view_messages
                 .push(vm);
@@ -39,7 +40,8 @@ impl App {
             let vm = crate::ui::message_view::MessageViewModel::system(
                 self.services.lc.tr("app-no-cron-tasks"),
             );
-            self.session_mgr.sessions[self.session_mgr.active]
+            self.session_mgr
+                .current_mut()
                 .messages
                 .view_messages
                 .push(vm);
@@ -450,9 +452,7 @@ impl App {
             .collect();
 
         // Sort: mark current thread as active if we have one
-        if let Some(ref current_id) =
-            self.session_mgr.sessions[self.session_mgr.active].current_thread_id
-        {
+        if let Some(ref current_id) = self.session_mgr.current().current_thread_id {
             for entry in &mut entries {
                 if entry.thread_id == *current_id {
                     entry.is_active = true;
@@ -506,13 +506,12 @@ impl App {
         save_known_marketplaces(&marketplaces, None)?;
 
         // 显示成功消息
-        self.session_mgr.sessions[self.session_mgr.active]
-            .messages
-            .view_messages
-            .push(crate::app::MessageViewModel::system(format!(
+        self.session_mgr.current_mut().messages.view_messages.push(
+            crate::app::MessageViewModel::system(format!(
                 "Marketplace 已添加: {} (正在获取内容...)",
                 name
-            )));
+            )),
+        );
 
         // 刷新面板以显示新添加的 marketplace
         self.open_plugin_panel();
@@ -611,13 +610,9 @@ impl App {
         save_known_marketplaces(&filtered, None)?;
 
         // 显示成功消息
-        self.session_mgr.sessions[self.session_mgr.active]
-            .messages
-            .view_messages
-            .push(crate::app::MessageViewModel::system(format!(
-                "Marketplace 已移除: {}",
-                name
-            )));
+        self.session_mgr.current_mut().messages.view_messages.push(
+            crate::app::MessageViewModel::system(format!("Marketplace 已移除: {}", name)),
+        );
 
         // 刷新面板并恢复到 Marketplaces 视图
         self.open_plugin_panel();
@@ -629,6 +624,154 @@ impl App {
                 p.marketplace_list.move_cursor_to(max);
             }
         }
+
+        Ok(())
+    }
+
+    /// 从 marketplace 缓存安装指定插件（供 /plugin install 斜杠命令使用）
+    pub fn plugin_install_by_marketplace(
+        &mut self,
+        name: &str,
+        marketplace: &str,
+    ) -> anyhow::Result<()> {
+        use peri_middlewares::plugin::{
+            install_plugin, load_installed_plugins, load_known_marketplaces,
+            marketplaces_cache_dir, InstallScope, MarketplaceManager,
+        };
+
+        // 1. 检查 marketplace 是否存在
+        let known = load_known_marketplaces(None).unwrap_or_default();
+        let mp_exists = known
+            .iter()
+            .any(|km| MarketplaceManager::extract_name(&km.source) == marketplace);
+        if !mp_exists {
+            anyhow::bail!(
+                "未找到 marketplace '{}'。请先通过 /plugin marketplace add 添加。",
+                marketplace
+            );
+        }
+
+        // 2. 检查是否已安装
+        let installed = load_installed_plugins(None).unwrap_or_default();
+        let plugin_id = format!("{}@{}", name, marketplace);
+        if installed.plugins.iter().any(|p| p.id == plugin_id) {
+            self.session_mgr.current_mut().messages.view_messages.push(
+                crate::app::MessageViewModel::system(format!(
+                    "插件 '{}' 已安装，无需重复安装",
+                    plugin_id
+                )),
+            );
+            return Ok(());
+        }
+
+        // 3. 推送进度消息
+        self.session_mgr.current_mut().messages.view_messages.push(
+            crate::app::MessageViewModel::system(format!("正在安装 {}@{} ...", name, marketplace)),
+        );
+
+        // 4. Spawn 异步安装
+        let name = name.to_string();
+        let mkt = marketplace.to_string();
+        let cache_dir = marketplaces_cache_dir();
+        let claude_dir = dirs_next::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".claude");
+        let tx = self.services.bg_event_tx.clone();
+
+        tokio::spawn(async move {
+            let result = install_plugin(
+                &name,
+                &mkt,
+                InstallScope::User,
+                &cache_dir,
+                &claude_dir,
+                None,
+            )
+            .await;
+            let plugin_id = format!("{}@{}", name, mkt);
+            let (success, msg) = match &result {
+                Ok(r) => (true, format!("已安装: {} v{}", r.id, r.version)),
+                Err(e) => (false, format!("安装失败: {}", e)),
+            };
+            let _ = tx
+                .send(crate::app::AgentEvent::PluginActionCompleted {
+                    plugin_id,
+                    action: "install".to_string(),
+                    success,
+                    message: msg,
+                })
+                .await;
+        });
+
+        Ok(())
+    }
+
+    /// 刷新指定 marketplace 缓存（供 /plugin marketplace update 斜杠命令使用）
+    pub fn marketplace_update_and_refresh(&mut self, name: &str) -> anyhow::Result<()> {
+        use peri_middlewares::plugin::{
+            load_known_marketplaces, save_known_marketplaces, MarketplaceManager,
+        };
+
+        // 1. 查找 marketplace
+        let known = load_known_marketplaces(None).unwrap_or_default();
+        let target = known
+            .iter()
+            .find(|km| MarketplaceManager::extract_name(&km.source) == name);
+
+        let source = match target {
+            Some(km) => km.source.clone(),
+            None => {
+                anyhow::bail!(
+                    "未找到 marketplace '{}'。请先通过 /plugin marketplace add 添加。",
+                    name
+                );
+            }
+        };
+
+        // 2. 推送进度消息
+        self.session_mgr.current_mut().messages.view_messages.push(
+            crate::app::MessageViewModel::system(format!("正在刷新 marketplace '{}' ...", name)),
+        );
+
+        // 3. Spawn 后台刷新
+        let name = name.to_string();
+        let tx = self.services.bg_event_tx.clone();
+
+        tokio::spawn(async move {
+            use peri_middlewares::plugin::marketplace::refresh_marketplace;
+            match refresh_marketplace(&source, &name).await {
+                Ok((_manifest, install_location)) => {
+                    if let Ok(mut marketplaces) = load_known_marketplaces(None) {
+                        if let Some(entry) = marketplaces
+                            .iter_mut()
+                            .find(|km| MarketplaceManager::extract_name(&km.source) == name)
+                        {
+                            entry.install_location = install_location;
+                            entry.last_updated = chrono::Utc::now().to_rfc3339();
+                            let _ = save_known_marketplaces(&marketplaces, None);
+                        }
+                    }
+                    let _ = tx
+                        .send(crate::app::AgentEvent::PluginActionCompleted {
+                            plugin_id: name.clone(),
+                            action: "refresh".to_string(),
+                            success: true,
+                            message: format!("Marketplace '{}' 已更新", name),
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(crate::app::AgentEvent::PluginActionCompleted {
+                            plugin_id: name.clone(),
+                            action: "refresh".to_string(),
+                            success: false,
+                            message: format!("更新失败: {}", e),
+                        })
+                        .await;
+                }
+            }
+        });
 
         Ok(())
     }

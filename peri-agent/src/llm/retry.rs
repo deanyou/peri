@@ -1,14 +1,17 @@
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use rand::RngExt;
 
-use crate::agent::events::{AgentEvent, AgentEventHandler};
-use crate::agent::react::{ReactLLM, Reasoning};
-use crate::error::AgentResult;
-use crate::messages::BaseMessage;
-use crate::tools::BaseTool;
+use crate::{
+    agent::{
+        events::{AgentEvent, AgentEventHandler},
+        react::{ReactLLM, Reasoning},
+    },
+    error::AgentResult,
+    messages::BaseMessage,
+    tools::BaseTool,
+};
 
 /// 重试配置
 #[derive(Debug, Clone)]
@@ -121,6 +124,18 @@ impl<L: ReactLLM> ReactLLM for RetryableLLM<L> {
                         delay_ms: delay,
                         error: e.to_string(),
                     });
+                    crate::metrics::emit(
+                        "llm.retry",
+                        serde_json::json!({
+                            "attempt": attempt + 1,
+                            "max_attempts": self.config.max_retries,
+                            "model": self.inner.model_name(),
+                            "error": e.to_string(),
+                            "delay_ms": delay,
+                        }),
+                        None,
+                        None,
+                    );
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
                 Err(e) => return Err(e),
@@ -143,7 +158,9 @@ impl<L: ReactLLM> ReactLLM for RetryableLLM<L> {
 mod tests {
     use super::*;
     use crate::error::AgentError;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     include!("retry_test.rs");
 }

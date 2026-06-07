@@ -48,13 +48,13 @@ pub async fn run_print(
         Some(path) => {
             let p = std::path::Path::new(path);
             if p.exists() {
-                peri_tui::config::store::load_from(p)?
+                peri_tui::config::load_from(p)?
             } else {
                 let v: serde_json::Value = serde_json::from_str(path)
                     .map_err(|e| anyhow::anyhow!("--settings 不是有效文件路径或 JSON: {e}"))?;
                 let tmp = std::env::temp_dir().join("peri-settings-override.json");
                 std::fs::write(&tmp, serde_json::to_string_pretty(&v)?)?;
-                peri_tui::config::store::load_from(&tmp)?
+                peri_tui::config::load_from(&tmp)?
             }
         }
         None => peri_tui::config::load().unwrap_or_default(),
@@ -154,6 +154,10 @@ pub async fn run_print(
         let mut hg: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
         if !plugin_data.all_hooks.is_empty() {
             hg.push(plugin_data.all_hooks.clone());
+        }
+        let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
+        if !global_hooks.is_empty() {
+            hg.push(global_hooks);
         }
         let local_hooks = peri_middlewares::hooks::loader::load_settings_local_hooks(&cwd);
         if !local_hooks.is_empty() {

@@ -9,25 +9,32 @@
 
 use std::sync::Arc;
 
-use peri_agent::agent::events::{AgentEvent as ExecutorEvent, AgentEventHandler};
-use peri_agent::agent::state::AgentState;
-use peri_agent::agent::token::ContextBudget;
-use peri_agent::agent::AgentCancellationToken;
-use peri_agent::agent::State;
-use peri_agent::error::AgentError;
-use peri_agent::interaction::{ChannelState, UserInteractionBroker};
-use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent, MessageId};
+use peri_agent::{
+    agent::{
+        events::{AgentEvent as ExecutorEvent, AgentEventHandler},
+        state::AgentState,
+        token::ContextBudget,
+        AgentCancellationToken, State,
+    },
+    error::AgentError,
+    interaction::{ChannelState, UserInteractionBroker},
+    messages::{BaseMessage, ContentBlock, MessageContent, MessageId},
+};
 use tokio::sync::oneshot;
 use tracing::{debug, error};
 
-use crate::agent::builder::{self, AcpAgentConfig};
-use crate::langfuse::{LangfuseSession, LangfuseTracer};
-use crate::prompt::{build_system_prompt, PromptFeatures};
-use crate::provider::LlmProvider;
-use crate::session::agent_pool::AgentPool;
-use crate::session::agent_runtime::{AgentRuntime, CancelPolicy};
-use crate::session::event_sink::EventSink;
-use crate::session::SessionManager;
+use crate::{
+    agent::builder::{self, AcpAgentConfig},
+    langfuse::{LangfuseSession, LangfuseTracer},
+    prompt::{build_system_prompt, PromptFeatures},
+    provider::LlmProvider,
+    session::{
+        agent_pool::AgentPool,
+        agent_runtime::{AgentRuntime, CancelPolicy},
+        event_sink::EventSink,
+        SessionManager,
+    },
+};
 
 /// High-level reason why prompt execution stopped, used to derive ACP `StopReason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +140,113 @@ pub async fn execute_prompt(
         (history, content)
     };
 
+    // Compact config — computed early for command interception and agent building.
+    let mut compact_config = peri_config.config.compact.clone().unwrap_or_default();
+    compact_config.apply_env_overrides();
+    let disable_compact = std::env::var("DISABLE_COMPACT").is_ok()
+        || std::env::var("DISABLE_AUTO_COMPACT").is_ok()
+        || !compact_config.auto_compact_enabled;
+
+    // Compact model — reuse AgentPool cache if available, otherwise create fresh.
+    let cached_llm = {
+        let pool_guard = pool.lock();
+        if pool_guard.has_valid_cache(provider) {
+            pool_guard.get_cached_llm().cloned()
+        } else {
+            None
+        }
+    };
+    let compact_model: Option<Arc<dyn peri_agent::llm::BaseModel>> = if disable_compact {
+        None
+    } else {
+        cached_llm
+            .as_ref()
+            .map(|c| c.compact_model.clone())
+            .or_else(|| Some(provider.clone().into_model().into()))
+    };
+
+    // Context window (前置计算，供 bg event pump 和 compact 使用)
+    let context_window = provider.context_window();
+    let context_1m = peri_config.config.context_1m.unwrap_or(false);
+    let effective_context_window = if context_1m {
+        1_000_000
+    } else {
+        context_window
+    };
+
+    // 前置创建 bg 通道（BgCommand 等 Immediate 命令依赖）
+    let (bg_event_tx_for_cmd, mut bg_event_rx_for_cmd) =
+        tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
+    let (bg_notification_tx_for_cmd, _bg_notification_rx_for_cmd) =
+        tokio::sync::mpsc::unbounded_channel();
+    let bg_registry_for_cmd = Arc::new(peri_middlewares::subagent::BackgroundTaskRegistry::new(
+        bg_notification_tx_for_cmd,
+    ));
+
+    // BgCommand 事件的 bg event pump（必须在命令拦截之前启动，Immediate 命令才能发事件）
+    {
+        let bg_cmd_sink = Arc::clone(&event_sink);
+        let bg_cmd_sid = session_id.clone();
+        let bg_cmd_cw = effective_context_window;
+        tokio::spawn(async move {
+            while let Some(bg_event) = bg_event_rx_for_cmd.recv().await {
+                bg_cmd_sink
+                    .push_event(&bg_cmd_sid, &bg_event, bg_cmd_cw)
+                    .await;
+            }
+        });
+    }
+
+    // Command interception — check if content is a slash command before building agent.
+    if let Some(text) = content.text_content().strip_prefix('/') {
+        if !text.is_empty() {
+            let command_registry = crate::session::command::default_command_registry();
+            if let Some((cmd, args)) = command_registry.find(&content.text_content()) {
+                if cmd.kind() == crate::session::command::CommandKind::Immediate {
+                    tracing::debug!(
+                        command = %cmd.name(),
+                        history_len = history.len(),
+                        "Immediate command intercepted"
+                    );
+                    let ctx = crate::session::command::CommandContext {
+                        session_id: session_id.clone(),
+                        history: history.clone(),
+                        cwd: cwd.to_string(),
+                        peri_config: Arc::new(peri_config.as_ref().clone()),
+                        compact_model: compact_model.clone(),
+                        event_sink: event_sink.clone(),
+                        args: args.to_string(),
+                        cancel_token: cancel.clone(),
+                        thread_store: thread_store.clone(),
+                        thread_id: thread_id.clone(),
+                        bg_event_sender: Some(bg_event_tx_for_cmd.clone()),
+                        bg_registry: Some(bg_registry_for_cmd.clone()),
+                    };
+                    let result = tokio::select! {
+                        r = cmd.execute(ctx) => r,
+                        _ = cancel.cancelled() => {
+                            tracing::info!(session_id = %session_id, "Immediate command cancelled");
+                            crate::session::command::CommandResult {
+                                messages: history,
+                                stop_reason: PromptStopReason::Cancelled,
+                            }
+                        }
+                    };
+                    // Immediate 命令跳过 agent event pump，必须手动发送 push_done
+                    // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
+                    event_sink.push_done(&session_id).await;
+                    return PromptResult {
+                        messages: result.messages,
+                        ok: true,
+                        stop_reason: result.stop_reason,
+                        recall_items: Vec::new(),
+                    };
+                }
+                // Passthrough/Transform → fall through to normal agent flow
+            }
+        }
+    }
+
     let trace_input = content.text_content();
     let agent_input = if incoming_recalls.is_empty() {
         peri_agent::agent::react::AgentInput::blocks(content)
@@ -147,23 +261,10 @@ pub async fn execute_prompt(
         peri_agent::agent::react::AgentInput::blocks(MessageContent::blocks(blocks))
     };
 
-    // Compact config and context budget (computed once)
-    let mut compact_config = peri_config.config.compact.clone().unwrap_or_default();
-    compact_config.apply_env_overrides();
-    let context_window = provider.context_window();
-    let context_1m = peri_config.config.context_1m.unwrap_or(false);
-    let effective_context_window = if context_1m {
-        1_000_000
-    } else {
-        context_window
-    };
+    // Context budget (computed once, uses compact_config from above)
     let budget = ContextBudget::new(effective_context_window)
         .with_auto_compact_threshold(compact_config.auto_compact_threshold)
         .with_warning_threshold(compact_config.micro_compact_threshold);
-
-    let disable_compact = std::env::var("DISABLE_COMPACT").is_ok()
-        || std::env::var("DISABLE_AUTO_COMPACT").is_ok()
-        || !compact_config.auto_compact_enabled;
 
     // Event channel (lives for entire execute_prompt lifetime)
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
@@ -208,6 +309,7 @@ pub async fn execute_prompt(
                         model,
                         output,
                         usage,
+                        stop_reason: _,
                     } => {
                         tracer.lock().on_llm_end(
                             *step,
@@ -285,12 +387,20 @@ pub async fn execute_prompt(
 
         sink.push_done(&sid).await;
 
-        // Wait for Langfuse flush before exiting pump
-        if let Some(handle) = langfuse_flush {
-            let _ = handle.await;
-        }
-
+        // Signal pump completion BEFORE Langfuse flush.
+        // Langfuse is telemetry — it must never block the execution pipeline.
+        // Without this, a slow/unreachable Langfuse API blocks pump_done_tx,
+        // which blocks wait_for_pump(), which blocks execute_prompt() from
+        // returning, which holds the prompt_lock and prevents the next prompt
+        // from starting. Ctrl+C can't recover because the new prompt's cancel
+        // token hasn't been created yet (still waiting on the lock).
         let _ = pump_done_tx.send(());
+
+        // Langfuse flush: fire-and-forget. The spawned task runs independently;
+        // worst-case it blocks for ~150s (HTTP 30s × 3 retries + backoff) then
+        // logs warnings. The pump has already signaled completion above, so this
+        // never blocks the execution pipeline.
+        drop(langfuse_flush);
     });
 
     // 单次 Agent 执行（compact 由 CompactMiddleware 在循环内处理）
@@ -336,25 +446,6 @@ pub async fn execute_prompt(
             language.as_deref(),
         );
         (sp, None, None, None, None)
-    };
-
-    // Compact model（用于 CompactMiddleware 的 full compact 摘要生成）
-    // 从 AgentPool 复用缓存的 LLM 实例，避免每轮重建 reqwest::Client
-    let cached_llm = {
-        let pool_guard = pool.lock();
-        if pool_guard.has_valid_cache(provider) {
-            pool_guard.get_cached_llm().cloned()
-        } else {
-            None
-        }
-    };
-    let compact_model: Option<Arc<dyn peri_agent::llm::BaseModel>> = if disable_compact {
-        None
-    } else {
-        cached_llm
-            .as_ref()
-            .map(|c| c.compact_model.clone())
-            .or_else(|| Some(provider.clone().into_model().into()))
     };
 
     // Build register/deregister closures for SubAgentMiddleware
@@ -428,6 +519,7 @@ pub async fn execute_prompt(
             deregister_runtime,
         },
         cached_llm.as_ref(),
+        &pool,
     );
 
     // Store updated cache back into pool
@@ -492,6 +584,8 @@ pub async fn execute_prompt(
 
     // Execute agent
     let mut agent_state = AgentState::with_messages(cwd.to_string(), history);
+    agent_state.set_context("session_id", &session_id);
+    agent_state.set_context("run_id", uuid::Uuid::now_v7().to_string());
     let result = agent_output
         .executor
         .execute(agent_input.clone(), &mut agent_state, Some(cancel.clone()))
@@ -547,9 +641,13 @@ fn close_channel(
 }
 
 async fn wait_for_pump(pump_done_rx: oneshot::Receiver<()>, session_id: &str) {
-    match pump_done_rx.await {
-        Ok(()) => debug!(session_id, "Event pump done"),
-        Err(_) => error!(session_id, "Event pump done channel closed unexpectedly"),
+    match tokio::time::timeout(std::time::Duration::from_secs(10), pump_done_rx).await {
+        Ok(Ok(())) => debug!(session_id, "Event pump done"),
+        Ok(Err(_)) => error!(session_id, "Event pump done channel closed unexpectedly"),
+        Err(_) => error!(
+            session_id,
+            "Event pump timed out (10s) — Langfuse flush may have blocked push_done"
+        ),
     }
 }
 

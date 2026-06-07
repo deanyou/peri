@@ -1,6 +1,10 @@
-use crate::app::status_panel::{StatusPanel, STATUS_TAB_CONTEXT, STATUS_TAB_COST};
-use crate::app::App;
-use crate::ui::theme;
+use crate::{
+    app::{
+        status_panel::{StatusPanel, STATUS_TAB_CONTEXT, STATUS_TAB_COST},
+        App,
+    },
+    ui::theme,
+};
 use peri_widgets::BorderedPanel;
 use ratatui::{
     layout::Rect,
@@ -20,9 +24,7 @@ pub(crate) fn render_status_panel(f: &mut Frame, panel: &StatusPanel, app: &mut 
     .border_style(Style::default().fg(theme::BORDER))
     .render(f, area);
 
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_area = Some(inner);
+    app.session_mgr.current_mut().ui.panel_area = Some(inner);
 
     // Tab 栏（1 行）
     let tab_height = 1u16;
@@ -71,16 +73,11 @@ pub(crate) fn render_status_panel(f: &mut Frame, panel: &StatusPanel, app: &mut 
 }
 
 fn build_cost_lines(app: &App) -> Vec<Line<'static>> {
-    let tracker = &app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .session_token_tracker;
+    let tracker = &app.session_mgr.current().agent.session_token_tracker;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // 会话时长
-    let duration_str = match app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .session_start_time
-    {
+    let duration_str = match app.session_mgr.current().agent.session_start_time {
         Some(start) => {
             let s = start.elapsed().as_secs();
             if s >= 3600 {
@@ -160,9 +157,7 @@ fn format_number(n: u64) -> String {
 
 /// 基于模型 alias 的简化费用估算
 fn estimate_cost(app: &App) -> f64 {
-    let tracker = &app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .session_token_tracker;
+    let tracker = &app.session_mgr.current().agent.session_token_tracker;
     let alias = app
         .services
         .peri_config
@@ -205,8 +200,7 @@ fn build_bar_chart_lines(
     chart_width: usize,
     chart_height: usize,
 ) -> Vec<Line<'static>> {
-    use ratatui::style::Style;
-    use ratatui::text::Span;
+    use ratatui::{style::Style, text::Span};
 
     if history.is_empty() || chart_height == 0 || chart_width == 0 {
         return vec![];
@@ -275,8 +269,7 @@ fn build_cache_rate_lines(
     chart_width: usize,
     chart_height: usize,
 ) -> Vec<Line<'static>> {
-    use ratatui::style::Style;
-    use ratatui::text::Span;
+    use ratatui::{style::Style, text::Span};
 
     if history.is_empty() || chart_height == 0 || chart_width == 0 {
         return vec![];
@@ -343,8 +336,7 @@ fn build_cache_rate_lines(
 }
 
 fn build_x_axis_labels(visible_start: usize, visible_len: usize) -> Line<'static> {
-    use ratatui::style::Style;
-    use ratatui::text::Span;
+    use ratatui::{style::Style, text::Span};
 
     let label_every = if visible_len <= 10 {
         1
@@ -374,22 +366,15 @@ fn build_x_axis_labels(visible_start: usize, visible_len: usize) -> Line<'static
 }
 
 fn build_context_summary(app: &App) -> Line<'static> {
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::Span;
+    use ratatui::{
+        style::{Modifier, Style},
+        text::Span,
+    };
 
-    let tracker = &app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .session_token_tracker;
-    let context_window = app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .context_window;
-    let msg_count = app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .agent_state_messages
-        .len();
-    let tool_count = app.session_mgr.sessions[app.session_mgr.active]
-        .agent
-        .tool_call_count;
+    let tracker = &app.session_mgr.current().agent.session_token_tracker;
+    let context_window = app.session_mgr.current().agent.context_window;
+    let msg_count = app.session_mgr.current().agent.origin_messages.len();
+    let tool_count = app.session_mgr.current().agent.tool_call_count;
 
     let used = tracker.estimated_context_tokens().unwrap_or(0);
     let pct = tracker
@@ -430,11 +415,15 @@ fn build_context_summary(app: &App) -> Line<'static> {
 }
 
 fn render_context_tab(f: &mut Frame, app: &App, area: Rect) {
-    use ratatui::style::Style;
-    use ratatui::text::{Line, Span, Text};
-    use ratatui::widgets::Paragraph;
+    use ratatui::{
+        style::Style,
+        text::{Line, Span, Text},
+        widgets::Paragraph,
+    };
 
-    let history = &app.session_mgr.sessions[app.session_mgr.active]
+    let history = &app
+        .session_mgr
+        .current()
         .agent
         .session_token_tracker
         .request_history;

@@ -6,8 +6,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 use tracing::{debug, info};
 
-use peri_acp::dispatch;
-use peri_acp::transport::types::AcpError;
+use peri_acp::{dispatch, transport::types::AcpError};
 use peri_agent::thread::ThreadMeta;
 
 use agent_client_protocol::schema::{
@@ -16,15 +15,22 @@ use agent_client_protocol::schema::{
     SetSessionConfigOptionResponse, SetSessionModeResponse, SetSessionModelResponse,
 };
 
-use crate::app::agent::LlmProvider;
+use peri_acp::dispatch::config_update::make_config_options;
 
-use super::notify::{
-    extract_session_id, send_available_commands_update, send_config_option_update,
-};
+use crate::{app::agent::LlmProvider, config::save_to};
+
 use super::{
-    apply_thinking_effort, build_config_options, build_mode_state, build_model_state,
+    apply_thinking_effort, build_mode_state, build_model_state,
+    notify::{extract_session_id, send_available_commands_update, send_config_option_update},
     parse_permission_mode, AcpServerConfig, SessionState,
 };
+
+fn persist_config(cfg: &AcpServerConfig) {
+    let c = cfg.peri_config.read();
+    if let Err(e) = save_to(&c, &cfg.config_path) {
+        tracing::warn!(error = %e, "Failed to persist config");
+    }
+}
 
 pub(crate) async fn handle_request(
     method: &str,
@@ -66,12 +72,7 @@ pub(crate) async fn handle_request(
                     cwd: cwd.clone(),
                     history: Vec::new(),
                     cancel_token: None,
-                    frozen_system_prompt: None,
-                    frozen_claude_md: None,
-                    frozen_claude_local_md: None,
-                    frozen_skill_summary: None,
-                    frozen_date: None,
-                    frozen_language: None,
+                    frozen: None,
                     recall_items: Vec::new(),
                     agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
                 },
@@ -81,31 +82,16 @@ pub(crate) async fn handle_request(
             let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
             let frozen_language = cfg.peri_config.read().config.language.clone();
 
-            let (frozen_claude_md, frozen_claude_local_md) =
-                peri_middlewares::AgentsMdMiddleware::read_frozen_content(&cwd);
-
-            let frozen_skill_summary = peri_middlewares::SkillsMiddleware::build_frozen_summary(
+            let frozen_data = peri_acp::session::frozen::build_frozen_session_data(
                 &cwd,
-                &cfg.plugin_skill_dirs,
-            );
-
-            let features = peri_acp::prompt::PromptFeatures::detect();
-            let system_prompt = peri_acp::prompt::build_system_prompt(
-                None,
-                &cwd,
-                features,
-                &cfg.plugin_agent_dirs,
-                Some(&frozen_date),
                 frozen_language.as_deref(),
+                &cfg.plugin_skill_dirs,
+                &cfg.plugin_agent_dirs,
+                &frozen_date,
             );
 
             let state = sessions.get_mut(&session_id).unwrap();
-            state.frozen_system_prompt = Some(system_prompt);
-            state.frozen_claude_md = frozen_claude_md;
-            state.frozen_claude_local_md = frozen_claude_local_md;
-            state.frozen_skill_summary = frozen_skill_summary;
-            state.frozen_date = Some(frozen_date);
-            state.frozen_language = frozen_language;
+            state.frozen = Some(frozen_data);
             info!(session_id = %session_id, "ACP session created with ThreadStore");
             let modes = build_mode_state(&cfg.permission_mode);
             let models = {
@@ -116,7 +102,7 @@ pub(crate) async fn handle_request(
             let config_options = {
                 let c = cfg.peri_config.read();
                 let p = cfg.provider.read();
-                build_config_options(&c, &p, cfg.permission_mode.load())
+                make_config_options(&c, &p, cfg.permission_mode.load())
             };
             let resp = NewSessionResponse::new(SessionId::new(&*session_id))
                 .modes(modes)
@@ -136,14 +122,23 @@ pub(crate) async fn handle_request(
         "session/set_model" => {
             let model_id = params.get("modelId").and_then(|v| v.as_str()).unwrap_or("");
             let session_id = extract_session_id(params, "");
+            {
+                let mut c = cfg.peri_config.write();
+                c.config.active_alias = model_id.to_string();
+            }
             let new_provider = {
-                let cfg = cfg.peri_config.read();
-                LlmProvider::from_config_for_alias(&cfg, model_id)
+                let c = cfg.peri_config.read();
+                LlmProvider::from_config_for_alias(&c, model_id)
             };
             if let Some(new_provider) = new_provider {
                 info!(model_id = %model_id, model = %new_provider.model_name(), "Model changed");
                 *cfg.provider.write() = new_provider;
             }
+            // Model switch → invalidate cached LLM instances (Main Agent + SubAgent)
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.agent_pool.invalidate();
+            }
+            persist_config(cfg);
             let resp = SetSessionModelResponse::new();
             send_config_option_update(transport, session_id, cfg).await;
             serde_json::to_value(resp)
@@ -179,6 +174,10 @@ pub(crate) async fn handle_request(
                     info!(mode = %value, "Permission mode changed via configOption");
                 }
                 "model" => {
+                    {
+                        let mut c = cfg.peri_config.write();
+                        c.config.active_alias = value.to_string();
+                    }
                     let new_provider = {
                         let c = cfg.peri_config.read();
                         LlmProvider::from_config_for_alias(&c, value)
@@ -187,10 +186,25 @@ pub(crate) async fn handle_request(
                         info!(model_id = %value, model = %new_provider.model_name(), "Model changed via configOption");
                         *cfg.provider.write() = new_provider;
                     }
+                    // Model switch → invalidate cached LLM instances
+                    if let Some(s) = sessions.get_mut(session_id) {
+                        s.agent_pool.invalidate();
+                    }
+                    persist_config(cfg);
                 }
                 "thinking_effort" => {
                     apply_thinking_effort(&cfg.peri_config, value);
-                    info!(effort = %value, "Thinking effort changed via configOption");
+                    persist_config(cfg);
+                    info!(effort = %value, "Thinking effort changed via configOption (persisted)");
+                }
+                "context_1m" => {
+                    let enabled = value == "true" || value == "1";
+                    {
+                        let mut c = cfg.peri_config.write();
+                        c.config.context_1m = Some(enabled);
+                    }
+                    persist_config(cfg);
+                    info!(enabled = %enabled, "Context 1M changed via configOption (persisted)");
                 }
                 _ => {
                     debug!(config_id = %config_id, "Unknown config option");
@@ -199,36 +213,7 @@ pub(crate) async fn handle_request(
             let config_options = {
                 let c = cfg.peri_config.read();
                 let p = cfg.provider.read();
-                build_config_options(&c, &p, cfg.permission_mode.load())
-            };
-            let resp = SetSessionConfigOptionResponse::new(config_options);
-            send_config_option_update(transport, session_id, cfg).await;
-            serde_json::to_value(resp)
-                .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
-        }
-
-        "session/set_thinking" => {
-            let effort = params
-                .get("effort")
-                .and_then(|v| v.as_str())
-                .unwrap_or("medium");
-            let enabled = params
-                .get("enabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let session_id = extract_session_id(params, "");
-            apply_thinking_effort(&cfg.peri_config, effort);
-            {
-                let mut cfg_guard = cfg.peri_config.write();
-                if let Some(ref mut thinking) = cfg_guard.config.thinking {
-                    thinking.enabled = enabled;
-                }
-            }
-            info!(effort = %effort, enabled = %enabled, "Thinking config changed");
-            let config_options = {
-                let c = cfg.peri_config.read();
-                let p = cfg.provider.read();
-                build_config_options(&c, &p, cfg.permission_mode.load())
+                make_config_options(&c, &p, cfg.permission_mode.load())
             };
             let resp = SetSessionConfigOptionResponse::new(config_options);
             send_config_option_update(transport, session_id, cfg).await;
@@ -261,16 +246,25 @@ pub(crate) async fn handle_request(
                         cwd: cwd.to_string(),
                         history,
                         cancel_token: None,
-                        frozen_system_prompt: None,
-                        frozen_claude_md: None,
-                        frozen_claude_local_md: None,
-                        frozen_skill_summary: None,
-                        frozen_date: None,
-                        frozen_language: None,
+                        frozen: None,
                         recall_items: Vec::new(),
                         agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
                     },
                 );
+            }
+
+            // ── Freeze session data at load time ──
+            let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let frozen_language = cfg.peri_config.read().config.language.clone();
+            let frozen_data = peri_acp::session::frozen::build_frozen_session_data(
+                cwd,
+                frozen_language.as_deref(),
+                &cfg.plugin_skill_dirs,
+                &cfg.plugin_agent_dirs,
+                &frozen_date,
+            );
+            if let Some(s) = sessions.get_mut(req_session_id) {
+                s.frozen = Some(frozen_data);
             }
 
             let modes = build_mode_state(&cfg.permission_mode);
@@ -282,12 +276,19 @@ pub(crate) async fn handle_request(
             let config_options = {
                 let c = cfg.peri_config.read();
                 let p = cfg.provider.read();
-                build_config_options(&c, &p, cfg.permission_mode.load())
+                make_config_options(&c, &p, cfg.permission_mode.load())
             };
             let resp = LoadSessionResponse::new()
                 .modes(modes)
                 .models(models)
                 .config_options(config_options);
+            // Scan skills for AvailableCommands (same as session/new)
+            let skill_dirs = peri_middlewares::SkillsMiddleware::resolve_dirs_static(
+                cwd,
+                &cfg.plugin_skill_dirs,
+            );
+            let skills = peri_middlewares::skills::list_skills(&skill_dirs);
+            send_available_commands_update(transport, req_session_id, &skills).await;
             serde_json::to_value(resp)
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
@@ -342,18 +343,6 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
-        "session/clear" => {
-            let session_id = extract_session_id(params, "");
-            if let Some(state) = sessions.get_mut(session_id) {
-                state.history.clear();
-                state.history.shrink_to_fit();
-                info!(session_id = %session_id, "Session history cleared");
-            }
-            let resp = serde_json::json!({ "ok": true });
-            serde_json::to_value(resp)
-                .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
-        }
-
         "session/resume" => {
             let req_session_id = params
                 .get("sessionId")
@@ -370,12 +359,7 @@ pub(crate) async fn handle_request(
                         cwd: cwd.to_string(),
                         history: Vec::new(),
                         cancel_token: None,
-                        frozen_system_prompt: None,
-                        frozen_claude_md: None,
-                        frozen_claude_local_md: None,
-                        frozen_skill_summary: None,
-                        frozen_date: None,
-                        frozen_language: None,
+                        frozen: None,
                         recall_items: Vec::new(),
                         agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
                     },
@@ -383,6 +367,20 @@ pub(crate) async fn handle_request(
                 info!(session_id = %req_session_id, "Session resumed (new)");
             } else {
                 info!(session_id = %req_session_id, "Session resumed (existing)");
+            }
+
+            // ── Freeze session data at resume time ──
+            let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let frozen_language = cfg.peri_config.read().config.language.clone();
+            let frozen_data = peri_acp::session::frozen::build_frozen_session_data(
+                cwd,
+                frozen_language.as_deref(),
+                &cfg.plugin_skill_dirs,
+                &cfg.plugin_agent_dirs,
+                &frozen_date,
+            );
+            if let Some(s) = sessions.get_mut(req_session_id) {
+                s.frozen = Some(frozen_data);
             }
 
             let resp = ResumeSessionResponse::new();
@@ -418,16 +416,25 @@ pub(crate) async fn handle_request(
                     cwd: cwd.to_string(),
                     history: copied_history,
                     cancel_token: None,
-                    frozen_system_prompt: None,
-                    frozen_claude_md: None,
-                    frozen_claude_local_md: None,
-                    frozen_skill_summary: None,
-                    frozen_date: None,
-                    frozen_language: None,
+                    frozen: None,
                     recall_items: Vec::new(),
                     agent_pool: peri_acp::session::agent_pool::AgentPool::new(),
                 },
             );
+
+            // ── Freeze session data at fork time ──
+            let frozen_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let frozen_language = cfg.peri_config.read().config.language.clone();
+            let frozen_data = peri_acp::session::frozen::build_frozen_session_data(
+                cwd,
+                frozen_language.as_deref(),
+                &cfg.plugin_skill_dirs,
+                &cfg.plugin_agent_dirs,
+                &frozen_date,
+            );
+            if let Some(s) = sessions.get_mut(&new_session_id) {
+                s.frozen = Some(frozen_data);
+            }
 
             info!(source = %source_id, new = %new_session_id, "Session forked");
             let resp = ForkSessionResponse::new(SessionId::new(new_session_id));
@@ -435,6 +442,56 @@ pub(crate) async fn handle_request(
                 .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
         }
 
+        "session/update_config" => {
+            let session_id = extract_session_id(params, "");
+            let new_cfg: crate::config::PeriConfig =
+                serde_json::from_value(params.get("config").cloned().unwrap_or_default())
+                    .map_err(|e| AcpError::new(-32602, format!("Invalid config: {e}")))?;
+
+            if new_cfg.config.providers.is_empty() {
+                return Err(AcpError::new(-32602, "providers cannot be empty"));
+            }
+            let active_pid = new_cfg.config.active_provider_id.as_str();
+            if !active_pid.is_empty()
+                && !new_cfg.config.providers.iter().any(|p| p.id == active_pid)
+            {
+                return Err(AcpError::new(
+                    -32602,
+                    format!("active_provider_id '{active_pid}' not found"),
+                ));
+            }
+
+            *cfg.peri_config.write() = new_cfg.clone();
+
+            if let Some(p) = LlmProvider::from_config(&new_cfg) {
+                *cfg.provider.write() = p;
+            } else {
+                tracing::warn!(
+                    "update_config: LlmProvider::from_config returned None, provider not updated"
+                );
+            }
+
+            // Model switch → invalidate cached LLM instances (Main Agent + SubAgent)
+            if let Some(s) = sessions.get_mut(session_id) {
+                s.agent_pool.invalidate();
+            }
+
+            persist_config(cfg);
+
+            let config_options = {
+                let c = cfg.peri_config.read();
+                let p = cfg.provider.read();
+                make_config_options(&c, &p, cfg.permission_mode.load())
+            };
+            send_config_option_update(transport, session_id, cfg).await;
+            serde_json::to_value(SetSessionConfigOptionResponse::new(config_options))
+                .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))
+        }
+
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
     }
 }
+
+#[cfg(test)]
+#[path = "requests_test.rs"]
+mod tests;

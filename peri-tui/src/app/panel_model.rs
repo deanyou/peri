@@ -13,7 +13,8 @@ impl App {
 
     /// 关闭 /model 面板（不保存）
     pub fn close_model_panel(&mut self) {
-        self.session_mgr.sessions[self.session_mgr.active]
+        self.session_mgr
+            .current_mut()
             .session_panels
             .close_if(PanelKind::Model);
     }
@@ -23,7 +24,9 @@ impl App {
         let alias_label;
         let effort;
         {
-            let Some(panel) = self.session_mgr.sessions[self.session_mgr.active]
+            let Some(panel) = self
+                .session_mgr
+                .current_mut()
                 .session_panels
                 .get::<ModelPanel>()
             else {
@@ -43,7 +46,8 @@ impl App {
             "max" => "Max",
             _ => "Medium",
         };
-        self.session_mgr.sessions[self.session_mgr.active]
+        self.session_mgr
+            .current_mut()
             .messages
             .push_system_note(self.services.lc.tr_args(
                 "app-model-switched",
@@ -55,7 +59,8 @@ impl App {
         {
             let cfg = self.services.peri_config.as_ref().unwrap();
             if let Err(e) = Self::save_config(cfg, self.services.config_path_override.as_deref()) {
-                self.session_mgr.sessions[self.session_mgr.active]
+                self.session_mgr
+                    .current_mut()
                     .messages
                     .push_system_note(self.services.lc.tr_args(
                         "app-config-save-failed",
@@ -67,19 +72,19 @@ impl App {
                 self.services.model_name = p.model_name().to_string();
             }
         }
-        self.services.sync_peri_config_to_acp();
-        self.session_mgr.sessions[self.session_mgr.active]
+        self.session_mgr
+            .current_mut()
             .session_panels
             .close_if(PanelKind::Model);
 
-        // ACP 模式：同步模型和思考度设置到 ACP server
+        // 通过 ACP 协议同步模型和思考度设置到 Server
         if let Some(ref acp_client) = self.acp_client {
             let acp = acp_client.clone();
             let alias = alias_label.clone().to_lowercase();
             let effort_val = effort.clone();
             tokio::spawn(async move {
-                let _ = acp.set_model(&alias).await;
-                let _ = acp.set_thinking(&effort_val, true).await;
+                let _ = acp.set_config_option("model", &alias).await;
+                let _ = acp.set_config_option("thinking_effort", &effort_val).await;
             });
         }
     }

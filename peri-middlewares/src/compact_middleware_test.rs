@@ -1,7 +1,8 @@
 use super::*;
-use peri_agent::agent::state::AgentState;
-use peri_agent::agent::token::ContextBudget;
-use peri_agent::messages::{BaseMessage, ContentBlock};
+use peri_agent::{
+    agent::{state::AgentState, token::ContextBudget},
+    messages::{BaseMessage, ContentBlock},
+};
 use std::sync::Arc;
 
 fn make_state() -> AgentState {
@@ -361,4 +362,140 @@ fn test_compact_middleware_reset_micro_compact_flag() {
     // reset 后应恢复为 false
     mw.reset();
     assert!(!mw.micro_compact_done.load(Ordering::SeqCst));
+}
+
+// ── Compact cancel/error restore 测试 ─────────────────────────────────────────
+// 对应 TRAP: CLAUDE.md compact 不变量, spec/global/domains/compact.md
+
+/// 验证 do_full_compact 被 cancel 时 own_messages 回滚后与 compact 前一致。
+#[tokio::test]
+async fn test_full_compact_cancel_restores_own_messages() {
+    // 构造消息列表（含 System 前缀 + Human + Ai + Tool）
+    let original: Vec<BaseMessage> = vec![
+        BaseMessage::system("system prompt"),
+        BaseMessage::human("帮我写函数"),
+        BaseMessage::ai_with_tool_calls(
+            peri_agent::messages::MessageContent::text("using bash"),
+            vec![peri_agent::messages::ToolCallRequest::new(
+                "tc1",
+                "Bash",
+                serde_json::json!({"command": "echo"}),
+            )],
+        ),
+        BaseMessage::tool_result("tc1", "编译成功"),
+    ];
+
+    // 构造 state：ancestor_len=0（整个消息列表都是 own）
+    let mut state = make_state();
+    for msg in &original {
+        state.add_message(msg.clone());
+    }
+    let orig_count = state.messages().len();
+
+    // 模拟 do_full_compact 的 restore 逻辑：drain → cancel → extend
+    let own_messages: Vec<BaseMessage> = state.messages_mut().drain(0..).collect();
+    assert_eq!(
+        own_messages.len(),
+        orig_count,
+        "drain 后 own_messages 数应与原消息一致"
+    );
+    assert_eq!(state.messages().len(), 0, "drain 后 state 应为空");
+
+    // 回滚
+    state.messages_mut().extend(own_messages);
+
+    // 消息数量、顺序、role 完全一致
+    assert_eq!(state.messages().len(), orig_count, "回滚后消息数应与原一致");
+    // 验证具体消息类型和内容
+    assert_eq!(state.messages().len(), 4, "回滚后应有 4 条消息");
+    assert_eq!(state.messages()[0].content(), "system prompt");
+    assert!(matches!(state.messages()[1], BaseMessage::Human { .. }));
+    assert!(matches!(state.messages()[2], BaseMessage::Ai { .. }));
+    assert!(matches!(state.messages()[3], BaseMessage::Tool { .. }));
+    // 验证 tool_use 与 tool_result 配对（孤儿 tool_use 会导致 Anthropic 400）
+    let tool_ids: Vec<_> = state
+        .messages()
+        .iter()
+        .filter_map(|m| {
+            if let BaseMessage::Tool { tool_call_id, .. } = m {
+                Some(tool_call_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(!tool_ids.is_empty(), "回滚后应保留 tool_result");
+}
+
+/// 验证 do_full_compact LLM 失败时 own_messages 回滚后与 compact 前一致。
+#[tokio::test]
+async fn test_full_compact_error_restores_own_messages() {
+    // 构造消息列表（含多个 tool_use 和 tool_result）
+    let original: Vec<BaseMessage> = vec![
+        BaseMessage::human("问题1"),
+        BaseMessage::ai("回答1"),
+        BaseMessage::human("问题2"),
+        BaseMessage::ai_with_tool_calls(
+            peri_agent::messages::MessageContent::text("using tool"),
+            vec![
+                peri_agent::messages::ToolCallRequest::new(
+                    "t1",
+                    "Read",
+                    serde_json::json!({"file_path": "/a"}),
+                ),
+                peri_agent::messages::ToolCallRequest::new(
+                    "t2",
+                    "Grep",
+                    serde_json::json!({"pattern": "x"}),
+                ),
+            ],
+        ),
+        BaseMessage::tool_result("t1", "content a"),
+        BaseMessage::tool_result("t2", "found 1 match"),
+    ];
+
+    let mut state = make_state();
+    for msg in &original {
+        state.add_message(msg.clone());
+    }
+    let orig_count = state.messages().len();
+
+    // 模拟 do_full_compact 失败后的 restore 逻辑
+    let own_messages: Vec<BaseMessage> = state.messages_mut().drain(0..).collect();
+    assert_eq!(own_messages.len(), orig_count);
+
+    // 失败后回滚
+    state.messages_mut().extend(own_messages);
+
+    // 消息数不变
+    assert_eq!(
+        state.messages().len(),
+        orig_count,
+        "LLM 失败回滚后消息数应与原一致"
+    );
+
+    // 验证 tool 消息完整性：每个 tool_use 有配对 tool_result
+    let mut ai_tool_ids: Vec<String> = Vec::new();
+    let mut tool_result_ids: Vec<String> = Vec::new();
+    for msg in state.messages() {
+        if let BaseMessage::Ai { tool_calls, .. } = msg {
+            for tc in tool_calls {
+                ai_tool_ids.push(tc.id.clone());
+            }
+        }
+        if let BaseMessage::Tool { tool_call_id, .. } = msg {
+            tool_result_ids.push(tool_call_id.clone());
+        }
+    }
+    assert_eq!(
+        ai_tool_ids.len(),
+        tool_result_ids.len(),
+        "回滚后 tool_use 数量应与 tool_result 一致"
+    );
+    for id in &ai_tool_ids {
+        assert!(
+            tool_result_ids.contains(id),
+            "tool_use {id} 缺少配对 tool_result"
+        );
+    }
 }

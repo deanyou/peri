@@ -4,7 +4,7 @@
 
 # GLM Anthropic 兼容端口 500: tool_result block 缺少 id 属性导致多轮工具调用失败
 
-**状态**：Fixed
+**状态**：Closed（2026-06-06 回归调查后搁置，见 `spec/issues/2026-06-06-glm-anthropic-tool-result-id-500-regression.md`）
 **优先级**：高
 **创建日期**：2026-05-15
 **修复日期**：2026-05-15

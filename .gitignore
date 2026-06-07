@@ -166,6 +166,7 @@ node_modules/
 *.log
 
 process.md
+progress.md
 .claude/autonomy/.lock
 .claude/autonomy/runs.json
 *.db
@@ -180,8 +181,10 @@ vendor/
 
 .claude/skills/*-workspace
 .wrangler.worktrees/
+.worktrees/
 
 .peri
 node_modules
 dist
 settings.json
+.claude/worktrees/

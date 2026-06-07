@@ -68,8 +68,8 @@ fn test_login_panel_enter_edit_fills_buffers() {
     let cfg = make_test_config();
     let mut panel = LoginPanel::from_config(&cfg);
     panel.enter_edit();
-    assert_eq!(panel.buf_opus_model, "claude-opus-4-7");
-    assert_eq!(panel.buf_api_key, "sk-ant-123");
+    assert_eq!(panel.field_opus_model.value(), "claude-opus-4-7");
+    assert_eq!(panel.field_api_key.value(), "sk-ant-123");
     assert_eq!(panel.mode, LoginPanelMode::Edit);
 }
 
@@ -79,9 +79,9 @@ fn test_login_panel_enter_new_auto_fills_openai() {
     let mut panel = LoginPanel::from_config(&cfg);
     panel.enter_new();
     assert_eq!(panel.buf_type, "openai");
-    assert_eq!(panel.buf_opus_model, "gpt-4o");
-    assert_eq!(panel.buf_sonnet_model, "gpt-4o-mini");
-    assert_eq!(panel.buf_haiku_model, "gpt-3.5-turbo");
+    assert_eq!(panel.field_opus_model.value(), "gpt-4o");
+    assert_eq!(panel.field_sonnet_model.value(), "gpt-4o-mini");
+    assert_eq!(panel.field_haiku_model.value(), "gpt-3.5-turbo");
 }
 
 #[test]
@@ -93,9 +93,9 @@ fn test_login_panel_cycle_type_auto_fills_anthropic() {
     panel.edit_field = LoginEditField::Type;
     panel.cycle_type();
     assert_eq!(panel.buf_type, "anthropic");
-    assert_eq!(panel.buf_opus_model, "claude-opus-4-7");
-    assert_eq!(panel.buf_sonnet_model, "claude-sonnet-4-6");
-    assert_eq!(panel.buf_haiku_model, "claude-haiku-4-5");
+    assert_eq!(panel.field_opus_model.value(), "claude-opus-4-7");
+    assert_eq!(panel.field_sonnet_model.value(), "claude-sonnet-4-6");
+    assert_eq!(panel.field_haiku_model.value(), "claude-haiku-4-5");
 }
 
 #[test]
@@ -103,10 +103,10 @@ fn test_login_panel_cycle_type_preserves_custom_model() {
     let cfg = make_test_config();
     let mut panel = LoginPanel::from_config(&cfg);
     panel.enter_new();
-    panel.buf_opus_model = "my-custom-model".to_string();
+    panel.field_opus_model.set_value("my-custom-model");
     panel.edit_field = LoginEditField::Type;
     panel.cycle_type();
-    assert_eq!(panel.buf_opus_model, "my-custom-model");
+    assert_eq!(panel.field_opus_model.value(), "my-custom-model");
 }
 
 #[test]
@@ -133,45 +133,32 @@ fn test_login_panel_field_navigation() {
 
 #[test]
 fn test_login_panel_push_pop_char() {
-    use crate::app::handle_edit_key;
     use tui_textarea::{Input, Key};
     let mut panel = LoginPanel::from_config(&PeriConfig::default());
     panel.edit_field = LoginEditField::OpusModel;
-    let (buf, cur) = panel.active_field().unwrap();
-    handle_edit_key(
-        buf,
-        cur,
-        Input {
-            key: Key::Char('x'),
-            ctrl: false,
-            alt: false,
-            shift: false,
-        },
-    );
-    let (buf, cur) = panel.active_field().unwrap();
-    handle_edit_key(
-        buf,
-        cur,
-        Input {
-            key: Key::Char('x'),
-            ctrl: false,
-            alt: false,
-            shift: false,
-        },
-    );
-    assert_eq!(panel.buf_opus_model, "xx");
-    let (buf, cur) = panel.active_field().unwrap();
-    handle_edit_key(
-        buf,
-        cur,
-        Input {
-            key: Key::Backspace,
-            ctrl: false,
-            alt: false,
-            shift: false,
-        },
-    );
-    assert_eq!(panel.buf_opus_model, "x");
+    let field = panel.active_field().unwrap();
+    field.input(Input {
+        key: Key::Char('x'),
+        ctrl: false,
+        alt: false,
+        shift: false,
+    });
+    let field = panel.active_field().unwrap();
+    field.input(Input {
+        key: Key::Char('x'),
+        ctrl: false,
+        alt: false,
+        shift: false,
+    });
+    assert_eq!(panel.field_opus_model.value(), "xx");
+    let field = panel.active_field().unwrap();
+    field.input(Input {
+        key: Key::Backspace,
+        ctrl: false,
+        alt: false,
+        shift: false,
+    });
+    assert_eq!(panel.field_opus_model.value(), "x");
 }
 
 #[test]
@@ -188,7 +175,7 @@ fn test_login_panel_paste_text_filters_newlines() {
     let mut panel = LoginPanel::from_config(&PeriConfig::default());
     panel.edit_field = LoginEditField::ApiKey;
     panel.paste_text("key\nval\r\nend");
-    assert_eq!(panel.buf_api_key, "keyvalend");
+    assert_eq!(panel.field_api_key.value(), "keyvalend");
 }
 
 #[test]
@@ -205,11 +192,11 @@ fn test_login_panel_apply_edit_new_provider() {
     let mut cfg = PeriConfig::default();
     let mut panel = LoginPanel::from_config(&cfg);
     panel.enter_new();
-    panel.buf_name = "My Provider".to_string();
-    panel.buf_api_key = "sk-123".to_string();
-    panel.buf_opus_model = "gpt-4o".to_string();
-    panel.buf_sonnet_model = "gpt-4o-mini".to_string();
-    panel.buf_haiku_model = "gpt-3.5-turbo".to_string();
+    panel.field_name.set_value("My Provider");
+    panel.field_api_key.set_value("sk-123");
+    panel.field_opus_model.set_value("gpt-4o");
+    panel.field_sonnet_model.set_value("gpt-4o-mini");
+    panel.field_haiku_model.set_value("gpt-3.5-turbo");
     let ok = panel.apply_edit(&mut cfg);
     assert!(ok);
     assert_eq!(cfg.config.providers.len(), 1);
@@ -221,8 +208,8 @@ fn test_login_panel_apply_edit_new_provider_sets_active_id_when_empty() {
     let mut cfg = PeriConfig::default();
     let mut panel = LoginPanel::from_config(&cfg);
     panel.enter_new();
-    panel.buf_name = "Test".to_string();
-    panel.buf_api_key = "key".to_string();
+    panel.field_name.set_value("Test");
+    panel.field_api_key.set_value("key");
     panel.apply_edit(&mut cfg);
     assert_eq!(cfg.config.active_provider_id, "test");
 }
@@ -232,7 +219,7 @@ fn test_login_panel_apply_edit_existing_provider() {
     let mut cfg = make_test_config();
     let mut panel = LoginPanel::from_config(&cfg);
     panel.enter_edit();
-    panel.buf_api_key = "new-key".to_string();
+    panel.field_api_key.set_value("new-key");
     let ok = panel.apply_edit(&mut cfg);
     assert!(ok);
     assert_eq!(cfg.config.providers[0].api_key, "new-key");
@@ -243,7 +230,7 @@ fn test_login_panel_apply_edit_empty_name_returns_false() {
     let mut cfg = PeriConfig::default();
     let mut panel = LoginPanel::from_config(&cfg);
     panel.enter_new();
-    panel.buf_name = String::new();
+    panel.field_name.clear();
     let ok = panel.apply_edit(&mut cfg);
     assert!(!ok);
 }

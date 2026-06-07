@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 /// MCP 服务器配置来源
@@ -148,8 +150,10 @@ pub(crate) fn load_global_config(
 
 /// 基于 command+args+env 计算服务器配置的内容 hash，用于去重
 pub(crate) fn server_config_hash(cfg: &McpServerConfig) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
 
     let mut hasher = DefaultHasher::new();
     if let Some(cmd) = &cfg.command {
@@ -311,11 +315,20 @@ pub(crate) fn load_merged_config_full(
             let mut cfg = config.clone();
             cfg.source = Some(ConfigSource::Plugin);
             // 每插件独立上下文展开：在合并之前即完成 env 变量替换
-            let expanded_cfg = expand_server_config_with_context(
+            let mut expanded_cfg = expand_server_config_with_context(
                 &cfg,
                 Some(&plugin.install_path),
                 Some(&plugin.data_path),
                 None,
+            );
+            let env = expanded_cfg.env.get_or_insert_with(HashMap::new);
+            env.insert(
+                "CLAUDE_PLUGIN_ROOT".to_string(),
+                plugin.install_path.to_string_lossy().to_string(),
+            );
+            env.insert(
+                "CLAUDE_PLUGIN_DATA".to_string(),
+                plugin.data_path.to_string_lossy().to_string(),
             );
             plugin_servers.insert(namespaced.clone(), expanded_cfg);
 

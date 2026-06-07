@@ -2,8 +2,7 @@
     fn test_oauth_prompt_new() {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let prompt = OAuthPrompt::new("test-server".into(), "http://example.com/auth".into(), tx);
-        assert!(prompt.input.is_empty());
-        assert_eq!(prompt.cursor, 0);
+        assert!(prompt.field.is_empty());
         assert!(prompt.error_message.is_none());
         assert_eq!(prompt.server_name, "test-server");
     }
@@ -12,7 +11,7 @@
     fn test_oauth_prompt_submit_valid_url() {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut prompt = OAuthPrompt::new("srv".into(), "http://auth.example.com".into(), tx);
-        prompt.input = "http://localhost:12345/callback?code=abc&state=xyz".to_string();
+        prompt.field.set_value("http://localhost:12345/callback?code=abc&state=xyz");
         assert!(prompt.submit());
         let result = rx.blocking_recv().unwrap();
         assert_eq!(result.code, "abc");
@@ -23,7 +22,7 @@
     fn test_oauth_prompt_submit_full_url() {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut prompt = OAuthPrompt::new("srv".into(), "http://auth.example.com".into(), tx);
-        prompt.input = "http://localhost:9999/callback?code=test_code&state=test_state".to_string();
+        prompt.field.set_value("http://localhost:9999/callback?code=test_code&state=test_state");
         assert!(prompt.submit());
         let result = rx.blocking_recv().unwrap();
         assert_eq!(result.code, "test_code");
@@ -34,7 +33,7 @@
     fn test_oauth_prompt_submit_invalid_url() {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let mut prompt = OAuthPrompt::new("srv".into(), "http://auth.example.com".into(), tx);
-        prompt.input = "not a valid url".to_string();
+        prompt.field.set_value("not a valid url");
         assert!(!prompt.submit());
         assert!(prompt.error_message.is_some());
     }
@@ -43,7 +42,7 @@
     fn test_oauth_prompt_submit_empty() {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let mut prompt = OAuthPrompt::new("srv".into(), "http://auth.example.com".into(), tx);
-        prompt.input = String::new();
+        prompt.field.clear();
         assert!(!prompt.submit());
         assert!(prompt.error_message.is_some());
     }

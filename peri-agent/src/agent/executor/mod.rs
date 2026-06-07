@@ -8,15 +8,17 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 
-use crate::agent::events::{AgentEvent, AgentEventHandler, BackgroundTaskResult};
-use crate::agent::react::{AgentInput, AgentOutput, ReactLLM, ToolCall, ToolResult};
-use crate::agent::state::State;
-use crate::error::{AgentError, AgentResult};
-use crate::messages::message::MessageId;
-use crate::messages::BaseMessage;
-use crate::middleware::chain::MiddlewareChain;
-use crate::middleware::r#trait::Middleware;
-use crate::tools::BaseTool;
+use crate::{
+    agent::{
+        events::{AgentEvent, AgentEventHandler, BackgroundTaskResult},
+        react::{AgentInput, AgentOutput, ReactLLM, ToolCall, ToolResult},
+        state::State,
+    },
+    error::{AgentError, AgentResult},
+    messages::{message::MessageId, BaseMessage},
+    middleware::{chain::MiddlewareChain, r#trait::Middleware},
+    tools::BaseTool,
+};
 use std::collections::HashMap;
 
 pub use tokio_util::sync::CancellationToken as AgentCancellationToken;
@@ -141,7 +143,7 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
 
     /// 设置 micro_compact 配置
     ///
-    /// 启用后，ReAct 循环在每次工具调用完��后检查上下文用量，
+    /// 启用后，ReAct 循环在每次工具调用完成后检查上下文用量，
     /// 超过 warning 阈值时自动执行 micro_compact（压缩旧工具结果）。
     pub fn with_compact_config(mut self, config: crate::agent::compact::CompactConfig) -> Self {
         self.compact_config = Some(config);
@@ -273,28 +275,58 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
             .map(|m| m.id())
             .collect();
 
+        // try_break! — 替换 ? 传播，将错误捕获到 loop_error 中并在循环后统一处理。
+        // 这确保 cleanup_prepended 无论成功/失败/循环耗尽都会执行，
+        // 防止 before_agent + with_system_prompt 注入的 system 消息泄漏到 state。
+        macro_rules! try_break {
+            ($expr:expr, $err:ident) => {
+                match $expr {
+                    Ok(v) => v,
+                    Err(e) => {
+                        $err = Some(e);
+                        break;
+                    }
+                }
+            };
+        }
+
         let mut all_tool_calls: Vec<(ToolCall, ToolResult)> = Vec::new();
         let mut final_result: Option<AgentOutput> = None;
+        let mut consecutive_failures: HashMap<String, usize> = HashMap::new();
+        let mut loop_error: Option<AgentError> = None;
 
         for step in 0..self.max_iterations {
             state.set_current_step(step);
 
             // 钩子: before_model — LLM 调用前（compact 检查点）
-            self.chain.run_before_model(state).await?;
+            state.set_current_step(step);
 
-            // LLM 推理
-            let reasoning =
-                self::llm_step::call_llm(self, state, &tool_refs, step, &cancel).await?;
+            try_break!(self.chain.run_before_model(state).await, loop_error);
 
-            // 钩子: after_model — LLM 调用后（响应后处理）
-            self.chain.run_after_model(state, &reasoning).await?;
+            let reasoning = try_break!(
+                self::llm_step::call_llm(self, state, &tool_refs, step, &cancel).await,
+                loop_error
+            );
+
+            try_break!(
+                self.chain.run_after_model(state, &reasoning).await,
+                loop_error
+            );
 
             if reasoning.needs_tool_call() {
                 // 工具分发
-                let step_calls = self::tool_dispatch::dispatch_tools(
-                    self, state, &reasoning, &all_tools, &cancel,
-                )
-                .await?;
+                let step_calls = try_break!(
+                    self::tool_dispatch::dispatch_tools(
+                        self,
+                        state,
+                        &reasoning,
+                        &all_tools,
+                        &cancel,
+                        &mut consecutive_failures,
+                    )
+                    .await,
+                    loop_error
+                );
                 all_tool_calls.extend(step_calls);
 
                 // StateSnapshot + 通知消费
@@ -308,15 +340,18 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
                 // compact 已由 CompactMiddleware（before_model 钩子）在 call_llm 前处理
             } else {
                 // 最终回答（clone all_tool_calls 避免移动，MaxIterationsExceeded 路径仍需借用）
-                let output = self::final_answer::handle_final_answer(
-                    self,
-                    state,
-                    &reasoning,
-                    all_tool_calls.clone(),
-                    &mut snapshot_anchor,
-                    step,
-                )
-                .await?;
+                let output = try_break!(
+                    self::final_answer::handle_final_answer(
+                        self,
+                        state,
+                        &reasoning,
+                        all_tool_calls.clone(),
+                        &mut snapshot_anchor,
+                        step,
+                    )
+                    .await,
+                    loop_error
+                );
                 final_result = Some(output);
                 break;
             }
@@ -324,8 +359,15 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
 
         // 清理临时 prepend 的 system 消息（before_agent + with_system_prompt 注入）
         // compact 可能已替换所有消息（此时 prepended_ids 中的 ID 不存在，retain 无操作）
-        // 未发生 compact 时，移除 prepend 的 system 消息防止累积到 history
+        // 未发生 compact 时，移除 prepend 的 system 消息防止累积到 history。
+        // try_break! 确保无论循环正常退出、break（最终回答）、还是 break（错误捕获），
+        // cleanup 始终执行。
         Self::cleanup_prepended(state, &prepended_ids);
+
+        // 传播循环内 try_break! 捕获的错误
+        if let Some(e) = loop_error {
+            return Err(e);
+        }
 
         if let Some(output) = final_result {
             return Ok(output);
@@ -334,10 +376,6 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
         // MaxIterationsExceeded 路径：循环自然耗尽，all_tool_calls 未被 move
         {
             // 安全网快照：仅覆盖 MaxIterationsExceeded 路径（循环自然耗尽）。
-            // 正常路径（handle_final_answer）已在内部补全所有快照，此处为空操作。
-            // 注意：call_llm/dispatch_tools 的 ? 传播会跳过此处，但这些路径中
-            // call_llm 不向 state 添加消息，dispatch_tools 的 Interrupted 路径
-            // 产生的工具结果会被 TUI 的 Interrupted handler 截断丢弃，无需额外快照。
             let safety_start =
                 self::final_answer::index_after_id(state.messages(), snapshot_anchor);
             let safety_msgs: Vec<BaseMessage> = state.messages()[safety_start..]
@@ -356,6 +394,15 @@ impl<L: ReactLLM, S: State> ReActAgent<L, S> {
                     .map(|(_, r)| r.tool_name.as_str())
                     .collect::<Vec<_>>(),
                 "ReAct 循环达到最大迭代次数"
+            );
+            crate::metrics::emit(
+                "threshold.llm_calls_exceeded",
+                serde_json::json!({
+                    "count": self.max_iterations,
+                    "limit": self.max_iterations,
+                }),
+                state.get_context("session_id"),
+                state.get_context("run_id"),
             );
             return Err(AgentError::MaxIterationsExceeded(self.max_iterations));
         }

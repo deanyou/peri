@@ -8,12 +8,15 @@ use ratatui::{
 
 use peri_widgets::{BorderedPanel, ScrollState, ScrollableArea};
 
-use crate::app::plugin_panel::{PluginPanel, PluginPanelView};
-use crate::app::App;
-use crate::ui::theme;
+use crate::{
+    app::{
+        plugin_panel::{PluginPanel, PluginPanelView},
+        App,
+    },
+    ui::theme,
+};
 
-use super::discover_search::render_discover_search_box;
-use super::truncate_display;
+use super::{discover_search::render_discover_search_box, truncate_display};
 
 /// Tab 行占用的固定高度（Tab 行 + 空行）
 pub(crate) const DISCOVER_TAB_OVERHEAD: u16 = 2;
@@ -217,22 +220,15 @@ pub(crate) fn render_discover_list(f: &mut Frame, panel: &PluginPanel, app: &mut
         p.discover_list.set_scroll_offset(scroll_state.offset());
     }
 
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_area = Some(inner);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_scroll_offset = 0;
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_plain_lines = lines
+    app.session_mgr.current_mut().ui.panel_area = Some(inner);
+    app.session_mgr.current_mut().ui.panel_scroll_offset = 0;
+    app.session_mgr.current_mut().ui.panel_plain_lines = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
 
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_scrollbar_metrics = ScrollableArea::new(Text::from(lines))
-        .scrollbar_style(Style::default().fg(theme::MUTED))
-        .render(f, list_area, &mut scroll_state);
+    app.session_mgr.current_mut().ui.panel_scrollbar_metrics =
+        ScrollableArea::new(Text::from(lines))
+            .scrollbar_style(Style::default().fg(theme::MUTED))
+            .render(f, list_area, &mut scroll_state);
 }

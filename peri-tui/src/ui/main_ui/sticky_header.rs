@@ -6,8 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
-use crate::ui::theme;
+use crate::{app::App, ui::theme};
 
 /// 浅色背景色（不影响整体终端背景，只在文字区域可见）
 const HEADER_BG: ratatui::style::Color = theme::USER_BG;
@@ -18,10 +17,7 @@ pub fn render_sticky_header(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let msg = match &app.session_mgr.sessions[app.session_mgr.active]
-        .metadata
-        .last_human_message
-    {
+    let msg = match &app.session_mgr.current().metadata.last_human_message {
         Some(m) => m,
         None => return,
     };

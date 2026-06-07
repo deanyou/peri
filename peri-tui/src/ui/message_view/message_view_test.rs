@@ -163,7 +163,7 @@ fn test_tool_color_new_names() {
 
 /// 创建一个已完成的单 agent SubAgentGroup VM
 fn make_done_subagent(agent_id: &str, task: &str) -> MessageViewModel {
-    MessageViewModel::SubAgentGroup {
+    let mut vm = MessageViewModel::SubAgentGroup {
         agent_id: agent_id.to_string(),
         task_preview: task.to_string(),
         total_steps: 3,
@@ -176,12 +176,15 @@ fn make_done_subagent(agent_id: &str, task: &str) -> MessageViewModel {
         bg_hash: Some("test01".to_string()),
         batch_agents: Vec::new(),
         instance_id: None,
-    }
+        content_hash: 0,
+    };
+    vm.recompute_hash();
+    vm
 }
 
 /// 创建一个运行中的 SubAgentGroup VM
 fn make_running_subagent(agent_id: &str, task: &str) -> MessageViewModel {
-    MessageViewModel::SubAgentGroup {
+    let mut vm = MessageViewModel::SubAgentGroup {
         agent_id: agent_id.to_string(),
         task_preview: task.to_string(),
         total_steps: 0,
@@ -194,7 +197,10 @@ fn make_running_subagent(agent_id: &str, task: &str) -> MessageViewModel {
         bg_hash: Some("test02".to_string()),
         batch_agents: Vec::new(),
         instance_id: None,
-    }
+        content_hash: 0,
+    };
+    vm.recompute_hash();
+    vm
 }
 
 #[test]
@@ -285,7 +291,7 @@ fn test_aggregate_batch_groups_mixed_batch() {
 #[test]
 fn test_aggregate_batch_groups_already_aggregated_skip() {
     // 已聚合的 SubAgentGroup（batch_agents 非空）不参与二次聚合
-    let aggregated = MessageViewModel::SubAgentGroup {
+    let mut aggregated = MessageViewModel::SubAgentGroup {
         agent_id: "agent-1".to_string(),
         task_preview: "task one".to_string(),
         total_steps: 3,
@@ -313,7 +319,9 @@ fn test_aggregate_batch_groups_already_aggregated_skip() {
             },
         ],
         instance_id: None,
+        content_hash: 0,
     };
+    aggregated.recompute_hash();
     let mut vms = vec![aggregated.clone()];
     aggregate_batch_groups(&mut vms);
     assert_eq!(vms.len(), 1, "已聚合的不应二次聚合");
@@ -357,4 +365,156 @@ fn test_batch_group_default_collapsed() {
     } else {
         panic!("应为 SubAgentGroup");
     }
+}
+
+// ── content_hash 测试 ──
+
+#[test]
+fn test_content_hash_user_bubble_consistent() {
+    let vm1 = MessageViewModel::user("Hello".to_string());
+    let vm2 = MessageViewModel::user("Hello".to_string());
+    assert_eq!(
+        vm1.content_hash(),
+        vm2.content_hash(),
+        "相同内容的 hash 应一致"
+    );
+}
+
+#[test]
+fn test_content_hash_user_bubble_different() {
+    let vm1 = MessageViewModel::user("Hello".to_string());
+    let vm2 = MessageViewModel::user("World".to_string());
+    assert_ne!(
+        vm1.content_hash(),
+        vm2.content_hash(),
+        "不同内容的 hash 应不同"
+    );
+}
+
+#[test]
+fn test_content_hash_system_note() {
+    let vm = MessageViewModel::system("test note".to_string());
+    assert_ne!(vm.content_hash(), 0, "hash 不应为 0（几乎不可能碰撞）");
+}
+
+#[test]
+fn test_content_hash_matches_compute_hash() {
+    // 验证 content_hash 与 RenderTask::compute_hash 结果一致
+    let vm = MessageViewModel::user("test content".to_string());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    vm.hash(&mut hasher);
+    let expected = hasher.finish();
+    assert_eq!(
+        vm.content_hash(),
+        expected,
+        "content_hash 应与手动 compute_hash 一致"
+    );
+}
+
+#[test]
+fn test_content_hash_assistant_bubble_changes_on_append() {
+    let mut vm = MessageViewModel::assistant();
+    let hash1 = vm.content_hash();
+    vm.append_chunk("new text");
+    // append_chunk 内部会 recompute_hash
+    assert_ne!(vm.content_hash(), hash1, "append_chunk 后 hash 应变化");
+}
+
+#[test]
+fn test_content_hash_assistant_bubble_changes_on_streaming() {
+    let mut vm = MessageViewModel::assistant();
+    let hash_streaming = vm.content_hash();
+    // 模拟 is_streaming 变化
+    if let MessageViewModel::AssistantBubble { is_streaming, .. } = &mut vm {
+        *is_streaming = false;
+    }
+    vm.recompute_hash();
+    assert_ne!(
+        vm.content_hash(),
+        hash_streaming,
+        "is_streaming 变化后 hash 应不同"
+    );
+}
+
+#[test]
+fn test_content_hash_subagent_group() {
+    let vm = MessageViewModel::subagent_group("explorer".to_string(), "explore".to_string());
+    assert_ne!(vm.content_hash(), 0);
+}
+
+#[test]
+fn test_content_hash_cache_warning() {
+    let vm = MessageViewModel::cache_warning("low cache".to_string());
+    assert_ne!(vm.content_hash(), 0);
+}
+
+#[test]
+fn test_recompute_hash_idempotent() {
+    let mut vm = MessageViewModel::user("stable".to_string());
+    let h1 = vm.content_hash();
+    vm.recompute_hash();
+    let h2 = vm.content_hash();
+    assert_eq!(h1, h2, "未修改内容时 recompute_hash 应幂等");
+}
+
+#[test]
+fn test_human_message_with_system_reminder_detection() {
+    let text = "<system-reminder>\n此会话从之前的对话延续。\n## Summary\nDone.\n[上下文已压缩，请根据摘要继续工作]\n</system-reminder>";
+    let msg = BaseMessage::human(text);
+    let vm = MessageViewModel::from_base_message(&msg, &[]);
+    match vm {
+        MessageViewModel::UserBubble {
+            system_reminder,
+            content,
+            ..
+        } => {
+            assert!(system_reminder, "应识别为系统提醒");
+            assert!(
+                !content.contains("<system-reminder>"),
+                "标签应被剥离: {}",
+                content
+            );
+            assert!(!content.contains("</system-reminder>"), "结束标签应被剥离");
+            assert!(content.contains("## Summary"), "正文应保留");
+            assert!(content.contains("[上下文已压缩"), "续接指令应保留");
+        }
+        _ => panic!("应为 UserBubble"),
+    }
+}
+
+#[test]
+fn test_human_message_without_system_reminder() {
+    let text = "普通用户消息";
+    let msg = BaseMessage::human(text);
+    let vm = MessageViewModel::from_base_message(&msg, &[]);
+    match vm {
+        MessageViewModel::UserBubble {
+            system_reminder, ..
+        } => {
+            assert!(!system_reminder, "普通消息不应标记为系统提醒");
+        }
+        _ => panic!("应为 UserBubble"),
+    }
+}
+
+#[test]
+fn test_system_reminder_partial_eq_different() {
+    let msg1 = BaseMessage::human("普通消息");
+    let msg2 = BaseMessage::human("<system-reminder>\n压缩摘要\n</system-reminder>");
+    let vm1 = MessageViewModel::from_base_message(&msg1, &[]);
+    let vm2 = MessageViewModel::from_base_message(&msg2, &[]);
+    assert_ne!(vm1, vm2, "系统提醒消息和普通消息不应相等");
+}
+
+#[test]
+fn test_system_reminder_content_hash_different() {
+    let msg1 = BaseMessage::human("普通消息");
+    let msg2 = BaseMessage::human("<system-reminder>\n压缩摘要\n</system-reminder>");
+    let vm1 = MessageViewModel::from_base_message(&msg1, &[]);
+    let vm2 = MessageViewModel::from_base_message(&msg2, &[]);
+    assert_ne!(
+        vm1.content_hash(),
+        vm2.content_hash(),
+        "content_hash 应不同"
+    );
 }

@@ -8,12 +8,17 @@ use ratatui::{
 
 use peri_widgets::BorderedPanel;
 
-use crate::app::config_panel::{
-    ConfigPanel, ROW_AUTOCOMPACT, ROW_COUNT, ROW_DIFF, ROW_GENERAL_HEADER, ROW_LANGUAGE,
-    ROW_OVERRIDES_HEADER, ROW_PERSONA, ROW_PROACTIVENESS, ROW_SEPARATOR, ROW_THRESHOLD, ROW_TONE,
+use crate::{
+    app::{
+        config_panel::{
+            ConfigPanel, ROW_AUTOCOMPACT, ROW_COUNT, ROW_DIFF, ROW_GENERAL_HEADER, ROW_LANGUAGE,
+            ROW_OVERRIDES_HEADER, ROW_PERSONA, ROW_PROACTIVENESS, ROW_SEPARATOR, ROW_STREAMING,
+            ROW_THRESHOLD, ROW_TONE,
+        },
+        App,
+    },
+    ui::theme,
 };
-use crate::app::App;
-use crate::ui::theme;
 
 /// 行号 → i18n 字段标签键
 fn field_label_key(row: usize) -> &'static str {
@@ -22,6 +27,7 @@ fn field_label_key(row: usize) -> &'static str {
         ROW_THRESHOLD => "config-field-compact-threshold",
         ROW_LANGUAGE => "config-field-language",
         ROW_DIFF => "config-field-diff",
+        ROW_STREAMING => "config-field-streaming",
         ROW_PERSONA => "config-field-persona",
         ROW_TONE => "config-field-tone",
         ROW_PROACTIVENESS => "config-field-proactiveness",
@@ -39,7 +45,12 @@ fn lang_display(code: &str) -> &str {
 }
 
 /// /config 面板渲染（单一直接编辑模式）
-pub(crate) fn render_config_panel(f: &mut Frame, panel: &ConfigPanel, app: &mut App, area: Rect) {
+pub(crate) fn render_config_panel(
+    f: &mut Frame,
+    panel: &mut ConfigPanel,
+    app: &mut App,
+    area: Rect,
+) {
     let lc = &app.services.lc;
 
     let title = lc.tr("config-panel-title");
@@ -53,11 +64,10 @@ pub(crate) fn render_config_panel(f: &mut Frame, panel: &ConfigPanel, app: &mut 
     .border_style(Style::default().fg(theme::BORDER))
     .render(f, area);
 
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_area = Some(inner);
+    app.session_mgr.current_mut().ui.panel_area = Some(inner);
 
     let mut lines: Vec<Line> = Vec::new();
+    let mut active_textarea_overlay: Option<u16> = None;
 
     for row in 0..ROW_COUNT {
         match row {
@@ -106,11 +116,11 @@ pub(crate) fn render_config_panel(f: &mut Frame, panel: &ConfigPanel, app: &mut 
                     on_span,
                     Span::styled("  ", Style::default()),
                     off_span,
-                    Span::styled(
-                        format!("  {}", lc.tr("config-desc-autocompact")),
-                        desc_style,
-                    ),
                 ]));
+                lines.push(Line::from(Span::styled(
+                    format!("      {}", lc.tr("config-desc-autocompact")),
+                    desc_style,
+                )));
             }
             ROW_LANGUAGE => {
                 let is_active = panel.cursor == row;
@@ -136,17 +146,16 @@ pub(crate) fn render_config_panel(f: &mut Frame, panel: &ConfigPanel, app: &mut 
                         value_spans.push(Span::styled("  ", Style::default()));
                     }
                 }
-                value_spans.push(Span::styled(
-                    format!("  {}", lc.tr("config-desc-language")),
-                    desc_style,
-                ));
-
                 let mut line_spans = vec![
                     Span::styled("  ", Style::default()),
                     Span::styled(format!("{:<14}", lc.tr(field_label_key(row))), label_style),
                 ];
                 line_spans.extend(value_spans);
                 lines.push(Line::from(line_spans));
+                lines.push(Line::from(Span::styled(
+                    format!("      {}", lc.tr("config-desc-language")),
+                    desc_style,
+                )));
             }
             ROW_DIFF => {
                 let is_active = panel.cursor == row;
@@ -174,8 +183,43 @@ pub(crate) fn render_config_panel(f: &mut Frame, panel: &ConfigPanel, app: &mut 
                     on_span,
                     Span::styled("  ", Style::default()),
                     off_span,
-                    Span::styled(format!("  {}", lc.tr("config-desc-diff")), desc_style),
                 ]));
+                lines.push(Line::from(Span::styled(
+                    format!("      {}", lc.tr("config-desc-diff")),
+                    desc_style,
+                )));
+            }
+            ROW_STREAMING => {
+                let is_active = panel.cursor == row;
+                let label_style = active_or_text(is_active);
+                let active_style = Style::default()
+                    .fg(theme::THINKING)
+                    .add_modifier(Modifier::BOLD);
+                let inactive_style = Style::default().fg(theme::MUTED);
+                let desc_style = Style::default().fg(theme::MUTED);
+
+                let vals = ["streaming", "block", "none"];
+                let mut value_spans: Vec<Span> = Vec::new();
+                for (i, v) in vals.iter().enumerate() {
+                    if *v == panel.buf_streaming.as_str() {
+                        value_spans.push(Span::styled(format!("[{}]", v), active_style));
+                    } else {
+                        value_spans.push(Span::styled(v.to_string(), inactive_style));
+                    }
+                    if i < vals.len() - 1 {
+                        value_spans.push(Span::styled("  ", Style::default()));
+                    }
+                }
+                let mut line_spans = vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(format!("{:<14}", lc.tr(field_label_key(row))), label_style),
+                ];
+                line_spans.extend(value_spans);
+                lines.push(Line::from(line_spans));
+                lines.push(Line::from(Span::styled(
+                    format!("      {}", lc.tr("config-desc-streaming")),
+                    desc_style,
+                )));
             }
             ROW_PROACTIVENESS => {
                 let is_active = panel.cursor == row;
@@ -198,17 +242,16 @@ pub(crate) fn render_config_panel(f: &mut Frame, panel: &ConfigPanel, app: &mut 
                         value_spans.push(Span::styled("  ", Style::default()));
                     }
                 }
-                value_spans.push(Span::styled(
-                    format!("  {}", lc.tr("config-desc-proactiveness")),
-                    desc_style,
-                ));
-
                 let mut line_spans = vec![
                     Span::styled("  ", Style::default()),
                     Span::styled(format!("{:<14}", lc.tr(field_label_key(row))), label_style),
                 ];
                 line_spans.extend(value_spans);
                 lines.push(Line::from(line_spans));
+                lines.push(Line::from(Span::styled(
+                    format!("      {}", lc.tr("config-desc-proactiveness")),
+                    desc_style,
+                )));
             }
             ROW_THRESHOLD | ROW_PERSONA | ROW_TONE => {
                 let is_active = panel.cursor == row;
@@ -219,36 +262,39 @@ pub(crate) fn render_config_panel(f: &mut Frame, panel: &ConfigPanel, app: &mut 
                     _ => "",
                 };
 
-                let (buf, cursor) = match row {
-                    ROW_THRESHOLD => (&panel.buf_threshold, panel.cur_threshold),
-                    ROW_PERSONA => (&panel.buf_persona, panel.cur_persona),
-                    ROW_TONE => (&panel.buf_tone, panel.cur_tone),
+                let field = match row {
+                    ROW_THRESHOLD => &panel.field_threshold,
+                    ROW_PERSONA => &panel.field_persona,
+                    ROW_TONE => &panel.field_tone,
                     _ => unreachable!(),
                 };
 
                 let label_style = active_or_text(is_active);
-                let value_style = if is_active {
-                    Style::default().fg(theme::THINKING)
-                } else {
-                    Style::default().fg(theme::TEXT)
-                };
+                let value_style = Style::default().fg(theme::TEXT);
                 let desc_style = Style::default().fg(theme::MUTED);
 
-                let value_display = if is_active {
-                    let (before, after) = crate::app::edit_display_parts(buf, cursor);
-                    format!("{}█{}", before, after)
-                } else if buf.is_empty() {
+                let value_display = if !is_active && field.is_empty() {
                     "-".to_string()
                 } else {
-                    buf.to_string()
+                    field.value()
                 };
 
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
                     Span::styled(format!("{:<14}", lc.tr(field_label_key(row))), label_style),
+                    Span::styled(" ", Style::default()),
                     Span::styled(value_display, value_style),
-                    Span::styled(format!("  {}", lc.tr(desc_key)), desc_style),
                 ]));
+
+                // 记录活跃 textarea 的行索引，用于 overlay 渲染
+                if is_active {
+                    active_textarea_overlay = Some(lines.len() as u16 - 1);
+                }
+
+                lines.push(Line::from(Span::styled(
+                    format!("      {}", lc.tr(desc_key)),
+                    desc_style,
+                )));
             }
             _ => {}
         }
@@ -256,6 +302,24 @@ pub(crate) fn render_config_panel(f: &mut Frame, panel: &ConfigPanel, app: &mut 
 
     lines.truncate(inner.height as usize);
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
+
+    // overlay 活跃 textarea
+    if let Some(line_idx) = active_textarea_overlay {
+        if line_idx < inner.height {
+            let label_width: u16 = 17; // "  " + 14-char label + " "
+            let value_area = Rect {
+                x: inner.x + label_width,
+                y: inner.y + line_idx,
+                width: inner.width.saturating_sub(label_width),
+                height: 1,
+            };
+            if value_area.width > 0 {
+                if let Some(field) = panel.active_field() {
+                    field.render(f, value_area);
+                }
+            }
+        }
+    }
 }
 
 fn active_or_text(is_active: bool) -> Style {

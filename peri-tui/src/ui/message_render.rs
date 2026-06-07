@@ -3,8 +3,10 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use super::message_view::{AgentSummary, ContentBlockView, MessageViewModel, ToolCategory};
-use super::theme;
+use super::{
+    message_view::{AgentSummary, ContentBlockView, MessageViewModel, ToolCategory},
+    theme,
+};
 
 /// Generate always-visible error summary lines (up to 400 Unicode chars).
 /// 2-space indent, no vertical bar, no prefix. Preserves newlines (multi-line render).
@@ -164,7 +166,22 @@ pub fn render_view_model(
     diff_visible: bool,
 ) -> Vec<Line<'static>> {
     match vm {
-        MessageViewModel::UserBubble { rendered, .. } => {
+        MessageViewModel::UserBubble {
+            rendered,
+            system_reminder,
+            ..
+        } => {
+            if *system_reminder {
+                // 系统提醒：渲染一行简略提示
+                let hint = Span::styled(
+                    "\u{1f4cb} 上下文已压缩",
+                    Style::default()
+                        .fg(theme::DIM)
+                        .add_modifier(Modifier::ITALIC),
+                );
+                return vec![Line::from(hint)];
+            }
+            // 普通 UserBubble — 原有渲染逻辑不变
             let user_bg: Color = theme::USER_BG;
             let mut lines = Vec::with_capacity(rendered.lines.len() + 1);
             for (i, line) in rendered.lines.iter().enumerate() {
@@ -495,7 +512,7 @@ pub fn render_view_model(
 
             lines
         }
-        MessageViewModel::SystemNote { content } => {
+        MessageViewModel::SystemNote { content, .. } => {
             let mut lines = Vec::new();
             for line in content.lines() {
                 if line.starts_with('✻') {
@@ -527,7 +544,7 @@ pub fn render_view_model(
             }
             lines
         }
-        MessageViewModel::CacheWarning { content } => {
+        MessageViewModel::CacheWarning { content, .. } => {
             vec![Line::from(Span::styled(
                 content.clone(),
                 Style::default().fg(theme::WARNING),

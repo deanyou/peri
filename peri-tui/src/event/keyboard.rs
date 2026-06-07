@@ -160,10 +160,10 @@ pub fn handle_key_event(
     normal_keys::handle_normal_keys(app, input)
 }
 
-/// 检测 textarea 中 @ 提及模式，更新状态并触发搜索
-/// 使用缓存 + 300ms 节流避免频繁 glob
+/// 检测 textarea 中 @ 提及模式，更新状态并触发异步搜索
+/// 缓存命中时立即更新，否则 spawn 后台任务避免阻塞 UI 线程
 pub(super) fn update_at_mention_detection(app: &mut App) {
-    let textarea = &app.session_mgr.sessions[app.session_mgr.active].ui.textarea;
+    let textarea = &app.session_mgr.current_mut().ui.textarea;
     let text = textarea.lines().join("\n");
     let (row, col) = textarea.cursor();
     // 将 (row, col) 转为字节偏移
@@ -176,9 +176,9 @@ pub(super) fn update_at_mention_detection(app: &mut App) {
         pos += line.len() + 1; // +1 for \n
     }
 
-    let at = &mut app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .at_mention;
+    let at = &mut app.session_mgr.current_mut().ui.at_mention;
+
+    at.ensure_cwd(app.services.cwd.clone());
 
     if let Some((query, start)) = crate::app::AtMentionState::detect(&text, pos) {
         if at.active && at.query == query {
@@ -186,33 +186,66 @@ pub(super) fn update_at_mention_detection(app: &mut App) {
         }
         at.activate(query.clone(), start);
 
-        // 尝试从缓存获取结果（零 IO）
+        // 尝试从缓存获取结果（零 IO，立即更新）
         if let Some(cached) = at.try_filter_from_cache(&query) {
             at.update_candidates(cached);
             return;
         }
 
-        // 节流：距离上次 glob 不到 300ms 时，保留旧结果不搜索
+        // 节流：距离上次搜索不到 200ms 时，保留旧结果不搜索
         if !at.should_search_now() && !at.candidates.is_empty() {
             return;
         }
 
-        // 执行 glob 搜索
-        let cwd = app.services.cwd.clone();
-        let candidates = crate::app::at_mention::file_search::search_files(&cwd, &query);
-        at.cache_result(&query, candidates.clone());
-        at.set_last_glob_query(&query);
-        at.update_candidates(candidates);
+        // 搜索线程处理，不阻塞 UI
+        at.start_search(query);
     } else if at.active {
         at.close();
     }
 }
 
+/// 检测 textarea 中 / skill/command token，更新 slash_hint 状态。
+/// 参考 update_at_mention_detection 模式：将 (row, col) 转为字节偏移后调用 detect。
+/// 当 @mention 活跃时自动 deactivate 避免双弹窗。
+pub(super) fn update_slash_hint_detection(app: &mut App) {
+    let (text, cursor_pos) = {
+        let textarea = &app.session_mgr.current_mut().ui.textarea;
+        let text = textarea.lines().join("\n");
+        let (row, col) = textarea.cursor();
+        let mut pos = 0usize;
+        for (i, line) in textarea.lines().iter().enumerate() {
+            if i == row {
+                pos += line.chars().take(col).map(|c| c.len_utf8()).sum::<usize>();
+                break;
+            }
+            pos += line.len() + 1; // +1 for newline
+        }
+        (text, pos)
+    }; // textarea mutable borrow 在此结束 ← 关键：Rust NLL 通过作用域释放
+
+    // 先检查 at_mention 状态（不可变借用）
+    let at_mention_active = app.session_mgr.current().ui.at_mention.active;
+
+    let slash = &mut app.session_mgr.current_mut().ui.slash_hint;
+
+    if at_mention_active {
+        slash.deactivate();
+        return;
+    }
+
+    if let Some((prefix, start)) = crate::app::SlashHintState::detect(&text, cursor_pos) {
+        if slash.active && slash.prefix == prefix && slash.token_start == start {
+            return; // 未变化
+        }
+        slash.activate(prefix, start);
+    } else {
+        slash.deactivate();
+    }
+}
+
 /// 将选中的 @ 提及路径注入 textarea
 pub(super) fn inject_at_mention_path(app: &mut App) {
-    let at = &app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .at_mention;
+    let at = &app.session_mgr.current_mut().ui.at_mention;
     let candidate = match at.selected_candidate() {
         Some(c) => c.clone(),
         None => return,
@@ -220,7 +253,7 @@ pub(super) fn inject_at_mention_path(app: &mut App) {
     let query_start = at.query_start;
     let query_len = at.query.len();
 
-    let textarea = &app.session_mgr.sessions[app.session_mgr.active].ui.textarea;
+    let textarea = &app.session_mgr.current_mut().ui.textarea;
     let full_text: String = textarea.lines().join("\n");
 
     let needs_quotes = candidate.path.contains(' ');
@@ -243,22 +276,13 @@ pub(super) fn inject_at_mention_path(app: &mut App) {
 
     let mut new_ta = crate::app::build_textarea(false);
     new_ta.insert_str(&new_text);
-    app.session_mgr.sessions[app.session_mgr.active].ui.textarea = new_ta;
+    app.session_mgr.current_mut().ui.textarea = new_ta;
 
     if is_dir {
-        app.session_mgr.sessions[app.session_mgr.active]
-            .ui
-            .textarea
-            .insert_str("/");
+        app.session_mgr.current_mut().ui.textarea.insert_str("/");
         update_at_mention_detection(app);
     } else {
-        app.session_mgr.sessions[app.session_mgr.active]
-            .ui
-            .textarea
-            .insert_str(" ");
-        app.session_mgr.sessions[app.session_mgr.active]
-            .ui
-            .at_mention
-            .close();
+        app.session_mgr.current_mut().ui.textarea.insert_str(" ");
+        app.session_mgr.current_mut().ui.at_mention.close();
     }
 }

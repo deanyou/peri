@@ -7,9 +7,13 @@ use ratatui::{
 
 use peri_widgets::{BorderedPanel, ScrollState, ScrollableArea};
 
-use crate::app::hooks_panel::{hook_type_label, hook_type_summary, HooksPanel};
-use crate::app::App;
-use crate::ui::theme;
+use crate::{
+    app::{
+        hooks_panel::{hook_type_label, hook_type_summary, HooksPanel},
+        App,
+    },
+    ui::theme,
+};
 
 /// /hooks 面板渲染（底部展开区）
 pub(crate) fn render_hooks_panel(f: &mut Frame, panel: &HooksPanel, app: &mut App, area: Rect) {
@@ -135,33 +139,24 @@ pub(crate) fn render_hooks_panel(f: &mut Frame, panel: &HooksPanel, app: &mut Ap
 
     // 存储面板元数据供鼠标选区使用
     let scroll_offset = panel.scroll_offset();
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_area = Some(inner);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_scroll_offset = scroll_offset;
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_plain_lines = lines
+    app.session_mgr.current_mut().ui.panel_area = Some(inner);
+    app.session_mgr.current_mut().ui.panel_scroll_offset = scroll_offset;
+    app.session_mgr.current_mut().ui.panel_plain_lines = lines
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
 
     let mut scroll_state = ScrollState::with_offset(scroll_offset);
-    app.session_mgr.sessions[app.session_mgr.active]
-        .ui
-        .panel_scrollbar_metrics = ScrollableArea::new(Text::from(lines))
-        .scrollbar_style(Style::default().fg(theme::MUTED))
-        .render(f, inner, &mut scroll_state);
+    app.session_mgr.current_mut().ui.panel_scrollbar_metrics =
+        ScrollableArea::new(Text::from(lines))
+            .scrollbar_style(Style::default().fg(theme::MUTED))
+            .render(f, inner, &mut scroll_state);
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::app::hooks_panel::HooksPanel;
-    use crate::app::App;
+    use crate::app::{hooks_panel::HooksPanel, App};
     use peri_middlewares::hooks::types::{HookEvent, HookType, RegisteredHook};
-    use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::{collections::HashMap, path::PathBuf};
     include!("hooks_test.rs");
 }

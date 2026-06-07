@@ -1,10 +1,8 @@
 //! App 级 UI 状态：跨 session 共享的全局 UI 临时状态
 
-use std::cell::Cell;
-use std::time::Instant;
+use std::{cell::Cell, time::Instant};
 
-use super::oauth_prompt::OAuthPrompt;
-use super::setup_wizard::SetupWizardPanel;
+use super::{oauth_prompt::OAuthPrompt, setup_wizard::SetupWizardPanel};
 
 /// App 级 UI 状态：跨 session 共享的全局 UI 临时状态。
 ///
@@ -18,6 +16,10 @@ pub struct GlobalUiState {
     pub provider_highlight_until: Option<Instant>,
     pub mcp_ready_shown_until: Cell<Option<Instant>>,
     pub quit_pending_since: Option<Instant>,
+    /// 双击 ESC 检测时间戳（rewind 弹窗触发）
+    pub rewind_pending_since: Option<Instant>,
+    /// 运行中按 ESC 的 rewind 提示截止时间
+    pub rewind_busy_hint_until: Option<Instant>,
     pub quit_requested: bool,
     pub mouse_available: Option<bool>,
 }
@@ -37,6 +39,8 @@ impl GlobalUiState {
             provider_highlight_until: None,
             mcp_ready_shown_until: Cell::new(None),
             quit_pending_since: None,
+            rewind_pending_since: None,
+            rewind_busy_hint_until: None,
             quit_requested: false,
             mouse_available: None,
         }

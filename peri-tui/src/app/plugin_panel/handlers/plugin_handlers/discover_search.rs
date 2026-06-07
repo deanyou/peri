@@ -1,7 +1,9 @@
 use tui_textarea::{Input, Key};
 
-use crate::app::panel_manager::{EventResult, PanelContext};
-use crate::app::plugin_panel::PluginPanel;
+use crate::app::{
+    panel_manager::{EventResult, PanelContext},
+    plugin_panel::PluginPanel,
+};
 
 impl PluginPanel {
     pub(crate) fn handle_discover_searching(
@@ -13,7 +15,12 @@ impl PluginPanel {
             Input {
                 key: Key::Char(c), ..
             } => {
-                self.discover_search.insert(c);
+                self.discover_search.input(Input {
+                    key: Key::Char(c),
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                });
                 self.discover_list.set_items(
                     self.discover_filtered_plugins()
                         .into_iter()
@@ -26,7 +33,12 @@ impl PluginPanel {
                 key: Key::Backspace,
                 ..
             } => {
-                self.discover_search.backspace();
+                self.discover_search.input(Input {
+                    key: Key::Backspace,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                });
                 self.discover_list.set_items(
                     self.discover_filtered_plugins()
                         .into_iter()

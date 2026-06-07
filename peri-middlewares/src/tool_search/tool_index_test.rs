@@ -163,3 +163,60 @@ fn test_select_empty_result() {
     let results = index.search("select:NonExistent", 10);
     assert!(results.is_empty());
 }
+
+/// 同名工具注册覆盖语义：后注册的实例覆盖先注册的。
+/// build() 通过 HashMap::insert 注册工具，name 重复时静默覆盖。
+#[test]
+fn test_duplicate_name_overwrites() {
+    let index = ToolSearchIndex::new();
+    let tools: Vec<Arc<dyn BaseTool>> = vec![
+        Arc::new(MockTool::new("CronRegister", "Version A - original")),
+        Arc::new(MockTool::new("CronRegister", "Version B - overwritten")),
+    ];
+    index.build(tools);
+
+    // 验证只有 1 个工具注册（非 2 个）
+    assert_eq!(index.total_count(), 1, "同名工具应覆盖，total_count=1");
+
+    // 验证 get_tool 返回后注册的实例（Version B）
+    let tool = index
+        .get_tool("CronRegister")
+        .expect("get_tool 应能查找到 CronRegister");
+    assert_eq!(
+        tool.description(),
+        "Version B - overwritten",
+        "后注册的工具应覆盖前一个，description 应为 Version B"
+    );
+}
+
+/// 覆盖后 search 仍然正常工作，不会 panic 或返回错误结果。
+#[test]
+fn test_duplicate_name_search_still_works() {
+    let index = ToolSearchIndex::new();
+    let tools: Vec<Arc<dyn BaseTool>> = vec![
+        Arc::new(MockTool::new("CronRegister", "Register cron tasks v1")),
+        Arc::new(MockTool::new("CronRegister", "Register cron tasks v2")),
+        Arc::new(MockTool::new("CronList", "List all cron tasks")),
+    ];
+    index.build(tools);
+
+    // search 不应 panic
+    let results = index.search("cron", 5);
+    assert_eq!(
+        results.len(),
+        2,
+        "search 应返回 2 个结果（CronRegister + CronList），实际: {}",
+        results.len()
+    );
+
+    // CronRegister 的描述应为覆盖后的版本
+    let cron_reg = results
+        .iter()
+        .find(|r| r.name == "CronRegister")
+        .expect("应能找到 CronRegister");
+    assert!(
+        cron_reg.description.contains("v2"),
+        "search 结果应反映覆盖后的描述，实际: {}",
+        cron_reg.description
+    );
+}

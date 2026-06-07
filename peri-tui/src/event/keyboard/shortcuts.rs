@@ -35,13 +35,8 @@ pub(super) fn handle_shortcuts(
 
     // Ctrl+B: 跳转到后台 agent bar
     if SHORTCUT_BG_BAR.matches(key_event) {
-        if !app.session_mgr.sessions[app.session_mgr.active]
-            .background_agents
-            .is_empty()
-        {
-            app.session_mgr.sessions[app.session_mgr.active]
-                .ui
-                .bg_bar_cursor = Some(0);
+        if !app.session_mgr.current_mut().background_agents.is_empty() {
+            app.session_mgr.current_mut().ui.bg_bar_cursor = Some(0);
         }
         return Some(Action::Redraw);
     }
@@ -55,7 +50,8 @@ pub(super) fn handle_shortcuts(
             let next = aliases[(idx + 1) % aliases.len()];
             cfg.config.active_alias = next.to_string();
             if let Err(e) = App::save_config(cfg, app.services.config_path_override.as_deref()) {
-                app.session_mgr.sessions[app.session_mgr.active]
+                app.session_mgr
+                    .current_mut()
                     .messages
                     .view_messages
                     .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
@@ -64,7 +60,13 @@ pub(super) fn handle_shortcuts(
                 app.services.provider_name = p.display_name().to_string();
                 app.services.model_name = p.model_name().to_string();
             }
-            app.services.sync_peri_config_to_acp();
+            if let Some(ref acp_client) = app.acp_client {
+                let acp = acp_client.clone();
+                let alias = next.to_string();
+                tokio::spawn(async move {
+                    let _ = acp.set_config_option("model", &alias).await;
+                });
+            }
             app.global_ui.model_highlight_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(1500));
         }
@@ -91,12 +93,13 @@ pub(super) fn handle_shortcuts(
                 }
                 if let Err(e) = App::save_config(cfg, app.services.config_path_override.as_deref())
                 {
-                    app.session_mgr.sessions[app.session_mgr.active]
+                    app.session_mgr
+                        .current_mut()
                         .messages
                         .view_messages
                         .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
                 }
-                app.services.sync_peri_config_to_acp();
+                app.sync_acp_config();
                 app.global_ui.provider_highlight_until =
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(2000));
             }

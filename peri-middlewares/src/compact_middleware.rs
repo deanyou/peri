@@ -3,23 +3,31 @@
 //! `before_model` 钩子: 每轮 LLM 调用前检查 token 阈值，超过时执行
 //! micro/full compact。compact 后不改变控制流，ReAct 循环自然继续。
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use peri_agent::agent::compact::config::CompactConfig;
-use peri_agent::agent::compact::{full_compact, micro_compact_enhanced, re_inject};
-use peri_agent::agent::events::{AgentEvent as ExecutorEvent, CompactFileInfo};
-use peri_agent::agent::state::State;
-use peri_agent::agent::token::ContextBudget;
-use peri_agent::agent::AgentCancellationToken;
-use peri_agent::error::AgentResult;
-use peri_agent::llm::BaseModel;
-use peri_agent::messages::BaseMessage;
-use peri_agent::middleware::r#trait::Middleware;
+use peri_agent::{
+    agent::{
+        compact::{
+            config::CompactConfig, extract_file_info, extract_skill_names, full_compact,
+            micro_compact_enhanced, re_inject,
+        },
+        events::AgentEvent as ExecutorEvent,
+        state::State,
+        token::ContextBudget,
+        AgentCancellationToken,
+    },
+    error::AgentResult,
+    llm::BaseModel,
+    messages::BaseMessage,
+    middleware::r#trait::Middleware,
+};
 
 use crate::hooks::{self, RegisteredHook};
 
@@ -96,40 +104,6 @@ impl CompactMiddleware {
         if let Some(tx) = self.event_tx.lock().unwrap().as_ref() {
             let _ = tx.send(event);
         }
-    }
-
-    /// 提取 re_inject 结果中的文件信息
-    fn extract_file_info(messages: &[BaseMessage]) -> Vec<CompactFileInfo> {
-        let mut files = Vec::new();
-        for msg in messages {
-            let content = msg.content();
-            if let Some(rest) = content.strip_prefix("[最近读取的文件: ") {
-                let path = rest.lines().next().unwrap_or("");
-                let line_count = rest.lines().count().saturating_sub(1);
-                if !path.is_empty() {
-                    files.push(CompactFileInfo {
-                        path: path.to_string(),
-                        lines: line_count,
-                    });
-                }
-            }
-        }
-        files
-    }
-
-    /// 提取 re_inject 结果中的 skill 名称
-    fn extract_skill_names(messages: &[BaseMessage]) -> Vec<String> {
-        let mut skills = Vec::new();
-        for msg in messages {
-            let content = msg.content();
-            if let Some(rest) = content.strip_prefix("[激活的 Skill 指令: ") {
-                let name = rest.lines().next().unwrap_or("");
-                if !name.is_empty() {
-                    skills.push(name.to_string());
-                }
-            }
-        }
-        skills
     }
 
     async fn fire_hooks(&self, event: hooks::types::HookEvent, msg_count: usize) {
@@ -243,15 +217,15 @@ impl CompactMiddleware {
             "CompactMiddleware: re_inject 完成"
         );
 
-        let files = Self::extract_file_info(&re_inject_result.messages);
-        let skills = Self::extract_skill_names(&re_inject_result.messages);
+        let files = extract_file_info(&re_inject_result.messages);
+        let skills = extract_skill_names(&re_inject_result.messages);
 
         // 摘要作为 Human 消息（与 Claude Code 实现对齐）。
         // 原因：LLM 适配器将 System 消息提取到 system 字段，不进入 messages 数组。
         // 若摘要为 System 类型，compact 后 messages 数组可能只有 system 角色消息，
         // DeepSeek/OpenAI 兼容 API 要求至少一条 user/assistant 消息，否则返回 400。
         let summary_content = format!(
-            "{}\n\n[上下文已压缩，请根据摘要继续工作]",
+            "<system-reminder>\n{}\n\n[上下文已压缩，请根据摘要继续工作]\n</system-reminder>",
             compact_result.summary
         );
         let mut new_messages = vec![BaseMessage::human(summary_content)];
@@ -325,7 +299,26 @@ impl<S: State> Middleware<S> for CompactMiddleware {
             (full, micro)
         };
 
-        // Step 2: 可变借用（tracker 引用已 drop）
+        // Step 2: emit compact trigger metric before mutating state
+        if should_full || should_micro {
+            let tracker = state.token_tracker();
+            let percentage = tracker
+                .context_usage_percent(self.budget.context_window)
+                .unwrap_or(0.0);
+            peri_agent::metrics::emit(
+                "trap.compact_trigger",
+                serde_json::json!({
+                    "trigger": if should_full { "full" } else { "micro" },
+                    "tokens_used": tracker.estimated_context_tokens().unwrap_or(0),
+                    "tokens_total": self.budget.context_window as u64,
+                    "percentage": percentage,
+                }),
+                state.get_context("session_id"),
+                state.get_context("run_id"),
+            );
+        }
+
+        // Step 3: 可变借用（tracker 引用已 drop）
         if should_full {
             self.do_full_compact(state).await?;
         } else if should_micro {

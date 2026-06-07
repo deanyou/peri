@@ -5,25 +5,39 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use peri_widgets::BorderedPanel;
 
-use crate::app::setup_wizard::{
-    FormField, FormMode, SetupSource, SetupStep, SetupWizardPanel, LANGUAGE_OPTIONS,
+use crate::{
+    app::setup_wizard::{
+        FormField, FormMode, SetupSource, SetupStep, SetupWizardPanel, LANGUAGE_OPTIONS,
+    },
+    ui::theme,
 };
-use crate::ui::theme;
 
 /// Setup 向导全屏渲染入口
-pub(crate) fn render_setup_wizard(f: &mut Frame, app: &crate::app::App) {
+pub(crate) fn render_setup_wizard(f: &mut Frame, app: &mut crate::app::App) {
     let area = f.area();
-    let wizard = app.global_ui.setup_wizard.as_ref().unwrap();
-    let lc = &app.services.lc;
 
-    match wizard.step {
-        SetupStep::Choose => render_step_choose(f, wizard, lc, area),
-        SetupStep::Language => render_step_language(f, wizard, lc, area),
-        SetupStep::Form => render_step_form(f, wizard, lc, area),
-        SetupStep::Done => render_step_done(f, wizard, lc, area),
+    let step = app.global_ui.setup_wizard.as_ref().unwrap().step;
+    match step {
+        SetupStep::Choose => {
+            let lc = &app.services.lc;
+            let wizard = app.global_ui.setup_wizard.as_ref().unwrap();
+            render_step_choose(f, wizard, lc, area);
+        }
+        SetupStep::Language => {
+            let lc = &app.services.lc;
+            let wizard = app.global_ui.setup_wizard.as_ref().unwrap();
+            render_step_language(f, wizard, lc, area);
+        }
+        SetupStep::Form => render_step_form(f, app, area),
+        SetupStep::Done => {
+            let lc = &app.services.lc;
+            let wizard = app.global_ui.setup_wizard.as_ref().unwrap();
+            render_step_done(f, wizard, lc, area);
+        }
     }
 }
 
@@ -139,12 +153,9 @@ fn render_step_language(
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
-fn render_step_form(
-    f: &mut Frame,
-    wizard: &SetupWizardPanel,
-    lc: &crate::i18n::LcRegistry,
-    area: Rect,
-) {
+fn render_step_form(f: &mut Frame, app: &mut crate::app::App, area: Rect) {
+    let lc = &app.services.lc;
+    let wizard = app.global_ui.setup_wizard.as_mut().unwrap();
     match wizard.form_mode {
         FormMode::Browse => render_form_browse(f, wizard, lc, area),
         FormMode::Edit => render_form_edit(f, wizard, lc, area),
@@ -197,10 +208,10 @@ fn render_form_browse(
             Style::default().fg(theme::MUTED)
         };
 
-        let key_summary = if mp.api_key.is_empty() {
+        let key_summary = if mp.field_api_key.is_empty() {
             lc.tr("setup-no-key")
         } else {
-            mask_api_key(&mp.api_key)
+            mask_api_key(&mp.field_api_key.value())
         };
 
         lines.push(Line::from(vec![
@@ -211,22 +222,18 @@ fn render_form_browse(
             ),
             Span::styled(format!("{} ", mp.provider_type.label(lc)), name_style),
             Span::styled(
-                format!("({}) ", mp.provider_id),
+                format!("({}) ", mp.field_provider_id.value()),
                 Style::default().fg(theme::MUTED),
             ),
             Span::styled(key_summary, detail_style),
         ]));
 
         // 第二行：base_url 摘要
-        if !mp.base_url.is_empty() {
-            let url_style = if is_cursor {
-                Style::default().fg(theme::DIM)
-            } else {
-                Style::default().fg(theme::DIM)
-            };
+        if !mp.field_base_url.is_empty() {
+            let url_style = Style::default().fg(theme::DIM);
             lines.push(Line::from(vec![
                 Span::styled("     ", Style::default()),
-                Span::styled(&mp.base_url, url_style),
+                Span::styled(mp.field_base_url.value(), url_style),
             ]));
         }
 
@@ -271,7 +278,7 @@ fn render_form_browse(
 /// Edit 模式：编辑单个 provider 的所有字段
 fn render_form_edit(
     f: &mut Frame,
-    wizard: &SetupWizardPanel,
+    wizard: &mut SetupWizardPanel,
     lc: &crate::i18n::LcRegistry,
     area: Rect,
 ) {
@@ -303,7 +310,7 @@ fn render_form_edit(
         "setup-edit-title",
         &[
             ("type".into(), mp.provider_type.label(lc).into()),
-            ("id".into(), mp.provider_id.clone().into()),
+            ("id".into(), mp.field_provider_id.value().into()),
         ],
     );
 
@@ -318,6 +325,10 @@ fn render_form_edit(
 
     let mut lines: Vec<Line> = vec![Line::from("")];
 
+    // 记录活跃文本字段行索引和 x 偏移，用于 overlay textarea
+    let label_prefix_width: usize = 2 + 4 + 1; // "❯ " + label(4 cols) + " "
+    let mut overlay_line: Option<(usize, usize)> = None;
+
     lines.push(render_field_line(
         &lc.tr("setup-field-type"),
         4,
@@ -326,31 +337,27 @@ fn render_form_edit(
         wizard.form_focus,
     ));
 
-    let pid_display = edit_display(
-        &mp.provider_id,
-        mp.cur_provider_id,
-        wizard.form_focus == FormField::ProviderId,
-    );
     lines.push(render_field_line(
         &lc.tr("setup-field-id"),
         4,
         FormField::ProviderId,
-        pid_display,
+        mp.field_provider_id.value(),
         wizard.form_focus,
     ));
+    if wizard.form_focus == FormField::ProviderId {
+        overlay_line = Some((lines.len() - 1, label_prefix_width));
+    }
 
-    let url_display = edit_display(
-        &mp.base_url,
-        mp.cur_base_url,
-        wizard.form_focus == FormField::BaseUrl,
-    );
     lines.push(render_field_line(
         &lc.tr("setup-field-base-url"),
         4,
         FormField::BaseUrl,
-        url_display,
+        mp.field_base_url.value(),
         wizard.form_focus,
     ));
+    if wizard.form_focus == FormField::BaseUrl {
+        overlay_line = Some((lines.len() - 1, label_prefix_width));
+    }
 
     // /v1 suffix hint
     lines.push(Line::from(Span::styled(
@@ -380,13 +387,11 @@ fn render_form_edit(
         )));
     }
 
-    let key_display = if wizard.form_focus == FormField::ApiKey {
-        let (before, after) = crate::app::edit_display_parts(&mp.api_key, mp.cur_api_key);
-        format!("{}▏{}", before, after)
-    } else if mp.api_key.is_empty() {
+    // API Key: 非聚焦时显示 masked，聚焦时 overlay textarea
+    let key_display = if mp.field_api_key.is_empty() {
         String::new()
     } else {
-        "•".repeat(mp.api_key.chars().count())
+        "•".repeat(mp.field_api_key.value().chars().count())
     };
     lines.push(render_field_line(
         &lc.tr("setup-field-api-key"),
@@ -395,6 +400,9 @@ fn render_form_edit(
         key_display,
         wizard.form_focus,
     ));
+    if wizard.form_focus == FormField::ApiKey {
+        overlay_line = Some((lines.len() - 1, label_prefix_width));
+    }
 
     lines.push(Line::from(Span::styled(
         "  ─────────────────────────────────",
@@ -407,18 +415,19 @@ fn render_form_edit(
         (lc.tr("setup-field-haiku"), FormField::HaikuModel, 2),
     ];
     for (label, field, ai) in alias_labels {
-        let model_display = edit_display(
-            &mp.aliases[ai].model_id,
-            mp.aliases[ai].cursor,
-            wizard.form_focus == field,
-        );
+        let alias_prefix = format!("{} {} ", label, lc.tr("setup-model-label"));
+        let alias_label_width = UnicodeWidthStr::width(alias_prefix.as_str());
+        let alias_prefix_width = 2 + alias_label_width + 1;
         lines.push(render_field_line(
-            &format!("{} {} ", label, lc.tr("setup-model-label")),
-            4,
+            &alias_prefix,
+            alias_label_width,
             field,
-            model_display,
+            mp.aliases[ai].field_model_id.value(),
             wizard.form_focus,
         ));
+        if wizard.form_focus == field {
+            overlay_line = Some((lines.len() - 1, alias_prefix_width));
+        }
     }
 
     // Confirm 按钮
@@ -445,6 +454,31 @@ fn render_form_edit(
     ]));
 
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
+
+    // Overlay textarea on the active field line
+    if let Some((line_idx, x_offset)) = overlay_line {
+        let mp = &mut wizard.providers[wizard.active_provider];
+        let field: Option<&mut crate::app::FieldTextarea> = match wizard.form_focus {
+            FormField::ProviderId => Some(&mut mp.field_provider_id),
+            FormField::BaseUrl => Some(&mut mp.field_base_url),
+            FormField::ApiKey => Some(&mut mp.field_api_key),
+            FormField::OpusModel => Some(&mut mp.aliases[0].field_model_id),
+            FormField::SonnetModel => Some(&mut mp.aliases[1].field_model_id),
+            FormField::HaikuModel => Some(&mut mp.aliases[2].field_model_id),
+            _ => None,
+        };
+        if let Some(field) = field {
+            let y = inner.y + line_idx as u16;
+            let x = inner.x + x_offset as u16;
+            let textarea_area = Rect {
+                x,
+                y,
+                width: inner.width.saturating_sub(x_offset as u16),
+                height: 1,
+            };
+            field.render(f, textarea_area);
+        }
+    }
 }
 
 /// 渲染单个字段行（带光标指示器、标签固定宽度右对齐）
@@ -491,16 +525,6 @@ fn pad_display_columns(s: &str, target_cols: usize) -> String {
     }
 }
 
-/// 编辑字段显示：活跃时显示光标 ▏，否则显示值
-fn edit_display(value: &str, cursor: usize, active: bool) -> String {
-    if active {
-        let (before, after) = crate::app::edit_display_parts(value, cursor);
-        format!("{}▏{}", before, after)
-    } else {
-        value.to_string()
-    }
-}
-
 fn render_step_done(
     f: &mut Frame,
     wizard: &SetupWizardPanel,
@@ -527,7 +551,7 @@ fn render_step_done(
                 Style::default().fg(theme::TEXT),
             ),
             Span::styled(
-                format!("({})", mp.provider_id),
+                format!("({})", mp.field_provider_id.value()),
                 Style::default().fg(theme::MUTED),
             ),
         ]));
@@ -536,7 +560,10 @@ fn render_step_done(
                 format!("   {} ", lc.tr("setup-label-key")),
                 Style::default().fg(theme::MUTED),
             ),
-            Span::styled(mask_api_key(&mp.api_key), Style::default().fg(theme::TEXT)),
+            Span::styled(
+                mask_api_key(&mp.field_api_key.value()),
+                Style::default().fg(theme::TEXT),
+            ),
         ]));
         let alias_labels = [
             lc.tr("setup-field-opus"),
@@ -549,7 +576,10 @@ fn render_step_done(
                     format!("   {:>6} → ", label),
                     Style::default().fg(theme::MUTED),
                 ),
-                Span::styled(&mp.aliases[i].model_id, Style::default().fg(theme::ACCENT)),
+                Span::styled(
+                    mp.aliases[i].field_model_id.value(),
+                    Style::default().fg(theme::ACCENT),
+                ),
             ]));
         }
         lines.push(Line::from(""));
@@ -606,7 +636,6 @@ fn mask_api_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::setup_wizard::SetupWizardPanel;
-    use crate::app::App;
+    use crate::app::{setup_wizard::SetupWizardPanel, App};
     include!("setup_wizard_test.rs");
 }

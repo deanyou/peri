@@ -11,8 +11,8 @@ pub fn default_registry() -> CommandRegistry {
     r.register(Box::new(core::clear::ClearCommand));
     r.register(Box::new(core::help::HelpCommand));
     r.register(Box::new(core::history::HistoryCommand));
-    r.register(Box::new(core::doctor::DoctorCommand));
     r.register(Box::new(core::exit::ExitCommand));
+    r.register(Box::new(core::gc::GcCommand));
 
     r.register(Box::new(panel::model::ModelCommand));
     r.register(Box::new(panel::plugin::PluginCommand));
@@ -23,16 +23,16 @@ pub fn default_registry() -> CommandRegistry {
     r.register(Box::new(panel::memory::MemoryCommand));
     r.register(Box::new(panel::login::LoginCommand));
     r.register(Box::new(panel::tasks::TasksCommand));
-    r.register(Box::new(session::split::SplitCommand));
+    r.register(Box::new(panel::betas::BetasCommand));
     r.register(Box::new(session::rename::RenameCommand));
     r.register(Box::new(session::channel::ChannelCommand));
-    r.register(Box::new(session::compact::CompactCommand));
     r.register(Box::new(session::context_cmd::ContextCommand));
     r.register(Box::new(session::cost::CostCommand));
     r.register(Box::new(session::lang::LangCommand));
     r.register(Box::new(session::effort::EffortCommand));
     r.register(Box::new(session::loop_cmd::LoopCommand));
     r.register(Box::new(session::setup::SetupCommand));
+    r.register(Box::new(session::bg::BgCommand));
     r
 }
 

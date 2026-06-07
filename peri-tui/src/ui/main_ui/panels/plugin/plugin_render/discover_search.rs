@@ -6,8 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::plugin_panel::PluginPanel;
-use crate::ui::theme;
+use crate::{app::plugin_panel::PluginPanel, ui::theme};
 
 /// 渲染搜索框到固定区域（不参与滚动）
 pub(crate) fn render_discover_search_box(f: &mut Frame, panel: &PluginPanel, area: Rect) {
@@ -29,19 +28,16 @@ pub(crate) fn render_discover_search_box(f: &mut Frame, panel: &PluginPanel, are
     let query_val = panel.discover_search.value();
     let content_line = if query_val.is_empty() && !panel.discover_searching {
         Line::from(vec![
-            Span::styled(" \u{2315} ", Style::default().fg(theme::MUTED)),
-            Span::styled("Search plugins\u{2026}", Style::default().fg(theme::DIM)),
+            Span::styled(" ⌕ ", Style::default().fg(theme::MUTED)),
+            Span::styled("Search plugins…", Style::default().fg(theme::DIM)),
         ])
     } else {
         let mut spans = vec![
-            Span::styled(" \u{2315} ", Style::default().fg(theme::MUTED)),
-            Span::styled(
-                panel.discover_search.display_text('\u{2022}'),
-                Style::default().fg(theme::TEXT),
-            ),
+            Span::styled(" ⌕ ", Style::default().fg(theme::MUTED)),
+            Span::styled(query_val, Style::default().fg(theme::TEXT)),
         ];
         if panel.discover_searching {
-            spans.push(Span::styled("\u{2588}", Style::default().fg(theme::TEXT)));
+            spans.push(Span::styled("█", Style::default().fg(theme::TEXT)));
         }
         Line::from(spans)
     };

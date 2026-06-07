@@ -1,14 +1,17 @@
 use std::any::Any;
 
-use ratatui::layout::Rect;
-use ratatui::Frame;
+use ratatui::{layout::Rect, Frame};
 use tui_textarea::Input;
 
 use crate::i18n::LcRegistry;
 
-use super::super::panel_component::PanelComponent;
-use super::super::panel_manager::{EventResult, PanelContext, PanelKind};
-use super::{App, LoginEditField, LoginPanel, LoginPanelMode};
+use super::{
+    super::{
+        panel_component::PanelComponent,
+        panel_manager::{EventResult, PanelContext, PanelKind},
+    },
+    App, LoginEditField, LoginPanel, LoginPanelMode,
+};
 
 impl PanelComponent for LoginPanel {
     fn kind(&self) -> PanelKind {
@@ -41,28 +44,28 @@ impl PanelComponent for LoginPanel {
                     };
                     self.select_provider(cfg);
                     if !selected_name.is_empty() {
-                        ctx.session_mgr.sessions[ctx.session_mgr.active]
-                            .messages
-                            .push_system_note(ctx.services.lc.tr_args(
+                        ctx.session_mgr.current_mut().messages.push_system_note(
+                            ctx.services.lc.tr_args(
                                 "app-provider-activated",
                                 &[("name".into(), selected_name.into())],
-                            ));
+                            ),
+                        );
                     }
                     if let Err(e) =
                         App::save_config(cfg, ctx.services.config_path_override.as_deref())
                     {
-                        ctx.session_mgr.sessions[ctx.session_mgr.active]
-                            .messages
-                            .push_system_note(ctx.services.lc.tr_args(
+                        ctx.session_mgr.current_mut().messages.push_system_note(
+                            ctx.services.lc.tr_args(
                                 "app-config-save-failed",
                                 &[("error".into(), e.to_string().into())],
-                            ));
+                            ),
+                        );
                     }
                     if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
                         ctx.services.provider_name = p.display_name().to_string();
                         ctx.services.model_name = p.model_name().to_string();
                     }
-                    ctx.services.sync_peri_config_to_acp();
+                    ctx.sync_acp_config();
                     EventResult::ClosePanel
                 }
                 Input {
@@ -147,30 +150,27 @@ impl PanelComponent for LoginPanel {
                     } => {
                         if is_type_field {
                             self.cycle_type();
-                        } else if let Some((buf, cursor)) = self.active_field() {
-                            crate::app::handle_edit_key(
-                                buf,
-                                cursor,
-                                Input {
-                                    key: Key::Char(' '),
-                                    ctrl: false,
-                                    alt: false,
-                                    shift: false,
-                                },
-                            );
+                        } else if let Some(field) = self.active_field() {
+                            field.input(Input {
+                                key: Key::Char(' '),
+                                ctrl: false,
+                                alt: false,
+                                shift: false,
+                            });
                         }
                         EventResult::Consumed
                     }
                     Input {
                         key: Key::Enter, ..
                     } => {
-                        let edit_name = self.buf_name.clone();
+                        let edit_name = self.field_name.value();
                         let is_new = self.mode == LoginPanelMode::New;
                         let Some(cfg) = ctx.services.peri_config.as_mut() else {
                             return EventResult::Consumed;
                         };
                         if !self.apply_edit(cfg) {
-                            ctx.session_mgr.sessions[ctx.session_mgr.active]
+                            ctx.session_mgr
+                                .current_mut()
                                 .messages
                                 .push_system_note(ctx.services.lc.tr("app-provider-name-empty"));
                             return EventResult::Consumed;
@@ -186,34 +186,32 @@ impl PanelComponent for LoginPanel {
                         } else {
                             "app-provider-saved"
                         };
-                        ctx.session_mgr.sessions[ctx.session_mgr.active]
-                            .messages
-                            .push_system_note(
-                                ctx.services
-                                    .lc
-                                    .tr_args(key, &[("name".into(), display.into())]),
-                            );
+                        ctx.session_mgr.current_mut().messages.push_system_note(
+                            ctx.services
+                                .lc
+                                .tr_args(key, &[("name".into(), display.into())]),
+                        );
                         if let Err(e) =
                             App::save_config(cfg, ctx.services.config_path_override.as_deref())
                         {
-                            ctx.session_mgr.sessions[ctx.session_mgr.active]
-                                .messages
-                                .push_system_note(ctx.services.lc.tr_args(
+                            ctx.session_mgr.current_mut().messages.push_system_note(
+                                ctx.services.lc.tr_args(
                                     "app-config-save-failed",
                                     &[("error".into(), e.to_string().into())],
-                                ));
+                                ),
+                            );
                         }
                         if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
                             ctx.services.provider_name = p.display_name().to_string();
                             ctx.services.model_name = p.model_name().to_string();
                         }
-                        ctx.services.sync_peri_config_to_acp();
+                        ctx.sync_acp_config();
                         EventResult::ClosePanel
                     }
                     _ => {
                         if !is_type_field {
-                            if let Some((buf, cursor)) = self.active_field() {
-                                crate::app::handle_edit_key(buf, cursor, input);
+                            if let Some(field) = self.active_field() {
+                                field.input(input);
                             }
                         }
                         EventResult::Consumed
@@ -234,28 +232,28 @@ impl PanelComponent for LoginPanel {
                         .unwrap_or_default();
                     self.confirm_delete(cfg);
                     if !deleted_name.is_empty() {
-                        ctx.session_mgr.sessions[ctx.session_mgr.active]
-                            .messages
-                            .push_system_note(ctx.services.lc.tr_args(
+                        ctx.session_mgr.current_mut().messages.push_system_note(
+                            ctx.services.lc.tr_args(
                                 "app-provider-deleted",
                                 &[("name".into(), deleted_name.into())],
-                            ));
+                            ),
+                        );
                     }
                     if let Err(e) =
                         App::save_config(cfg, ctx.services.config_path_override.as_deref())
                     {
-                        ctx.session_mgr.sessions[ctx.session_mgr.active]
-                            .messages
-                            .push_system_note(ctx.services.lc.tr_args(
+                        ctx.session_mgr.current_mut().messages.push_system_note(
+                            ctx.services.lc.tr_args(
                                 "app-config-save-failed",
                                 &[("error".into(), e.to_string().into())],
-                            ));
+                            ),
+                        );
                     }
                     if let Some(p) = crate::app::agent::LlmProvider::from_config(cfg) {
                         ctx.services.provider_name = p.display_name().to_string();
                         ctx.services.model_name = p.model_name().to_string();
                     }
-                    ctx.services.sync_peri_config_to_acp();
+                    ctx.sync_acp_config();
                     EventResult::Consumed
                 }
                 Input { key: Key::Esc, .. } => {

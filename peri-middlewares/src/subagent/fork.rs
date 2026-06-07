@@ -7,9 +7,8 @@ use std::sync::Arc;
 
 use peri_agent::tools::BaseTool;
 
-use crate::agent_define::AgentOverrides;
-use crate::claude_agent_parser::ToolsValue;
-use crate::tools::ArcToolWrapper;
+use crate::tool_search::core_tools::TOOL_AGENT;
+use crate::{agent_define::AgentOverrides, claude_agent_parser::ToolsValue, tools::ArcToolWrapper};
 
 /// Filter tools from parent set based on agent definition's tools/disallowedTools fields.
 ///
@@ -33,7 +32,7 @@ pub fn filter_tools(
         .filter(|tool| {
             let name = tool.name();
             let name_lower = name.to_lowercase();
-            if name == "Agent" {
+            if name == TOOL_AGENT {
                 return false;
             }
             if !is_wildcard
@@ -78,6 +77,35 @@ pub fn build_fork_directive(prompt: &str) -> String {
            Files changed: <list if you modified files>\n\
          </fork_directive>\n\n\
          {prompt}"
+    )
+}
+
+/// Build bg-fork directive message for /bg command path.
+///
+/// Similar to `build_fork_directive` but in Chinese, with bg-specific identity
+/// and output format tailored for background task results.
+pub fn build_bg_fork_directive(prompt: &str) -> String {
+    // 防御性 XML 注入防护
+    let sanitized = prompt.replace("</bg_fork_directive>", "<\u{200b}/bg_fork_directive>");
+    format!(
+        "<bg_fork_directive>\n\
+         你是后台异步 Agent，从父会话 fork 而来。\n\
+         你拥有完整的对话历史上下文。\n\
+         \n\
+         规则：\n\
+         1. 禁止生成子 Agent — 直接使用工具执行\n\
+         2. 禁止提问 — 按指令行动\n\
+         3. 严格限定在分配范围内\n\
+         4. 先给出结论，再补充说明\n\
+         5. 除非特别说明，回复控制在 500 字以内\n\
+         \n\
+         输出格式：\n\
+           结论: <核心结论或发现>\n\
+           详细说明: <补充细节>\n\
+           关键文件: <相关文件路径>\n\
+           建议: <后续行动建议>\n\
+         </bg_fork_directive>\n\n\
+         {sanitized}"
     )
 }
 

@@ -5,7 +5,8 @@ pub mod todo;
 
 pub use ask_user_tool::AskUserTool;
 pub use filesystem::{
-    EditFileTool, FolderOperationsTool, GlobFilesTool, GrepTool, ReadFileTool, WriteFileTool,
+    EditFileTool, FolderOperationsTool, GlobFilesTool, GrepTool, LineEditTool, ReadFileTool,
+    WriteFileTool,
 };
 pub use todo::{TodoItem, TodoStatus, TodoWriteTool};
 

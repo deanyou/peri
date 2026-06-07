@@ -1,13 +1,22 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_agent::agent::react::ToolCall;
-use peri_agent::agent::state::State;
-use peri_agent::error::{AgentError, AgentResult};
-use peri_agent::interaction::{
-    ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse, UserInteractionBroker,
+use peri_agent::{
+    agent::{react::ToolCall, state::State},
+    error::{AgentError, AgentResult},
+    interaction::{
+        ApprovalDecision, ApprovalItem, InteractionContext, InteractionResponse,
+        UserInteractionBroker,
+    },
+    middleware::r#trait::Middleware,
 };
-use peri_agent::middleware::r#trait::Middleware;
+
+use crate::tool_search::core_tools::{
+    TOOL_AGENT, TOOL_BASH, TOOL_EDIT, TOOL_FOLDER_OPS, TOOL_WEBFETCH, TOOL_WEBSEARCH, TOOL_WRITE,
+};
+
+/// broker.request 超时（秒）：防止挂起 broker 导致 before_tool 永久阻塞
+const BROKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub mod auto_classifier;
 pub mod shared_mode;
@@ -38,15 +47,15 @@ pub fn is_yolo_mode() -> bool {
 /// - `folder_operations`：目录操作
 /// - `launch_agent`：子 Agent 委派（子 Agent 不含 HITL，可传递绕过审批）
 pub fn default_requires_approval(tool_name: &str) -> bool {
-    tool_name == "Bash"
-        || tool_name == "folder_operations"
-        || tool_name == "Agent"
-        || tool_name == "Write"
-        || tool_name == "Edit"
+    tool_name == TOOL_BASH
+        || tool_name == TOOL_FOLDER_OPS
+        || tool_name == TOOL_AGENT
+        || tool_name == TOOL_WRITE
+        || tool_name == TOOL_EDIT
         || tool_name.starts_with("delete_")
         || tool_name.starts_with("rm_")
-        || tool_name == "WebFetch"
-        || tool_name == "WebSearch"
+        || tool_name == TOOL_WEBFETCH
+        || tool_name == TOOL_WEBSEARCH
         || tool_name.starts_with("mcp__")
 }
 
@@ -55,7 +64,7 @@ pub fn default_requires_approval(tool_name: &str) -> bool {
 /// `Write`、`Edit`、`folder_operations` 归类为编辑工具，在 AcceptEdits 模式下自动放行。
 /// `Bash`、`Agent`、`delete_*`、`rm_*` 不属于编辑工具，仍需审批。
 pub fn is_edit_tool(tool_name: &str) -> bool {
-    tool_name == "Write" || tool_name == "Edit" || tool_name == "folder_operations"
+    tool_name == TOOL_WRITE || tool_name == TOOL_EDIT || tool_name == TOOL_FOLDER_OPS
 }
 
 // ─── ExecuteExtraTool 权限透传 ─────────────────────────────────────────────
@@ -82,6 +91,8 @@ pub struct HumanInTheLoopMiddleware {
     mode: Option<Arc<SharedPermissionMode>>,
     /// Auto 模式的 LLM 分类器，仅在 mode=Auto 时使用
     auto_classifier: Option<Arc<dyn AutoClassifier>>,
+    /// broker.request 超时，默认 300s；测试可设为短值
+    broker_timeout: std::time::Duration,
 }
 
 impl HumanInTheLoopMiddleware {
@@ -95,6 +106,7 @@ impl HumanInTheLoopMiddleware {
             requires_approval,
             mode: None,
             auto_classifier: None,
+            broker_timeout: BROKER_TIMEOUT,
         }
     }
 
@@ -105,6 +117,7 @@ impl HumanInTheLoopMiddleware {
             requires_approval: default_requires_approval,
             mode: None,
             auto_classifier: None,
+            broker_timeout: BROKER_TIMEOUT,
         }
     }
 
@@ -132,7 +145,14 @@ impl HumanInTheLoopMiddleware {
             requires_approval,
             mode: Some(mode),
             auto_classifier,
+            broker_timeout: BROKER_TIMEOUT,
         }
+    }
+
+    /// 设置 broker 审批超时（测试用）
+    pub fn with_broker_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.broker_timeout = timeout;
+        self
     }
 }
 
@@ -206,7 +226,15 @@ impl HumanInTheLoopMiddleware {
                 tool_input: tool_call.input.clone(),
             }],
         };
-        let response = broker.request(ctx).await;
+        let response = match tokio::time::timeout(self.broker_timeout, broker.request(ctx)).await {
+            Ok(resp) => resp,
+            Err(_elapsed) => {
+                return Err(AgentError::ToolRejected {
+                    tool: tool_call.name.clone(),
+                    reason: format!("审批超时 ({} 秒)", BROKER_TIMEOUT.as_secs()),
+                });
+            }
+        };
         let decision = match response {
             InteractionResponse::Decisions(mut d) => d.pop().unwrap_or(ApprovalDecision::Reject {
                 reason: "用户拒绝".to_string(),
@@ -310,7 +338,22 @@ impl HumanInTheLoopMiddleware {
             .collect();
 
         let ctx = InteractionContext::Approval { items };
-        let response = broker.request(ctx).await;
+        let response = match tokio::time::timeout(self.broker_timeout, broker.request(ctx)).await {
+            Ok(resp) => resp,
+            Err(_elapsed) => {
+                results.push(Err(AgentError::ToolRejected {
+                    tool: "batch_approval".to_string(),
+                    reason: format!("审批超时 ({} 秒)", BROKER_TIMEOUT.as_secs()),
+                }));
+                results.extend(calls.iter().skip(start_idx).map(|c| {
+                    Err(AgentError::ToolRejected {
+                        tool: c.name.clone(),
+                        reason: "审批超时".to_string(),
+                    })
+                }));
+                return results;
+            }
+        };
 
         let decisions = match response {
             InteractionResponse::Decisions(d) => d,

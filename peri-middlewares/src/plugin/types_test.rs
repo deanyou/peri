@@ -315,3 +315,37 @@ fn test_plugin_manifest_commands_string_array() {
         _ => panic!("expected Full variant"),
     }
 }
+
+#[test]
+fn test_skills_field_string() {
+    let json = r#"{"name":"p","skills":"./skills/"}"#;
+    let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        manifest.skills.as_ref().unwrap(),
+        &vec!["./skills/".to_string()]
+    );
+}
+
+#[test]
+fn test_skills_field_array() {
+    let json = r#"{"name":"p","skills":["./a/","./b/"]}"#;
+    let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        manifest.skills.as_ref().unwrap(),
+        &vec!["./a/".to_string(), "./b/".to_string()]
+    );
+}
+
+#[test]
+fn test_skills_field_null() {
+    let json = r#"{"name":"p","skills":null}"#;
+    let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+    assert!(manifest.skills.is_none());
+}
+
+#[test]
+fn test_skills_field_absent() {
+    let json = r#"{"name":"p"}"#;
+    let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+    assert!(manifest.skills.is_none());
+}

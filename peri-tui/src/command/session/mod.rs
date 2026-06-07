@@ -1,5 +1,5 @@
+pub mod bg;
 pub mod channel;
-pub mod compact;
 pub mod context_cmd;
 pub mod cost;
 pub mod effort;
@@ -8,9 +8,6 @@ pub mod loop_cmd;
 pub mod plugin_command;
 pub mod rename;
 pub mod setup;
-pub mod split;
-
-pub use compact::CompactCommand;
 pub use context_cmd::ContextCommand;
 pub use cost::CostCommand;
 pub use effort::EffortCommand;
@@ -19,4 +16,3 @@ pub use loop_cmd::LoopCommand;
 pub use plugin_command::PluginCommandAdapter;
 pub use rename::RenameCommand;
 pub use setup::SetupCommand;
-pub use split::SplitCommand;

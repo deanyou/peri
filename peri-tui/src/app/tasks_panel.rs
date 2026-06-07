@@ -2,15 +2,19 @@ use std::any::Any;
 
 use parking_lot::Mutex;
 use peri_middlewares::cron::{CronScheduler, CronTask};
-use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::Rect;
-use ratatui::Frame;
+use ratatui::{
+    crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
+    layout::Rect,
+    Frame,
+};
 use tui_textarea::Input;
 
-use super::panel_component::PanelComponent;
-use super::panel_list::PanelList;
-use super::panel_manager::{EventResult, PanelContext, PanelKind};
-use super::App;
+use super::{
+    panel_component::PanelComponent,
+    panel_list::PanelList,
+    panel_manager::{EventResult, PanelContext, PanelKind},
+    App,
+};
 
 // ─── TasksTab ──────────────────────────────────────────────────────────────
 
@@ -303,7 +307,8 @@ impl TasksPanel {
             let id = tasks[idx].id.clone();
             ctx.services.cron.scheduler.lock().remove(&id);
             self.refresh_cron(&ctx.services.cron.scheduler);
-            ctx.session_mgr.sessions[ctx.session_mgr.active]
+            ctx.session_mgr
+                .current_mut()
                 .messages
                 .push_system_note(ctx.services.lc.tr_args(
                     "app-cron-deleted",

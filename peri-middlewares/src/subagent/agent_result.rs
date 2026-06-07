@@ -49,6 +49,7 @@ impl BaseTool for AgentResultTool {
         &self,
         _input: serde_json::Value,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Ok("No completed background agent results available. Background agents may still be running or have not been started.".to_string())
+        Ok("No results yet. Background tasks will notify you on completion — do not call this tool again until notified."
+            .to_string())
     }
 }

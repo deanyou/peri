@@ -1,12 +1,18 @@
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use super::*;
-use crate::agent::events::{AgentEvent, FnEventHandler};
-use crate::agent::react::{AgentInput, Reasoning};
-use crate::agent::state::AgentState;
-use crate::middleware::r#trait::Middleware;
-use crate::tools::BaseTool;
+use crate::{
+    agent::{
+        events::{AgentEvent, FnEventHandler},
+        react::{AgentInput, Reasoning},
+        state::AgentState,
+    },
+    middleware::r#trait::Middleware,
+    tools::BaseTool,
+};
 
 /// 通用不变量：state 中每个 tool_use 必须有对应 tool_result。
 fn assert_no_orphaned_tool_uses(state: &AgentState) {
@@ -474,4 +480,654 @@ async fn test_mixed_ok_rejected_error_all_tool_results_written() {
         .filter(|m| matches!(m, BaseMessage::Ai { .. }))
         .count();
     assert_eq!(ai_count, 0, "before_tool P4 错误路径不应写入 AI 消息");
+}
+
+/// LLM 输出小写 "bash"，工具注册为 PascalCase "Bash"，
+/// resolve_tool 通过大小写无关匹配找到工具，不产生 ToolNotFound。
+#[tokio::test]
+async fn test_tool_name_case_insensitive_fallback() {
+    struct EchoTool;
+    #[async_trait::async_trait]
+    impl BaseTool for EchoTool {
+        fn name(&self) -> &str {
+            "Bash"
+        }
+        fn description(&self) -> &str {
+            "echo shell"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok("shell done".to_string())
+        }
+    }
+
+    struct LowerCaseBashLLM;
+    #[async_trait::async_trait]
+    impl ReactLLM for LowerCaseBashLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
+        ) -> AgentResult<Reasoning> {
+            let has_tool_result = messages
+                .iter()
+                .any(|m| matches!(m, BaseMessage::Tool { .. }));
+            if !has_tool_result {
+                // LLM 输出小写 "bash"
+                Ok(Reasoning::with_tools(
+                    "call bash",
+                    vec![ToolCall::new("id1", "bash", serde_json::json!({}))],
+                ))
+            } else {
+                Ok(Reasoning::with_answer("done", "shell executed"))
+            }
+        }
+    }
+
+    let agent = ReActAgent::new(LowerCaseBashLLM)
+        .max_iterations(5)
+        .register_tool(Box::new(EchoTool));
+
+    let mut state = AgentState::new("/tmp");
+    let result = agent
+        .execute(AgentInput::text("go"), &mut state, None)
+        .await;
+
+    assert!(result.is_ok(), "大小写无关匹配应成功，实际: {:?}", result);
+    // 验证 tool_result 不是错误
+    let has_error_result = state
+        .messages()
+        .iter()
+        .any(|m| matches!(m, BaseMessage::Tool { is_error: true, .. }));
+    assert!(!has_error_result, "不应有 ToolNotFound 错误结果");
+}
+
+/// LLM 输出 "Task"（别名），工具注册为 "Agent"，
+/// resolve_tool 通过语义别名表匹配，不产生 ToolNotFound。
+#[tokio::test]
+async fn test_tool_name_alias_fallback() {
+    struct EchoAgent;
+    #[async_trait::async_trait]
+    impl BaseTool for EchoAgent {
+        fn name(&self) -> &str {
+            "Agent"
+        }
+        fn description(&self) -> &str {
+            "echo agent"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok("agent done".to_string())
+        }
+    }
+
+    struct AliasTaskLLM;
+    #[async_trait::async_trait]
+    impl ReactLLM for AliasTaskLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
+        ) -> AgentResult<Reasoning> {
+            let has_tool_result = messages
+                .iter()
+                .any(|m| matches!(m, BaseMessage::Tool { .. }));
+            if !has_tool_result {
+                // LLM 输出别名 "Task"
+                Ok(Reasoning::with_tools(
+                    "call task",
+                    vec![ToolCall::new("id1", "Task", serde_json::json!({}))],
+                ))
+            } else {
+                Ok(Reasoning::with_answer("done", "agent executed"))
+            }
+        }
+    }
+
+    let agent = ReActAgent::new(AliasTaskLLM)
+        .max_iterations(5)
+        .register_tool(Box::new(EchoAgent));
+
+    let mut state = AgentState::new("/tmp");
+    let result = agent
+        .execute(AgentInput::text("go"), &mut state, None)
+        .await;
+
+    assert!(result.is_ok(), "别名匹配应成功，实际: {:?}", result);
+    let has_error_result = state
+        .messages()
+        .iter()
+        .any(|m| matches!(m, BaseMessage::Tool { is_error: true, .. }));
+    assert!(!has_error_result, "不应有 ToolNotFound 错误结果");
+}
+
+/// 连续 5 次同工具+同错误后注入系统纠正消息
+#[tokio::test]
+async fn test_consecutive_failure_injects_correction() {
+    struct AlwaysFailRead;
+    #[async_trait::async_trait]
+    impl BaseTool for AlwaysFailRead {
+        fn name(&self) -> &str {
+            "Read"
+        }
+        fn description(&self) -> &str {
+            "read"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "properties": { "file_path": { "type": "string" } } })
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Err("The 'file_path' parameter is required for the Read tool.".into())
+        }
+    }
+
+    struct StubbornLLM;
+    #[async_trait::async_trait]
+    impl ReactLLM for StubbornLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
+        ) -> AgentResult<Reasoning> {
+            let has_correction = messages.iter().any(|m| {
+                matches!(m, BaseMessage::System { content, .. }
+                    if content.text_content().contains("5 consecutive times"))
+            });
+            if has_correction {
+                return Ok(Reasoning::with_answer("done", "I'll stop retrying"));
+            }
+            Ok(Reasoning::with_tools(
+                "retrying",
+                vec![ToolCall::new(
+                    format!("id_{}", messages.len()),
+                    "Read",
+                    serde_json::json!({}),
+                )],
+            ))
+        }
+    }
+
+    let agent = ReActAgent::new(StubbornLLM)
+        .max_iterations(20)
+        .register_tool(Box::new(AlwaysFailRead));
+
+    let mut state = AgentState::new("/tmp");
+    let result = agent
+        .execute(AgentInput::text("go"), &mut state, None)
+        .await;
+
+    assert!(result.is_ok(), "Agent 应正常完成，实际: {:?}", result);
+    let has_correction = state.messages().iter().any(|m| {
+        matches!(m, BaseMessage::System { content, .. }
+            if content.text_content().contains("5 consecutive times"))
+    });
+    assert!(has_correction, "应注入连续失败纠正消息");
+}
+
+#[test]
+fn test_normalize_params_path_to_file_path() {
+    // Arrange: input has "path" but no "file_path"
+    let input = serde_json::json!({"path": "/tmp/test.rs", "offset": 10});
+
+    // Act
+    let normalized = super::normalize_params(input);
+
+    // Assert: "path" → "file_path", "offset" unchanged
+    assert_eq!(normalized["file_path"], "/tmp/test.rs");
+    assert!(normalized.get("path").is_none());
+    assert_eq!(normalized["offset"], 10);
+}
+
+#[test]
+fn test_normalize_params_file_path_already_exists() {
+    // Arrange: input has both "path" and "file_path" (LLM wrote both)
+    let input = serde_json::json!({"path": "/tmp/wrong.rs", "file_path": "/tmp/right.rs"});
+
+    // Act
+    let normalized = super::normalize_params(input);
+
+    // Assert: "file_path" unchanged, "path" 不清除（保守策略，不丢数据）
+    assert_eq!(normalized["file_path"], "/tmp/right.rs");
+    // "path" 保留原样（因为已经有了 file_path，不覆盖）
+    assert_eq!(normalized["path"], "/tmp/wrong.rs");
+}
+
+#[test]
+fn test_normalize_params_no_alias_present() {
+    // Arrange: normal Read call with correct parameter names
+    let input = serde_json::json!({"file_path": "/tmp/test.rs"});
+
+    // Act
+    let normalized = super::normalize_params(input);
+
+    // Assert: no change
+    assert_eq!(normalized["file_path"], "/tmp/test.rs");
+}
+
+#[test]
+fn test_normalize_params_non_object_input() {
+    // Arrange: input is a string (edge: unlikely but safe)
+    let input = serde_json::Value::String("hello".to_string());
+
+    // Act
+    let normalized = super::normalize_params(input);
+
+    // Assert: returned as-is
+    assert_eq!(normalized, serde_json::Value::String("hello".to_string()));
+}
+
+// ─── A1: Cancel + 部分工具已完成的混合路径 ────────────────────────────
+
+/// 验证执行阶段 cancel：3 个工具并发，fast_tool 在 cancel 到达前已完成，
+/// slow_b/slow_c 被 cancel 中断。所有 tool_use 都有配对 tool_result，
+/// 已完成的结果不丢失（回归 issue_2026-05-26-ctrl-c-interrupt）。
+#[tokio::test]
+async fn test_cancel_during_execution_partial_completion() {
+    // 快速工具：立即返回成功
+    struct FastTool;
+    #[async_trait::async_trait]
+    impl BaseTool for FastTool {
+        fn name(&self) -> &str {
+            "fast_tool"
+        }
+        fn description(&self) -> &str {
+            "completes instantly"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok("fast done".to_string())
+        }
+    }
+
+    // 慢速工具：挂起 60s，等待 cancel
+    struct SlowTool {
+        name_str: &'static str,
+    }
+    #[async_trait::async_trait]
+    impl BaseTool for SlowTool {
+        fn name(&self) -> &str {
+            self.name_str
+        }
+        fn description(&self) -> &str {
+            "hangs until cancelled"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok("never".to_string())
+        }
+    }
+
+    struct MixedSpeedLLM;
+    #[async_trait::async_trait]
+    impl ReactLLM for MixedSpeedLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
+        ) -> AgentResult<Reasoning> {
+            let has_tool_result = messages
+                .iter()
+                .any(|m| matches!(m, BaseMessage::Tool { .. }));
+            if !has_tool_result {
+                Ok(Reasoning::with_tools(
+                    "mixed speed",
+                    vec![
+                        ToolCall::new("id1", "fast_tool", serde_json::json!({})),
+                        ToolCall::new("id2", "slow_b", serde_json::json!({})),
+                        ToolCall::new("id3", "slow_c", serde_json::json!({})),
+                    ],
+                ))
+            } else {
+                Ok(Reasoning::with_answer("done", "all done"))
+            }
+        }
+    }
+
+    let cancel = CancellationToken::new();
+    let agent = ReActAgent::new(MixedSpeedLLM)
+        .max_iterations(5)
+        .register_tool(Box::new(FastTool))
+        .register_tool(Box::new(SlowTool { name_str: "slow_b" }))
+        .register_tool(Box::new(SlowTool { name_str: "slow_c" }));
+
+    // 200ms 后触发取消：fast_tool 已完成，slow_b/slow_c 还在执行
+    let token = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        token.cancel();
+    });
+
+    let mut state = AgentState::new("/tmp");
+    let result = agent
+        .execute(AgentInput::text("go"), &mut state, Some(cancel))
+        .await;
+
+    // 取消后应返回 Interrupted
+    assert!(
+        matches!(result, Err(AgentError::Interrupted)),
+        "取消后应返回 Interrupted，实际: {:?}",
+        result
+    );
+
+    // 核心不变量：所有 tool_use 都有配对 tool_result
+    assert_no_orphaned_tool_uses(&state);
+
+    // fast_tool 结果应为成功（已完成，非 error）
+    let fast_result = state.messages().iter().find_map(|m| {
+        if let BaseMessage::Tool {
+            tool_call_id,
+            is_error,
+            content,
+            ..
+        } = m
+        {
+            if tool_call_id.as_str() == "id1" {
+                Some((*is_error, content.text_content()))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+    assert!(fast_result.is_some(), "fast_tool id=id1 应有 tool_result");
+    let (is_error, output) = fast_result.unwrap();
+    assert!(
+        !is_error,
+        "fast_tool 完成结果不应标记为 error，实际输出: {}",
+        output
+    );
+    assert!(
+        output.contains("fast done"),
+        "fast_tool 应返回正确结果 'fast done'，实际: {}",
+        output
+    );
+
+    // slow_b 和 slow_c 应有 error tool_result（被中断）
+    for id in &["id2", "id3"] {
+        let has_error = state.messages().iter().any(|m| {
+            matches!(m, BaseMessage::Tool { tool_call_id, is_error: true, .. } if tool_call_id.as_str() == *id)
+        });
+        assert!(
+            has_error,
+            "slow tool id={} 被 cancel 中断后应有 error tool_result",
+            id
+        );
+    }
+}
+
+// ─── A2: after_tool 错误路径独立测试 ───────────────────────────────────
+
+/// 验证 after_tool 钩子错误路径：工具 invoke 成功（Ok），但 run_after_tool
+/// 返回错误 → deferred_error=Some。tool_result 仍写入 state，不丢失结果。
+#[tokio::test]
+async fn test_after_tool_error_still_writes_result() {
+    // 中间件：after_tool 对 tool_b 返回错误
+    struct AfterToolFailMiddleware;
+    #[async_trait::async_trait]
+    impl<S: State> Middleware<S> for AfterToolFailMiddleware {
+        fn name(&self) -> &str {
+            "AfterToolFail"
+        }
+        async fn after_tool(
+            &self,
+            _state: &mut S,
+            tool_call: &ToolCall,
+            _result: &ToolResult,
+        ) -> AgentResult<()> {
+            if tool_call.name == "tool_b" {
+                Err(AgentError::MiddlewareError {
+                    middleware: "AfterToolFail".to_string(),
+                    reason: "after_tool 模拟错误".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct EchoTool {
+        name_str: &'static str,
+    }
+    #[async_trait::async_trait]
+    impl BaseTool for EchoTool {
+        fn name(&self) -> &str {
+            self.name_str
+        }
+        fn description(&self) -> &str {
+            "echo"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(format!("{} done", self.name_str))
+        }
+    }
+
+    struct TwoToolLLM;
+    #[async_trait::async_trait]
+    impl ReactLLM for TwoToolLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
+        ) -> AgentResult<Reasoning> {
+            let has_tool_result = messages
+                .iter()
+                .any(|m| matches!(m, BaseMessage::Tool { .. }));
+            if !has_tool_result {
+                Ok(Reasoning::with_tools(
+                    "call two",
+                    vec![
+                        ToolCall::new("id1", "tool_a", serde_json::json!({})),
+                        ToolCall::new("id2", "tool_b", serde_json::json!({})),
+                    ],
+                ))
+            } else {
+                Ok(Reasoning::with_answer("done", "all done"))
+            }
+        }
+    }
+
+    let agent = ReActAgent::new(TwoToolLLM)
+        .max_iterations(5)
+        .register_tool(Box::new(EchoTool { name_str: "tool_a" }))
+        .register_tool(Box::new(EchoTool { name_str: "tool_b" }))
+        .add_middleware(Box::new(AfterToolFailMiddleware));
+
+    let mut state = AgentState::new("/tmp");
+    let result = agent
+        .execute(AgentInput::text("go"), &mut state, None)
+        .await;
+
+    // after_tool 错误导致 dispatch_tools 返回 MiddlewareError
+    assert!(
+        matches!(&result, Err(AgentError::MiddlewareError { .. })),
+        "after_tool 错误应传播为 MiddlewareError，实际: {:?}",
+        result
+    );
+
+    // 核心不变量：所有 tool_use 都有配对 tool_result
+    assert_no_orphaned_tool_uses(&state);
+
+    // tool_a 和 tool_b 的 invoke 都成功了，tool_result 应均为成功
+    for id in &["id1", "id2"] {
+        let tool_msg = state.messages().iter().find(
+            |m| matches!(m, BaseMessage::Tool { tool_call_id, .. } if tool_call_id.as_str() == *id),
+        );
+        assert!(
+            tool_msg.is_some(),
+            "tool id={} 应有 tool_result（after_tool 错误不丢失 invoke 成功的结果）",
+            id
+        );
+        if let Some(BaseMessage::Tool {
+            is_error, content, ..
+        }) = tool_msg
+        {
+            assert!(
+                !is_error,
+                "tool id={} invoke 成功，tool_result 不应标记为 error，实际输出: {}",
+                id,
+                content.text_content()
+            );
+        }
+    }
+}
+
+// ─── A3: 全部并发工具都失败 ─────────────────────────────────────────────
+
+/// 验证 3 个工具并发全部失败：所有 invoke 返回 Err。
+/// 所有 tool_use 都有 error tool_result，无孤儿 tool_use。
+#[tokio::test]
+async fn test_all_concurrent_tools_fail() {
+    struct FailTool {
+        name_str: &'static str,
+        err_msg: &'static str,
+    }
+    #[async_trait::async_trait]
+    impl BaseTool for FailTool {
+        fn name(&self) -> &str {
+            self.name_str
+        }
+        fn description(&self) -> &str {
+            "always fails"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            Err(self.err_msg.into())
+        }
+    }
+
+    struct AllFailLLM;
+    #[async_trait::async_trait]
+    impl ReactLLM for AllFailLLM {
+        async fn generate_reasoning(
+            &self,
+            messages: &[BaseMessage],
+            _tools: &[&dyn BaseTool],
+            _streaming: Option<crate::llm::types::StreamingContext>,
+        ) -> AgentResult<Reasoning> {
+            let has_tool_result = messages
+                .iter()
+                .any(|m| matches!(m, BaseMessage::Tool { .. }));
+            if !has_tool_result {
+                Ok(Reasoning::with_tools(
+                    "call three",
+                    vec![
+                        ToolCall::new("id_a", "tool_a", serde_json::json!({})),
+                        ToolCall::new("id_b", "tool_b", serde_json::json!({})),
+                        ToolCall::new("id_c", "tool_c", serde_json::json!({})),
+                    ],
+                ))
+            } else {
+                // 3 个 tool_result 都写入 state，都是 error → LLM 应判断后给出最终答案
+                Ok(Reasoning::with_answer(
+                    "all failed",
+                    "all tools failed, stopping",
+                ))
+            }
+        }
+    }
+
+    let agent = ReActAgent::new(AllFailLLM)
+        .max_iterations(5)
+        .register_tool(Box::new(FailTool {
+            name_str: "tool_a",
+            err_msg: "error_a",
+        }))
+        .register_tool(Box::new(FailTool {
+            name_str: "tool_b",
+            err_msg: "error_b",
+        }))
+        .register_tool(Box::new(FailTool {
+            name_str: "tool_c",
+            err_msg: "error_c",
+        }));
+
+    let mut state = AgentState::new("/tmp");
+    let result = agent
+        .execute(AgentInput::text("go"), &mut state, None)
+        .await;
+
+    // 全部工具失败不阻止 Agent 继续：LLM 在下一轮看到 error tool_result 后给出最终答案
+    assert!(
+        result.is_ok(),
+        "全部工具失败不阻止 Agent 继续，应返回最终答案，实际: {:?}",
+        result
+    );
+
+    // 核心不变量：所有 tool_use 都有配对 tool_result
+    assert_no_orphaned_tool_uses(&state);
+
+    // 3 个 tool_result 都应为 error=true
+    let error_results: Vec<_> = state
+        .messages()
+        .iter()
+        .filter_map(|m| {
+            if let BaseMessage::Tool {
+                tool_call_id,
+                is_error,
+                ..
+            } = m
+            {
+                Some((tool_call_id.clone(), *is_error))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        error_results.len(),
+        3,
+        "应有 3 个 tool_result，实际: {:?}",
+        error_results
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>()
+    );
+    for (id, is_error) in &error_results {
+        assert!(
+            *is_error,
+            "tool id={} invoke 失败，tool_result 应标记 is_error=true",
+            id.as_str()
+        );
+    }
 }

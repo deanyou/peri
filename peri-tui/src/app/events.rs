@@ -55,6 +55,11 @@ pub enum AgentEvent {
     },
     /// 上下文压缩失败，携带错误信息
     CompactError(String),
+    /// 对话回退完成（rewind 命令）
+    RewindCompleted {
+        summary: String,
+        messages: Vec<peri_agent::messages::BaseMessage>,
+    },
     /// SubAgent 生命周期事件（中间件发出，用于 UI 状态同步）
     ///
     /// 在 SubAgent 实际开始/停止执行时由 SubAgentMiddleware 发出。
@@ -79,10 +84,12 @@ pub enum AgentEvent {
         /// 唯一实例标识符
         instance_id: Option<String>,
     },
-    /// Token 使用量更新（从核心层 LlmCallEnd 映射而来）
+    /// Token 使用量更新（从 enriched UsageUpdate _meta 解析而来）
     TokenUsageUpdate {
         usage: peri_agent::llm::types::TokenUsage,
         model: String,
+        /// LLM 响应停止原因
+        stop_reason: Option<peri_agent::llm::types::StopReason>,
     },
     /// LLM 调用重试中（从核心层 LlmRetrying 映射而来）
     LlmRetrying {
@@ -143,5 +150,9 @@ pub enum AgentEvent {
         errors: usize,
         warnings: usize,
         files_with_errors: usize,
+    },
+    /// 后台 agent 工具调用进度（轻量级，仅用于 bg_agent_bar 实时计数）
+    BgToolStep {
+        child_thread_id: String,
     },
 }

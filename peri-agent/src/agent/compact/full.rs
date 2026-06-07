@@ -1,9 +1,12 @@
-use crate::agent::compact::config::CompactConfig;
-use crate::agent::compact::invariant::{group_messages_by_round, MessageRound};
-use crate::error::{AgentError, AgentResult};
-use crate::llm::types::LlmRequest;
-use crate::llm::BaseModel;
-use crate::messages::{BaseMessage, ContentBlock, MessageContent};
+use crate::{
+    agent::compact::{
+        config::CompactConfig,
+        invariant::{group_messages_by_round, MessageRound},
+    },
+    error::{AgentError, AgentResult},
+    llm::{types::LlmRequest, BaseModel},
+    messages::{BaseMessage, ContentBlock, MessageContent},
+};
 use tracing::warn;
 
 /// 结构化摘要 system prompt
@@ -39,7 +42,7 @@ pub struct FullCompactResult {
 fn truncate_str(s: &str, max: usize) -> String {
     if s.chars().count() > max {
         let end: String = s.chars().take(max).collect();
-        format!("{}...(已截断)", end)
+        format!("{}...(truncated)", end)
     } else {
         s.to_string()
     }
@@ -66,6 +69,33 @@ fn replace_images_and_truncate(content: &MessageContent, max_chars: usize) -> St
     truncate_str(&full, max_chars)
 }
 
+/// 将工具调用格式化为包含关键参数的摘要。
+///
+/// 提取路径相关字段（file_path/path/folder_path）和命令字段（command/pattern），
+/// 让摘要 LLM 能保留精确的文件路径，避免 compact 后 agent 丢失路径上下文。
+fn format_tool_call_summary(tc: &crate::messages::ToolCallRequest) -> String {
+    let args = &tc.arguments;
+    let key_fields = ["file_path", "path", "folder_path", "command", "pattern"];
+    let mut parts = Vec::new();
+    for field in &key_fields {
+        if let Some(val) = args.get(*field).and_then(|v| v.as_str()) {
+            // 字符级截断，避免 CJK 字符 panic
+            let truncated: String = val.chars().take(200).collect();
+            let display = if truncated.chars().count() < val.chars().count() {
+                format!("{}...", truncated)
+            } else {
+                truncated
+            };
+            parts.push(format!("{}=\"{}\"", field, display));
+        }
+    }
+    if parts.is_empty() {
+        tc.name.clone()
+    } else {
+        format!("{}({})", tc.name, parts.join(", "))
+    }
+}
+
 /// 预处理消息：跳过 System、替换 Image block 为 [image]、截断每条消息
 fn preprocess_messages(messages: &[BaseMessage], truncate_chars: usize) -> Vec<String> {
     let mut lines = Vec::new();
@@ -74,21 +104,26 @@ fn preprocess_messages(messages: &[BaseMessage], truncate_chars: usize) -> Vec<S
             BaseMessage::System { .. } => {}
             BaseMessage::Human { .. } => {
                 let content = replace_images_and_truncate(msg.message_content(), truncate_chars);
-                lines.push(format!("[用户] {}", content));
+                lines.push(format!("[User] {}", content));
             }
             BaseMessage::Ai { tool_calls, .. } => {
                 let text = replace_images_and_truncate(msg.message_content(), truncate_chars);
-                let tool_names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
-                let line = if tool_names.is_empty() {
-                    format!("[助手] {}", text)
+                let line = if tool_calls.is_empty() {
+                    format!("[Assistant] {}", text)
                 } else {
-                    format!("[助手] {}（调用了工具: {}）", text, tool_names.join(", "))
+                    let tool_summaries: Vec<String> =
+                        tool_calls.iter().map(format_tool_call_summary).collect();
+                    format!(
+                        "[Assistant] {}（tools: {}）",
+                        text,
+                        tool_summaries.join(", ")
+                    )
                 };
                 lines.push(line);
             }
             BaseMessage::Tool { tool_call_id, .. } => {
                 let content = replace_images_and_truncate(msg.message_content(), truncate_chars);
-                lines.push(format!("[工具结果:{}] {}", tool_call_id, content));
+                lines.push(format!("[ToolResult:{}] {}", tool_call_id, content));
             }
         }
     }
@@ -139,7 +174,7 @@ fn postprocess_summary(raw: &str) -> String {
         text = summary_content;
     }
 
-    let prefix = "此会话从之前的对话延续。以下是之前对话的摘要。";
+    let prefix = "This session continues from a previous conversation. Below is a summary of the prior dialogue.";
 
     text = text.trim().to_string();
     while text.contains("\n\n\n") {
@@ -212,7 +247,7 @@ pub async fn full_compact(
 
     if non_system_count == 0 {
         return Ok(FullCompactResult {
-            summary: postprocess_summary("## 摘要\n（无有效对话历史）"),
+            summary: postprocess_summary("## Summary\n(No valid conversation history)"),
             messages_used: messages.len(),
         });
     }
@@ -225,12 +260,15 @@ pub async fn full_compact(
         let conversation_text = truncated.join("\n");
 
         let mut user_content = format!(
-            "以下是需要压缩的对话历史：\n<conversation>\n{}\n</conversation>\n\n{}",
+            "Compress the following conversation history:\n<conversation>\n{}\n</conversation>\n\n{}",
             conversation_text, USER_PROMPT_TEMPLATE
         );
 
         if !instructions.trim().is_empty() {
-            user_content.push_str(&format!("\n\n压缩时请特别注意：{}", instructions.trim()));
+            user_content.push_str(&format!(
+                "\n\nPay special attention to: {}",
+                instructions.trim()
+            ));
         }
 
         let request = LlmRequest::new(vec![BaseMessage::human(user_content)])

@@ -1,6 +1,8 @@
 use super::*;
-use crate::error::AgentError;
-use crate::llm::types::{LlmResponse, StopReason};
+use crate::{
+    error::AgentError,
+    llm::types::{LlmResponse, StopReason},
+};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -70,7 +72,7 @@ fn test_preprocess_truncates_long_text() {
     let msgs = vec![BaseMessage::human(long_text)];
     let result = preprocess_messages(&msgs, 2000);
     assert_eq!(result.len(), 1);
-    assert!(result[0].contains("...(已截断)"));
+    assert!(result[0].contains("...(truncated)"));
 }
 
 #[test]
@@ -98,7 +100,46 @@ fn test_preprocess_formats_tool_calls() {
     )];
     let result = preprocess_messages(&msgs, 2000);
     assert_eq!(result.len(), 1);
-    assert!(result[0].contains("（调用了工具: Bash, Read）"));
+    // 无参数工具只显示名称
+    assert!(result[0].contains("Bash"));
+    assert!(result[0].contains("Read"));
+}
+
+#[test]
+fn test_preprocess_preserves_tool_file_paths() {
+    use crate::messages::ToolCallRequest;
+    use serde_json::json;
+    let msgs = vec![BaseMessage::ai_with_tool_calls(
+        MessageContent::text(""),
+        vec![
+            ToolCallRequest::new(
+                "tc1",
+                "Read",
+                json!({"file_path": "/Users/dev/project-a/src/lib.rs"}),
+            ),
+            ToolCallRequest::new(
+                "tc2",
+                "Grep",
+                json!({"pattern": "fn main", "path": "/Users/dev/project-a/src"}),
+            ),
+            ToolCallRequest::new("tc3", "Bash", json!({"command": "cargo test"})),
+        ],
+    )];
+    let result = preprocess_messages(&msgs, 2000);
+    assert_eq!(result.len(), 1);
+    let line = &result[0];
+    assert!(
+        line.contains("file_path=\"/Users/dev/project-a/src/lib.rs\""),
+        "Read file_path 应被保留"
+    );
+    assert!(
+        line.contains("path=\"/Users/dev/project-a/src\""),
+        "Grep path 应被保留"
+    );
+    assert!(
+        line.contains("command=\"cargo test\""),
+        "Bash command 应被保留"
+    );
 }
 
 #[test]
@@ -106,7 +147,7 @@ fn test_preprocess_formats_tool_result() {
     let msgs = vec![BaseMessage::tool_result("tc1", "output text")];
     let result = preprocess_messages(&msgs, 2000);
     assert_eq!(result.len(), 1);
-    assert!(result[0].contains("[工具结果:tc1]"));
+    assert!(result[0].contains("[ToolResult:tc1]"));
     assert!(result[0].contains("output text"));
 }
 
@@ -124,7 +165,7 @@ fn test_postprocess_removes_analysis() {
     let result = postprocess_summary(input);
     assert!(!result.contains("<analysis>"));
     assert!(!result.contains("</analysis>"));
-    assert!(result.contains("此会话从之前的对话延续"));
+    assert!(result.contains("This session continues"));
 }
 
 #[test]
@@ -140,7 +181,7 @@ fn test_postprocess_extracts_summary_tag() {
 fn test_postprocess_no_tags() {
     let input = "## 摘要\n这是直接输出的摘要文本";
     let result = postprocess_summary(input);
-    assert!(result.contains("此会话从之前的对话延续"));
+    assert!(result.contains("This session continues"));
     assert!(result.contains("这是直接输出的摘要文本"));
 }
 
@@ -277,7 +318,7 @@ async fn test_full_compact_basic() {
     let model = MockBaseModel::new("## 摘要\n用户请求编写函数");
     let config = CompactConfig::default();
     let result = full_compact(&msgs, &model, &config, "").await.unwrap();
-    assert!(result.summary.contains("此会话从之前的对话延续"));
+    assert!(result.summary.contains("This session continues"));
     assert_eq!(result.messages_used, 3);
 }
 
@@ -286,7 +327,7 @@ async fn test_full_compact_empty_messages() {
     let model = MockBaseModel::new("summary");
     let config = CompactConfig::default();
     let result = full_compact(&[], &model, &config, "").await.unwrap();
-    assert!(result.summary.contains("无有效对话历史"));
+    assert!(result.summary.contains("No valid conversation history"));
     assert_eq!(result.messages_used, 0);
 }
 
@@ -296,7 +337,7 @@ async fn test_full_compact_system_only() {
     let model = MockBaseModel::new("summary");
     let config = CompactConfig::default();
     let result = full_compact(&msgs, &model, &config, "").await.unwrap();
-    assert!(result.summary.contains("无有效对话历史"));
+    assert!(result.summary.contains("No valid conversation history"));
     assert_eq!(result.messages_used, 1);
 }
 
@@ -308,7 +349,7 @@ async fn test_full_compact_with_instructions() {
     let result = full_compact(&msgs, &model, &config, "请特别关注文件路径信息")
         .await
         .unwrap();
-    assert!(result.summary.contains("此会话从之前的对话延续"));
+    assert!(result.summary.contains("This session continues"));
 }
 
 #[tokio::test]
@@ -394,4 +435,110 @@ async fn test_full_compact_whitespace_only_summary_rejected() {
     let config = CompactConfig::default();
     let result = full_compact(&msgs, &model, &config, "").await;
     assert!(result.is_err(), "纯空白摘要应被拒绝");
+}
+
+// ── 纯 ToolResult 消息测试 ──────────────────────────────────────────────────
+// 对应 TRAP: CLAUDE.md compact 不变量（compact 后必须以 Human 开头）
+
+/// 验证 preprocess_messages 对纯 Tool 消息的格式化
+#[test]
+fn test_preprocess_pure_tool_messages() {
+    let msgs = vec![
+        BaseMessage::tool_result("tc1", "echo done"),
+        BaseMessage::tool_result("tc2", "file content here"),
+        BaseMessage::tool_result("tc3", "grep result"),
+    ];
+    let result = preprocess_messages(&msgs, 2000);
+    // 纯 Tool 消息应被格式化为 [ToolResult:id]
+    assert_eq!(result.len(), 3, "纯 Tool 消息不应丢失");
+    for (i, line) in result.iter().enumerate() {
+        let expected_prefix = format!("[ToolResult:tc{}]", i + 1);
+        assert!(
+            line.starts_with(&expected_prefix),
+            "第{}条应格式化为 '{}'，实际: {}",
+            i + 1,
+            expected_prefix,
+            line
+        );
+    }
+}
+
+/// 验证纯 Tool 消息（无 Human/Ai）的 full_compact 调用 LLM，
+/// 返回后消息结构以 Human 开头。
+#[tokio::test]
+async fn test_full_compact_pure_tool_results() {
+    let msgs = vec![
+        BaseMessage::tool_result("tc1", "编译成功"),
+        BaseMessage::tool_result("tc2", "找到 3 个匹配"),
+        BaseMessage::tool_result("tc3", "文件不存在"),
+    ];
+    // MockModel 返回有效摘要
+    let model = MockBaseModel::new("## 摘要\n用户执行了若干命令");
+    let config = CompactConfig::default();
+
+    let result = full_compact(&msgs, &model, &config, "").await;
+    assert!(result.is_ok(), "纯 ToolResult full_compact 应成功");
+    let compact_result = result.unwrap();
+
+    // 摘要包含续接前缀（postprocess_summary 注入）
+    assert!(
+        compact_result.summary.contains("This session continues"),
+        "摘要应包含续接提示"
+    );
+    // messages_used 应为 3
+    assert_eq!(compact_result.messages_used, 3, "应统计所有 Tool 消息");
+}
+
+/// 验证纯 Tool 消息 compact 后，LLM 请求体中包含 human 消息
+/// （通过 MockBaseModel 捕获请求来间接验证）
+#[tokio::test]
+async fn test_full_compact_pure_tool_results_request_contains_human() {
+    use std::sync::Mutex;
+    struct CapturingModel {
+        captured_msgs: Mutex<Vec<BaseMessage>>,
+    }
+    #[async_trait]
+    impl BaseModel for CapturingModel {
+        async fn invoke(&self, request: LlmRequest) -> AgentResult<LlmResponse> {
+            self.captured_msgs
+                .lock()
+                .unwrap()
+                .extend(request.messages.clone());
+            Ok(LlmResponse {
+                message: BaseMessage::ai("## 摘要\n测试摘要"),
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+                request_id: None,
+            })
+        }
+        fn provider_name(&self) -> &str {
+            "capture"
+        }
+        fn model_id(&self) -> &str {
+            "capture-model"
+        }
+    }
+
+    let msgs = vec![
+        BaseMessage::tool_result("t1", "output 1"),
+        BaseMessage::tool_result("t2", "output 2"),
+    ];
+    let model = CapturingModel {
+        captured_msgs: Mutex::new(vec![]),
+    };
+    let config = CompactConfig::default();
+
+    let result = full_compact(&msgs, &model, &config, "").await;
+    assert!(result.is_ok());
+
+    // 请求体中应包含 Human 消息（full_compact 构建的摘要 prompt）
+    let captured = model.captured_msgs.lock().unwrap();
+    let has_human = captured
+        .iter()
+        .any(|m| matches!(m, BaseMessage::Human { .. }));
+    assert!(
+        has_human,
+        "LLM 请求体应包含 Human 消息（摘要 prompt），实际消息数: {}",
+        captured.len()
+    );
 }

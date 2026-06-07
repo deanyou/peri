@@ -1,5 +1,7 @@
-use crate::app::{agent, App, MessageViewModel};
-use crate::command::Command;
+use crate::{
+    app::{agent, App, MessageViewModel},
+    command::Command,
+};
 
 pub struct ModelCommand;
 
@@ -23,7 +25,8 @@ impl Command for ModelCommand {
                 cfg.config.active_alias = alias.clone();
                 if let Err(e) = App::save_config(cfg, app.services.config_path_override.as_deref())
                 {
-                    app.session_mgr.sessions[app.session_mgr.active]
+                    app.session_mgr
+                        .current_mut()
                         .messages
                         .view_messages
                         .push(MessageViewModel::system(format!("配置保存失败: {}", e)));
@@ -32,7 +35,13 @@ impl Command for ModelCommand {
                     app.services.provider_name = p.display_name().to_string();
                     app.services.model_name = p.model_name().to_string();
                 }
-                app.services.sync_peri_config_to_acp();
+                if let Some(ref acp_client) = app.acp_client {
+                    let acp = acp_client.clone();
+                    let alias_val = alias.clone();
+                    tokio::spawn(async move {
+                        let _ = acp.set_config_option("model", &alias_val).await;
+                    });
+                }
             }
             _ => {
                 app.open_model_panel();

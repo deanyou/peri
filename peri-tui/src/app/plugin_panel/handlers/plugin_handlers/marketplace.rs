@@ -1,10 +1,11 @@
 use tui_textarea::{Input, Key};
 
-use peri_widgets::InputState;
-
-use crate::app::panel_manager::{EventResult, PanelContext};
-use crate::app::plugin_panel::PluginPanel;
-use crate::app::AgentEvent;
+use crate::app::FieldTextarea;
+use crate::app::{
+    panel_manager::{EventResult, PanelContext},
+    plugin_panel::PluginPanel,
+    AgentEvent,
+};
 
 impl PluginPanel {
     pub(crate) fn handle_marketplaces_list(
@@ -49,7 +50,7 @@ impl PluginPanel {
                 key: Key::Enter, ..
             } => {
                 if self.marketplace_list.cursor() == 0 {
-                    self.add_marketplace_input = InputState::new();
+                    self.add_marketplace_input = FieldTextarea::single_line();
                     self.add_marketplace_active = true;
                 } else if let Some(entry) = self
                     .marketplace_entries
@@ -88,10 +89,7 @@ impl PluginPanel {
                                         plugin_id: name.clone(),
                                         action: "refresh".to_string(),
                                         success: true,
-                                        message: format!(
-                                            "Marketplace '{}' \u{5df2}\u{66f4}\u{65b0}",
-                                            name
-                                        ),
+                                        message: format!("Marketplace '{}' 已更新", name),
                                     })
                                     .await;
                             }
@@ -101,18 +99,18 @@ impl PluginPanel {
                                         plugin_id: name.clone(),
                                         action: "refresh".to_string(),
                                         success: false,
-                                        message: format!("\u{66f4}\u{65b0}\u{5931}\u{8d25}: {}", e),
+                                        message: format!("更新失败: {}", e),
                                     })
                                     .await;
                             }
                         }
                     });
-                    ctx.session_mgr.sessions[ctx.session_mgr.active]
-                        .messages
-                        .push_system_note(ctx.services.lc.tr_args(
+                    ctx.session_mgr.current_mut().messages.push_system_note(
+                        ctx.services.lc.tr_args(
                             "app-plugin-updating",
                             &[("name".into(), name_for_msg.into())],
-                        ));
+                        ),
+                    );
                 }
                 EventResult::Consumed
             }
@@ -141,7 +139,7 @@ impl PluginPanel {
         match input {
             Input { key: Key::Esc, .. } => {
                 self.add_marketplace_active = false;
-                self.add_marketplace_input = InputState::new();
+                self.add_marketplace_input = FieldTextarea::single_line();
                 EventResult::Consumed
             }
             Input {
@@ -149,30 +147,40 @@ impl PluginPanel {
             } => {
                 let input_str = self.add_marketplace_input.value().trim().to_string();
                 self.add_marketplace_active = false;
-                self.add_marketplace_input = InputState::new();
+                self.add_marketplace_input = FieldTextarea::single_line();
                 if !input_str.is_empty() {
                     if let Err(e) = self.persist_marketplace_add(&input_str, ctx) {
-                        ctx.session_mgr.sessions[ctx.session_mgr.active]
-                            .messages
-                            .push_system_note(ctx.services.lc.tr_args(
+                        ctx.session_mgr.current_mut().messages.push_system_note(
+                            ctx.services.lc.tr_args(
                                 "app-plugin-add-failed",
                                 &[("error".into(), e.to_string().into())],
-                            ));
+                            ),
+                        );
                     }
                 }
+                EventResult::Consumed
+            }
+            Input {
+                key: Key::Char(ch), ..
+            } => {
+                self.add_marketplace_input.input(Input {
+                    key: Key::Char(ch),
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                });
                 EventResult::Consumed
             }
             Input {
                 key: Key::Backspace,
                 ..
             } => {
-                self.add_marketplace_input.backspace();
-                EventResult::Consumed
-            }
-            Input {
-                key: Key::Char(ch), ..
-            } => {
-                self.add_marketplace_input.insert(ch);
+                self.add_marketplace_input.input(Input {
+                    key: Key::Backspace,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                });
                 EventResult::Consumed
             }
             _ => EventResult::Consumed,

@@ -1,13 +1,19 @@
 use peri_agent::tools::BaseTool;
 use serde_json::Value;
-use std::cell::Cell;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::{
+    cell::Cell,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+};
 use tokio::time::{timeout, Duration};
 
-use grep::regex::RegexMatcherBuilder;
-use grep::searcher::{BinaryDetection, SearcherBuilder};
+use grep::{
+    regex::RegexMatcherBuilder,
+    searcher::{BinaryDetection, SearcherBuilder},
+};
 use ignore::WalkBuilder;
 
 /// Grep tool - 与 Claude Code Grep 工具对齐
@@ -55,8 +61,10 @@ When to use:
 
 use crate::tools::output_persist::persist_truncated_output;
 
-use super::grep_args::{GrepInput, OutputMode, ParsedArgs};
-use super::grep_format::SearchSink;
+use super::{
+    grep_args::{GrepInput, OutputMode, ParsedArgs},
+    grep_format::SearchSink,
+};
 
 /// 核心搜索函数（同步，在 spawn_blocking 中运行）
 fn execute_search(
@@ -337,7 +345,7 @@ impl BaseTool for GrepTool {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let pattern = match input.get("pattern").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
-            None => return Ok("Error: Missing required parameter 'pattern'".to_string()),
+            None => return Err("Error: Missing required parameter 'pattern'".into()),
         };
 
         let grep_input = GrepInput {
@@ -395,7 +403,7 @@ impl BaseTool for GrepTool {
 
         let parsed = match grep_input.to_parsed_args() {
             Ok(p) => p,
-            Err(e) => return Ok(format!("Error: {e}")),
+            Err(e) => return Err(format!("Error: {e}").into()),
         };
 
         let head_limit = grep_input.head_limit;
@@ -410,13 +418,13 @@ impl BaseTool for GrepTool {
         // offset 后处理（在超时/结果后应用）
         let output =
             match result {
-                Err(_) => return Ok(
+                Err(_) => return Err(
                     "Error: Search timed out after 15 seconds. Please use a more specific pattern."
-                        .to_string(),
+                        .into(),
                 ),
-                Ok(Err(e)) => return Ok(format!("Error: {e}")),
+                Ok(Err(e)) => return Err(format!("Error: {e}").into()),
                 Ok(Ok(Ok(output))) => output,
-                Ok(Ok(Err(e))) => return Ok(format!("Error: {e}")),
+                Ok(Ok(Err(e))) => return Err(format!("Error: {e}").into()),
             };
 
         // 应用 offset：跳过前 N 行

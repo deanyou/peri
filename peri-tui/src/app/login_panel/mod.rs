@@ -1,7 +1,7 @@
+use crate::app::FieldTextarea;
 use crate::config::{PeriConfig, ProviderConfig, ProviderModels};
 
-use super::panel_list::PanelList;
-use super::App;
+use super::{panel_list::PanelList, App};
 
 // ─── 默认模型名常量表 ─────────────────────────────────────────────────────────
 
@@ -91,20 +91,13 @@ pub struct LoginPanel {
     /// 正在编辑的字段（Edit/New 模式下）
     pub edit_field: LoginEditField,
     /// 编辑缓冲区
-    pub buf_name: String,
-    pub buf_type: String,
-    pub buf_base_url: String,
-    pub buf_api_key: String,
-    pub buf_opus_model: String,
-    pub buf_sonnet_model: String,
-    pub buf_haiku_model: String,
-    /// 各字段的编辑光标（char-based index）
-    pub cur_name: usize,
-    pub cur_base_url: usize,
-    pub cur_api_key: usize,
-    pub cur_opus_model: usize,
-    pub cur_sonnet_model: usize,
-    pub cur_haiku_model: usize,
+    pub field_name: FieldTextarea,
+    pub buf_type: String, // Type 不可编辑，保持 String
+    pub field_base_url: FieldTextarea,
+    pub field_api_key: FieldTextarea,
+    pub field_opus_model: FieldTextarea,
+    pub field_sonnet_model: FieldTextarea,
+    pub field_haiku_model: FieldTextarea,
 }
 
 impl LoginPanel {
@@ -123,19 +116,13 @@ impl LoginPanel {
             mode: LoginPanelMode::Browse,
             browse_list,
             edit_field: LoginEditField::Name,
-            buf_name: String::new(),
+            field_name: FieldTextarea::single_line(),
             buf_type: String::new(),
-            buf_base_url: String::new(),
-            buf_api_key: String::new(),
-            buf_opus_model: String::new(),
-            buf_sonnet_model: String::new(),
-            buf_haiku_model: String::new(),
-            cur_name: 0,
-            cur_base_url: 0,
-            cur_api_key: 0,
-            cur_opus_model: 0,
-            cur_sonnet_model: 0,
-            cur_haiku_model: 0,
+            field_base_url: FieldTextarea::single_line(),
+            field_api_key: FieldTextarea::single_line(),
+            field_opus_model: FieldTextarea::single_line(),
+            field_sonnet_model: FieldTextarea::single_line(),
+            field_haiku_model: FieldTextarea::single_line(),
         }
     }
 
@@ -154,19 +141,13 @@ impl LoginPanel {
     /// 进入编辑模式（编辑光标处的 provider）
     pub fn enter_edit(&mut self) {
         if let Some(p) = self.providers.get(self.cursor()) {
-            self.buf_name = p.display_name().to_string();
+            self.field_name.set_value(p.display_name());
             self.buf_type = p.provider_type.clone();
-            self.buf_base_url = p.base_url.clone();
-            self.buf_api_key = p.api_key.clone();
-            self.buf_opus_model = p.models.opus.clone();
-            self.buf_sonnet_model = p.models.sonnet.clone();
-            self.buf_haiku_model = p.models.haiku.clone();
-            self.cur_name = self.buf_name.chars().count();
-            self.cur_base_url = self.buf_base_url.chars().count();
-            self.cur_api_key = self.buf_api_key.chars().count();
-            self.cur_opus_model = self.buf_opus_model.chars().count();
-            self.cur_sonnet_model = self.buf_sonnet_model.chars().count();
-            self.cur_haiku_model = self.buf_haiku_model.chars().count();
+            self.field_base_url.set_value(&p.base_url);
+            self.field_api_key.set_value(&p.api_key);
+            self.field_opus_model.set_value(&p.models.opus);
+            self.field_sonnet_model.set_value(&p.models.sonnet);
+            self.field_haiku_model.set_value(&p.models.haiku);
             self.edit_field = LoginEditField::Name;
             self.mode = LoginPanelMode::Edit;
         }
@@ -174,13 +155,13 @@ impl LoginPanel {
 
     /// 进入新建模式（清空所有缓冲，type 默认 "openai"，模型名按 type 自动填充）
     pub fn enter_new(&mut self) {
-        self.buf_name = String::new();
+        self.field_name.clear();
         self.buf_type = "openai".to_string();
-        self.buf_base_url = String::new();
-        self.buf_api_key = String::new();
-        self.buf_opus_model = String::new();
-        self.buf_sonnet_model = String::new();
-        self.buf_haiku_model = String::new();
+        self.field_base_url.clear();
+        self.field_api_key.clear();
+        self.field_opus_model.clear();
+        self.field_sonnet_model.clear();
+        self.field_haiku_model.clear();
         self.auto_fill_models_for_type();
         self.edit_field = LoginEditField::Name;
         self.mode = LoginPanelMode::New;
@@ -230,38 +211,24 @@ impl LoginPanel {
         }
     }
 
-    /// 获取当前编辑字段的 (buf, cursor) 可变引用
-    pub fn active_field(&mut self) -> Option<(&mut String, &mut usize)> {
+    /// 获取当前编辑字段的 FieldTextarea 可变引用
+    pub fn active_field(&mut self) -> Option<&mut FieldTextarea> {
         match self.edit_field {
-            LoginEditField::Name => Some((&mut self.buf_name, &mut self.cur_name)),
+            LoginEditField::Name => Some(&mut self.field_name),
             LoginEditField::Type => None,
-            LoginEditField::BaseUrl => Some((&mut self.buf_base_url, &mut self.cur_base_url)),
-            LoginEditField::ApiKey => Some((&mut self.buf_api_key, &mut self.cur_api_key)),
-            LoginEditField::OpusModel => Some((&mut self.buf_opus_model, &mut self.cur_opus_model)),
-            LoginEditField::SonnetModel => {
-                Some((&mut self.buf_sonnet_model, &mut self.cur_sonnet_model))
-            }
-            LoginEditField::HaikuModel => {
-                Some((&mut self.buf_haiku_model, &mut self.cur_haiku_model))
-            }
+            LoginEditField::BaseUrl => Some(&mut self.field_base_url),
+            LoginEditField::ApiKey => Some(&mut self.field_api_key),
+            LoginEditField::OpusModel => Some(&mut self.field_opus_model),
+            LoginEditField::SonnetModel => Some(&mut self.field_sonnet_model),
+            LoginEditField::HaikuModel => Some(&mut self.field_haiku_model),
         }
     }
 
     /// 粘贴文本到当前活动字段（过滤换行符，Type 字段忽略粘贴）
     pub fn paste_text(&mut self, text: &str) {
         let text: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
-        if let Some((buf, cursor)) = self.active_field() {
-            let char_count = buf.chars().count();
-            if *cursor > char_count {
-                *cursor = char_count;
-            }
-            let byte_pos = buf
-                .char_indices()
-                .nth(*cursor)
-                .map(|(i, _)| i)
-                .unwrap_or(buf.len());
-            buf.insert_str(byte_pos, &text);
-            *cursor += text.chars().count();
+        if let Some(field) = self.active_field() {
+            field.insert_text(&text);
         }
     }
 
@@ -293,14 +260,14 @@ impl LoginPanel {
                 .any(|(o, s, h)| val == o || val == s || val == h)
         };
 
-        if is_default_or_empty(&self.buf_opus_model) {
-            self.buf_opus_model = opus_default;
+        if is_default_or_empty(&self.field_opus_model.value()) {
+            self.field_opus_model.set_value(&opus_default);
         }
-        if is_default_or_empty(&self.buf_sonnet_model) {
-            self.buf_sonnet_model = sonnet_default;
+        if is_default_or_empty(&self.field_sonnet_model.value()) {
+            self.field_sonnet_model.set_value(&sonnet_default);
         }
-        if is_default_or_empty(&self.buf_haiku_model) {
-            self.buf_haiku_model = haiku_default;
+        if is_default_or_empty(&self.field_haiku_model.value()) {
+            self.field_haiku_model.set_value(&haiku_default);
         }
     }
 
@@ -311,11 +278,12 @@ impl LoginPanel {
     /// 新建 Provider 后，active_provider_id 为空时自动设置为新建的 Provider ID
     pub fn apply_edit(&mut self, cfg: &mut PeriConfig) -> bool {
         let is_new = self.mode == LoginPanelMode::New;
+        let name = self.field_name.value();
         let id = if is_new {
-            if self.buf_name.trim().is_empty() {
+            if name.trim().is_empty() {
                 return false;
             }
-            self.buf_name.trim().to_lowercase().replace(' ', "_")
+            name.trim().to_lowercase().replace(' ', "_")
         } else {
             self.providers
                 .get(self.cursor())
@@ -330,17 +298,17 @@ impl LoginPanel {
         let mut p = ProviderConfig {
             id: id.clone(),
             provider_type: self.buf_type.clone(),
-            api_key: self.buf_api_key.clone(),
-            base_url: self.buf_base_url.clone(),
-            name: if self.buf_name.trim().is_empty() {
+            api_key: self.field_api_key.value(),
+            base_url: self.field_base_url.value(),
+            name: if name.trim().is_empty() {
                 None
             } else {
-                Some(self.buf_name.trim().to_string())
+                Some(name.trim().to_string())
             },
             models: ProviderModels {
-                opus: self.buf_opus_model.clone(),
-                sonnet: self.buf_sonnet_model.clone(),
-                haiku: self.buf_haiku_model.clone(),
+                opus: self.field_opus_model.value(),
+                sonnet: self.field_sonnet_model.value(),
+                haiku: self.field_haiku_model.value(),
             },
             thinking: None,
             extra: Default::default(),
