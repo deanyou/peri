@@ -1,5 +1,6 @@
-use super::{message_pipeline::PipelineAction, *};
 use peri_agent::{agent::events::CompactFileInfo, messages::BaseMessage};
+
+use super::{message_pipeline::PipelineAction, *};
 
 impl App {
     pub(crate) fn handle_compact_started(&mut self) -> (bool, bool, bool) {
@@ -132,6 +133,11 @@ impl App {
             prefix_len: 0,
             tail_vms: view_msgs,
         });
+
+        // 将被撤回的用户消息文本回填到输入框
+        if let Some(text) = self.session_mgr.current_mut().ui.pending_rewind_text.take() {
+            self.session_mgr.current_mut().ui.textarea.insert_str(&text);
+        }
 
         (true, false, false)
     }

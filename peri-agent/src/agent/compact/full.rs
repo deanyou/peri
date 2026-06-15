@@ -1,3 +1,5 @@
+use tracing::warn;
+
 use crate::{
     agent::compact::{
         config::CompactConfig,
@@ -7,28 +9,28 @@ use crate::{
     llm::{types::LlmRequest, BaseModel},
     messages::{BaseMessage, ContentBlock, MessageContent},
 };
-use tracing::warn;
 
 /// 结构化摘要 system prompt
-const SYSTEM_PROMPT: &str = "你是一个对话上下文压缩工具，擅长将长对话压缩为结构化摘要。";
+const SYSTEM_PROMPT: &str =
+    "You are a conversation context compression tool. You excel at compressing long conversations into structured summaries.";
 
 /// 结构化摘要 user prompt 模板
-const USER_PROMPT_TEMPLATE: &str = r#"请分析以下对话历史，按以下 9 个方面进行详细分析：
+const USER_PROMPT_TEMPLATE: &str = r#"Analyze the following conversation history and produce a structured summary covering these areas:
 
 <analysis>
-1. **Primary Request and Intent** — 用户的核心请求和意图
-2. **Key Technical Concepts** — 涉及的关键技术概念和框架
-3. **Files and Code Sections** — 操作过的文件路径和关键代码片段
-4. **Errors and Fixes** — 遇到的错误及其修复方法
-5. **Problem Solving** — 问题解决的思路和过程
-6. **All User Messages** — 所有用户消息的摘要
-7. **Pending Tasks** — 尚未完成的任务
-8. **Current Work** — 当前正在进行的工作
-9. **Optional Next Step** — 建议的下一步行动
+1. **Primary Request and Intent** — The user's core request and intent
+2. **Key Technical Concepts** — Technical concepts and frameworks involved
+3. **Files and Code Sections** — File paths operated on and key code snippets (preserve exact absolute paths from the working directory above)
+4. **Errors and Fixes** — Errors encountered and how they were fixed
+5. **Problem Solving** — Problem-solving approach and process
+6. **All User Messages** — Summary of all user messages
+7. **Pending Tasks** — Tasks that remain incomplete
+8. **Current Work** — What is currently being worked on
+9. **Optional Next Step** — Suggested next action
 </analysis>
 
 <summary>
-基于以上分析，生成精炼的结构化摘要。保留所有文件路径、错误信息和关键决策。使用 Markdown 格式。
+Based on the analysis above, generate a concise structured summary. Preserve all file paths (always use absolute paths), error messages, and key decisions. Use Markdown format.
 </summary>"#;
 
 /// Full Compact 执行结果
@@ -239,6 +241,7 @@ pub async fn full_compact(
     model: &dyn BaseModel,
     config: &CompactConfig,
     instructions: &str,
+    cwd: &str,
 ) -> AgentResult<FullCompactResult> {
     let non_system_count = messages
         .iter()
@@ -260,8 +263,9 @@ pub async fn full_compact(
         let conversation_text = truncated.join("\n");
 
         let mut user_content = format!(
-            "Compress the following conversation history:\n<conversation>\n{}\n</conversation>\n\n{}",
-            conversation_text, USER_PROMPT_TEMPLATE
+            "Compress the following conversation history:\n<conversation>\n{}\n</conversation>\n\n\
+             Current working directory: {}\n\n{}",
+            conversation_text, cwd, USER_PROMPT_TEMPLATE
         );
 
         if !instructions.trim().is_empty() {

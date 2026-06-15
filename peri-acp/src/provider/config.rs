@@ -2,9 +2,10 @@
 //!
 //! 从 peri-tui 迁移，移除 TUI 特有关联。
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 
 /// 顶层包装（与 ~/.peri/settings.json 的 { "config": {...} } 对应）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -102,11 +103,7 @@ impl ThinkingConfig {
 
 /// Beta 功能开关配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct BetasConfig {
-    /// 启用 line edit 基于行号的编辑模式
-    #[serde(default)]
-    pub line_edit: bool,
-}
+pub struct BetasConfig {}
 
 /// 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

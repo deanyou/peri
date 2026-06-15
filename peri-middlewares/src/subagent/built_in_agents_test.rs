@@ -36,6 +36,8 @@ fn test_get_built_in_agent_found() {
     assert!(get_built_in_agent("plan").is_some());
     assert!(get_built_in_agent("general-purpose").is_some());
     assert!(get_built_in_agent("verification").is_some());
+    assert!(get_built_in_agent("web-researcher").is_some());
+    assert!(get_built_in_agent("coder").is_some());
 }
 
 #[test]
@@ -66,5 +68,41 @@ fn test_general_purpose_has_all_tools() {
     assert!(
         !parsed.tools().is_empty(),
         "General-purpose agent should have tools configured"
+    );
+}
+
+#[test]
+fn test_coder_agent_tools() {
+    let agent = get_built_in_agent("coder").unwrap();
+    let parsed = parse_agent_file(agent.content).unwrap();
+    let tools = parsed.tools();
+    assert_eq!(tools.len(), 7, "Coder agent should have exactly 7 tools");
+    assert!(
+        tools.iter().any(|t| t.eq_ignore_ascii_case("Edit")),
+        "Coder agent should have Edit"
+    );
+    assert!(
+        tools.iter().any(|t| t.eq_ignore_ascii_case("Write")),
+        "Coder agent should have Write"
+    );
+    assert!(
+        tools.iter().any(|t| t.eq_ignore_ascii_case("Grep")),
+        "Coder agent should have Grep"
+    );
+    assert!(
+        tools.iter().any(|t| t.eq_ignore_ascii_case("Read")),
+        "Coder agent should have Read"
+    );
+    assert!(
+        tools.iter().any(|t| t.eq_ignore_ascii_case("Glob")),
+        "Coder agent should have Glob"
+    );
+    assert!(
+        tools.iter().any(|t| t.eq_ignore_ascii_case("Bash")),
+        "Coder agent should have Bash"
+    );
+    assert!(
+        tools.iter().any(|t| t.eq_ignore_ascii_case("TodoWrite")),
+        "Coder agent should have TodoWrite"
     );
 }

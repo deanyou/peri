@@ -4,22 +4,17 @@ pub mod glob;
 pub mod grep;
 pub(crate) mod grep_args;
 pub(crate) mod grep_format;
-pub mod line_edit;
-pub mod line_edit_diff;
-pub mod line_edit_match;
-pub mod line_edit_verify;
 pub mod read;
 pub mod write;
+
+use std::path::{Path, PathBuf};
 
 pub use edit::EditFileTool;
 pub use folder::FolderOperationsTool;
 pub use glob::GlobFilesTool;
 pub use grep::GrepTool;
-pub use line_edit::LineEditTool;
 pub use read::ReadFileTool;
 pub use write::WriteFileTool;
-
-use std::path::{Path, PathBuf};
 
 /// 统一路径解析：相对路径基于 cwd，绝对路径直接使用。
 ///
@@ -51,7 +46,8 @@ pub async fn parse_json_input(input: &str) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
+    use super::*;
     include!("mod_test.rs");
 }

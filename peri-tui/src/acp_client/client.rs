@@ -3,13 +3,14 @@
 //! Translates raw [`IncomingMessage`]s into [`AcpNotification`]s for the TUI event
 //! loop to consume. The notification pump runs as a background tokio task.
 
+use std::sync::{Arc, Mutex};
+
 use peri_acp::transport::{
     mpsc::MpscClientTransport,
     types::{AcpError, IncomingMessage, RequestId},
     AcpTransport,
 };
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
@@ -31,6 +32,8 @@ pub enum AcpNotification {
     Other { msg: String },
     /// Agent execution completed (synthetic notification from ACP server).
     AgentDone { session_id: String },
+    /// Prediction fork 完成后的建议文本。
+    PredictionReady { session_id: String, text: String },
     /// A `notifications/peri/*` custom notification (SubAgent, Compact, LSP, etc.)
     Peri {
         session_id: String,
@@ -167,6 +170,21 @@ impl AcpTuiClient {
                             "ACP client pump: received agent_event_done"
                         );
                         let _ = notification_tx.send(AcpNotification::AgentDone { session_id });
+                    } else if method == "peri/prediction_ready" {
+                        let session_id = params
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let text = params
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !text.is_empty() {
+                            let _ = notification_tx
+                                .send(AcpNotification::PredictionReady { session_id, text });
+                        }
                     } else if method.starts_with("notifications/peri/") {
                         let session_id = params
                             .get("sessionId")
@@ -352,39 +370,68 @@ impl AcpTuiClient {
     }
 
     /// Set a config option (mode/model/thought_level) via the unified config API.
-    /// Silently returns Ok if no session exists yet — ACP Server will load
-    /// the latest config from disk when a session is eventually created.
+    /// Silently returns Ok if no session exists yet — uses notification to
+    /// update ACP server state directly without requiring a session.
     pub async fn set_config_option(&self, config_id: &str, value: &str) -> Result<(), String> {
-        let session_id = match self.current_session_id.lock().unwrap().clone() {
-            Some(id) => id,
-            None => return Ok(()),
+        let session_id = {
+            let guard = self.current_session_id.lock().unwrap();
+            guard.clone()
         };
-        let params = json!({ "sessionId": session_id, "configId": config_id, "value": value });
-        let _ = self
-            .transport
-            .send_request("session/set_config_option", params)
-            .await
-            .map_err(|e| e.to_string())?;
+        match session_id {
+            Some(session_id) => {
+                let params =
+                    json!({ "sessionId": session_id, "configId": config_id, "value": value });
+                let _ = self
+                    .transport
+                    .send_request("session/set_config_option", params)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            None => {
+                // No session yet — send via notification so ACP server updates its
+                // peri_config/provider before any session is created.
+                let params = json!({ "configId": config_id, "value": value });
+                self.transport
+                    .send_notification("session/config_update", params)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
         Ok(())
     }
 
     /// Update the full PeriConfig on the ACP server (for Login panel CRUD).
-    /// Silently returns Ok if no session exists yet — ACP Server will load
-    /// the latest config from disk when a session is eventually created.
+    /// When no session exists, uses notification to update server state directly.
     pub async fn update_config(&self, config: &crate::config::PeriConfig) -> Result<(), String> {
-        let session_id = match self.current_session_id.lock().unwrap().clone() {
-            Some(id) => id,
-            None => return Ok(()),
+        let session_id = {
+            let guard = self.current_session_id.lock().unwrap();
+            guard.clone()
         };
-        let params = json!({
-            "sessionId": session_id,
-            "config": config,
-        });
-        let _ = self
-            .transport
-            .send_request("session/update_config", params)
-            .await
-            .map_err(|e| e.to_string())?;
+        match session_id {
+            Some(session_id) => {
+                let params = json!({
+                    "sessionId": session_id,
+                    "config": config,
+                });
+                let _ = self
+                    .transport
+                    .send_request("session/update_config", params)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            None => {
+                // No session yet — send via notification so ACP server updates
+                // peri_config/provider before any session is created.
+                tracing::info!("update_config: no session, sending via notification");
+                let params = json!({
+                    "config": config,
+                });
+                self.transport
+                    .send_notification("session/config_update", params)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
         Ok(())
     }
 

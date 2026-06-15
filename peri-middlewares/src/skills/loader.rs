@@ -83,9 +83,36 @@ pub fn list_skills(dirs: &[PathBuf]) -> Vec<SkillMetadata> {
     skills
 }
 
+/// 统一的 skill 搜索目录解析
+///
+/// 优先级：~/.claude/skills → globalConfig skillsDir → ./.claude/skills → extra_dirs
+/// 这是 skill 目录解析的 single source of truth，SkillsMiddleware 和 SkillPreloadMiddleware 都应委托此函数。
+pub fn resolve_skill_dirs(cwd: &str, extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let user_dir = dirs_next::home_dir()
+        .map(|h| h.join(".claude").join("skills"))
+        .unwrap_or_default();
+
+    let global_dir = super::load_global_skills_dir();
+
+    let project_dir = PathBuf::from(cwd).join(".claude").join("skills");
+
+    let mut dirs = vec![user_dir];
+    if let Some(global) = global_dir {
+        dirs.push(global);
+    }
+    dirs.push(project_dir);
+    for dir in extra_dirs {
+        if dir.is_dir() {
+            dirs.push(dir.clone());
+        }
+    }
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
     include!("loader_test.rs");
 }

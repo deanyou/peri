@@ -1,5 +1,7 @@
 use peri_agent::messages::BaseMessage;
 
+use super::MessagePipeline;
+pub use crate::ui::message_view::aggregate_batch_groups;
 use crate::{
     app::tool_display,
     ui::{
@@ -7,69 +9,6 @@ use crate::{
         theme,
     },
 };
-
-pub use crate::ui::message_view::aggregate_batch_groups;
-
-use super::MessagePipeline;
-
-/// 从工具名和入参构造预渲染的 diff 行（仅 Write/Edit 工具）
-fn try_build_diff_lines(
-    name: &str,
-    input: &serde_json::Value,
-) -> Option<Vec<ratatui::text::Line<'static>>> {
-    let diff_input = match name {
-        "Edit" => {
-            let old_string = input
-                .get("old_string")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let new_string = input
-                .get("new_string")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let file_path = input
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if old_string.is_empty() || file_path.is_empty() {
-                return None;
-            }
-            Some(peri_widgets::DiffInput {
-                file_path: file_path.to_string(),
-                old_content: old_string.to_string(),
-                new_content: new_string.to_string(),
-                is_new_file: false,
-                is_deleted_file: false,
-                is_binary: false,
-            })
-        }
-        "Write" => {
-            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let file_path = input
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if content.is_empty() || file_path.is_empty() {
-                return None;
-            }
-            Some(peri_widgets::DiffInput {
-                file_path: file_path.to_string(),
-                old_content: String::new(),
-                new_content: content.to_string(),
-                is_new_file: true,
-                is_deleted_file: false,
-                is_binary: false,
-            })
-        }
-        _ => None,
-    }?;
-    let lines = peri_widgets::diff::render_diff(&diff_input, 80, &peri_widgets::DarkTheme);
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines)
-    }
-}
 
 // ─── 管线事件 ────────────────────────────────────────────────────────────────
 
@@ -224,21 +163,64 @@ impl MessagePipeline {
             tail_vms.push(self.build_streaming_bubble());
         }
 
-        // 追加 pending tool blocks（ToolStart 后、下一个 StateSnapshot 前的工具）
+        // 追加工具调用：按 current_ai_tool_calls 的顺序迭代，同时处理 pending 和
+        // completed 状态。这保证了工具调用在消息流中的时间线顺序一致——较早开始
+        //（因此也更早完成）的工具始终排在后续工具之前，避免已完成工具被新 pending
+        // 工具挤到下方造成的"位置偏移"问题。
+        use std::collections::HashSet;
+        let mut completed_ids: HashSet<String> = HashSet::with_capacity(self.completed_tools.len());
         for tc in &self.current_ai_tool_calls {
             if let Some(pending) = self.pending_tools.get(&tc.id) {
                 if pending.name != "Agent" {
                     tail_vms.push(self.build_tool_start_vm(&tc.id, &pending.name, &pending.input));
                 }
+                continue;
+            }
+            // 工具已结束但 StateSnapshot 尚未到达：从 completed_tools 查找结果
+            if let Some(ct) = self
+                .completed_tools
+                .iter()
+                .find(|ct| ct.tool_call_id == tc.id)
+            {
+                let display = tool_display::format_tool_name(&ct.name);
+                let args = tool_display::format_tool_args(&ct.name, &ct.input, Some(&self.cwd));
+                let diff_lines = if !ct.is_error {
+                    crate::ui::message_view::build_diff_lines(&ct.name, &ct.input)
+                } else {
+                    None
+                };
+                let mut vm = MessageViewModel::ToolBlock {
+                    tool_name: ct.name.clone(),
+                    tool_call_id: ct.tool_call_id.clone(),
+                    display_name: display,
+                    args_display: args,
+                    content: ct.output.clone(),
+                    is_error: ct.is_error,
+                    collapsed: true,
+                    color: if ct.is_error {
+                        theme::ERROR
+                    } else {
+                        tool_color(&ct.name)
+                    },
+                    diff_lines,
+                    content_hash: 0,
+                };
+                vm.recompute_hash();
+                tail_vms.push(vm);
+                completed_ids.insert(ct.tool_call_id.clone());
             }
         }
 
-        // 追加已完成但尚未进入 completed 的工具结果
+        // 防御性追加：completed_tools 中不在 current_ai_tool_calls 的残余条目
+        // （例如 StateSnapshot 清理了 current_ai_tool_calls 但 completed_tools 仍有残留）
         for ct in &self.completed_tools {
+            if completed_ids.contains(&ct.tool_call_id) {
+                continue;
+            }
             let display = tool_display::format_tool_name(&ct.name);
             let args = tool_display::format_tool_args(&ct.name, &ct.input, Some(&self.cwd));
             let diff_lines = if !ct.is_error {
-                try_build_diff_lines(&ct.name, &ct.input)
+                crate::ui::message_view::build_diff_lines(&ct.name, &ct.input)
             } else {
                 None
             };

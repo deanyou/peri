@@ -16,6 +16,11 @@ impl App {
     pub(crate) fn open_rewind_prompt(&mut self) {
         let origin_messages = &self.session_mgr.current().agent.origin_messages;
 
+        tracing::debug!(
+            origin_messages_len = origin_messages.len(),
+            "open_rewind_prompt: checking origin_messages"
+        );
+
         if origin_messages.is_empty() {
             self.push_system_note("没有可回退的对话轮次".to_string());
             return;
@@ -109,14 +114,23 @@ impl App {
     /// MessagesOnly 模式直接执行；MessagesAndFiles 模式进入二次确认（ConfirmRevert）；
     /// ConfirmRevert 模式执行实际回退。
     pub(crate) fn rewind_confirm(&mut self) {
-        let (target_id, revert_files, go) = {
+        let (target_id, revert_files, go, rewound_text) = {
             let session = self.session_mgr.current();
             if let Some(InteractionPrompt::Rewind(prompt)) = &session.agent.interaction_prompt {
                 let item = &prompt.items[prompt.cursor];
+                // 从 origin_messages 查找目标消息的完整文本（此时 origin_messages 尚未被 rewind 修改）
+                let full_text = session
+                    .agent
+                    .origin_messages
+                    .iter()
+                    .find(|m| m.id().as_uuid().to_string() == item.message_id)
+                    .map(|m| m.content().to_string());
                 match prompt.mode {
-                    RewindMode::MessagesAndFiles => (item.message_id.clone(), true, false),
-                    RewindMode::ConfirmRevert => (item.message_id.clone(), true, true),
-                    RewindMode::MessagesOnly => (item.message_id.clone(), false, true),
+                    RewindMode::MessagesAndFiles => {
+                        (item.message_id.clone(), true, false, full_text)
+                    }
+                    RewindMode::ConfirmRevert => (item.message_id.clone(), true, true, full_text),
+                    RewindMode::MessagesOnly => (item.message_id.clone(), false, true, full_text),
                 }
             } else {
                 return;
@@ -135,6 +149,9 @@ impl App {
 
         // 关闭弹窗
         self.session_mgr.current_mut().agent.interaction_prompt = None;
+
+        // 暂存被撤回消息的文本，待 handle_rewind_completed 回填到输入框
+        self.session_mgr.current_mut().ui.pending_rewind_text = rewound_text;
 
         // 构造 /rewind 命令并发送（复用 submit_message 的完整提交流程）
         let args = serde_json::json!({

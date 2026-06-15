@@ -226,6 +226,7 @@
 
 ### tool_result id
 - [GLM Anthropic兼容端口tool_result block缺少id属性导致500错误](domains/agent.md#issue_2026-05-15-glm-anthropic-tool-result-id-attribute-error) — agent
+- [GLM Anthropic 兼容端口 500 回归: tool_result block 缺少 id 属性](domains/tui.md#issue_2026-06-06-glm-anthropic-tool-result-id-500-regression) — tui
 
 ### 第三方API
 - [GLM Anthropic兼容端口tool_result block缺少id属性导致500错误](domains/agent.md#issue_2026-05-15-glm-anthropic-tool-result-id-attribute-error) — agent
@@ -236,6 +237,7 @@
 
 ### 消息重复
 - [DeepSeek多轮对话中agent_state_messages消息重复导致API 400错误](domains/agent.md#issue_2026-05-14-deepseek-multi-turn-tool-result-duplication) — agent
+- [compact 持久化恢复时消息重复](domains/compact.md#issue_2026-06-02-session-restore-compact-message-duplication) — compact
 
 ### last_message_count
 - [DeepSeek多轮对话中agent_state_messages消息重复导致API 400错误](domains/agent.md#issue_2026-05-14-deepseek-multi-turn-tool-result-duplication) — agent
@@ -553,6 +555,7 @@
 
 ### 竞态条件
 - [Background task 完成后未触发 agent continuation（竞态条件）：pre_done_bg_completions 缓冲乱序到达](domains/agent.md#issue_2026-05-13-background-task-completion-race-condition) — agent
+- [HITL 审批与 Cancel 竞态条件缺少测试](domains/agent.md#issue_2026-06-06-test-gap-hitl-cancel-race) — agent
 
 ### child_handler_factory
 - [多 Agent 工具调用串行执行而非并发](domains/agent.md#issue_2026-05-18-agent-tool-calls-execute-serially) — agent
@@ -792,6 +795,7 @@
 
 ### session恢复
 - [Session 恢复后 System Prompt 和 Compact Summary 被渲染为可见消息](domains/message-pipeline.md#issue_2026-05-20-session-restore-renders-system-prompt) — message-pipeline
+- [compact 持久化恢复时消息重复](domains/compact.md#issue_2026-06-02-session-restore-compact-message-duplication) — compact
 
 ### System消息过滤
 - [Session 恢复后 System Prompt 和 Compact Summary 被渲染为可见消息](domains/message-pipeline.md#issue_2026-05-20-session-restore-renders-system-prompt) — message-pipeline
@@ -1462,7 +1466,356 @@
 ### 编辑模式简化
 - [Config 面板交互混乱，需整体重新设计](domains/tui.md#issue_2026-05-24-config-panel-interaction-redesign) — tui
 
+### crossterm ESC 合并
+- [双击 ESC 偶发完全无响应（rewind 选择器不弹出）](domains/tui.md#issue_2026-06-06-double-esc-rewind-unresponsive) — tui
+
+### 双击 ESC
+- [双击 ESC 偶发完全无响应（rewind 选择器不弹出）](domains/tui.md#issue_2026-06-06-double-esc-rewind-unresponsive) — tui
+
+### 视觉反馈补偿
+- [双击 ESC 偶发完全无响应（rewind 选择器不弹出）](domains/tui.md#issue_2026-06-06-double-esc-rewind-unresponsive) — tui
+
+### 逻辑行 vs 视觉行
+- [AskUser 弹窗自定义输入 textarea 聚焦时比预期偏上一行](domains/tui.md#issue_2026-06-09-ask-user-textarea-position-one-line-too-high) — tui
+
+### ScrollableArea overlay
+- [AskUser 弹窗自定义输入 textarea 聚焦时比预期偏上一行](domains/tui.md#issue_2026-06-09-ask-user-textarea-position-one-line-too-high) — tui
+
+### Paragraph::line_count
+- [AskUser 弹窗自定义输入 textarea 聚焦时比预期偏上一行](domains/tui.md#issue_2026-06-09-ask-user-textarea-position-one-line-too-high) — tui
+
+### frozen_subagent_vms 过期
+- [消息区域 SubAgentGroup 卡片完成后残留、未聚合、状态错误](domains/tui.md#issue_2026-06-06-bg-agent-subagent-group-display) — tui
+
+### 后台 Agent 事件同步
+- [消息区域 SubAgentGroup 卡片完成后残留、未聚合、状态错误](domains/tui.md#issue_2026-06-06-bg-agent-subagent-group-display) — tui
+
+### reconcile 覆盖
+- [消息区域 SubAgentGroup 卡片完成后残留、未聚合、状态错误](domains/tui.md#issue_2026-06-06-bg-agent-subagent-group-display) — tui
+
+### 后台 Agent 事件转发
+- [BG Agent Bar 始终显示 0 calls](domains/tui.md#issue_2026-06-06-bg-agent-bar-tool-count-always-zero) — tui
+
+### BgToolStep
+- [BG Agent Bar 始终显示 0 calls](domains/tui.md#issue_2026-06-06-bg-agent-bar-tool-count-always-zero) — tui
+
+### 工具调用计数
+- [BG Agent Bar 始终显示 0 calls](domains/tui.md#issue_2026-06-06-bg-agent-bar-tool-count-always-zero) — tui
+
+### 名称提取不一致
+- [Plugin 面板 marketplace 删除后重新打开面板仍在](domains/tui.md#issue_2026-06-06-plugin-marketplace-delete-not-persisted) — tui
+
+### 持久化逻辑重复
+- [Plugin 面板 marketplace 删除后重新打开面板仍在](domains/tui.md#issue_2026-06-06-plugin-marketplace-delete-not-persisted) — tui
+
+### MarketplaceManager::extract_name
+- [Plugin 面板 marketplace 删除后重新打开面板仍在](domains/tui.md#issue_2026-06-06-plugin-marketplace-delete-not-persisted) — tui
+
+### 斜杠命令路由
+- [/plugin 命令缺少 marketplace add、install@marketplace、marketplace update 子命令](domains/tui.md#issue_2026-06-06-plugin-slash-command-marketplace-support) — tui
+
+### CLI/UI 一致性
+- [/plugin 命令缺少 marketplace add、install@marketplace、marketplace update 子命令](domains/tui.md#issue_2026-06-06-plugin-slash-command-marketplace-support) — tui
+
+### plugin 子命令
+- [/plugin 命令缺少 marketplace add、install@marketplace、marketplace update 子命令](domains/tui.md#issue_2026-06-06-plugin-slash-command-marketplace-support) — tui
+
+### snapshot_anchor 偏移
+- [Rewind 撤回消息后未将用户输入回填到输入框](domains/tui.md#issue_2026-06-10-rewind-text-not-restored-to-input) — tui
+
+### 文本回填
+- [Rewind 撤回消息后未将用户输入回填到输入框](domains/tui.md#issue_2026-06-10-rewind-text-not-restored-to-input) — tui
+
+### rewind 用户体验
+- [Rewind 撤回消息后未将用户输入回填到输入框](domains/tui.md#issue_2026-06-10-rewind-text-not-restored-to-input) — tui
+
+### 二进制体积
+- [移除 tree-sitter 依赖以减小二进制体积](domains/tui.md#issue_2026-06-08-remove-tree-sitter-dependency) — tui
+
+### 依赖评估
+- [移除 tree-sitter 依赖以减小二进制体积](domains/tui.md#issue_2026-06-08-remove-tree-sitter-dependency) — tui
+
+### tree-sitter AST
+- [移除 tree-sitter 依赖以减小二进制体积](domains/tui.md#issue_2026-06-08-remove-tree-sitter-dependency) — tui
+
+### escape_next
+- [LineEdit 工具在转义字符串和上下文匹配场景中的降效问题](domains/tui.md#issue_2026-06-06-lineedit-escape-and-context-matching-issues) — tui
+
+### Rust lifetime
+- [LineEdit 工具在转义字符串和上下文匹配场景中的降效问题](domains/tui.md#issue_2026-06-06-lineedit-escape-and-context-matching-issues) — tui
+
+### char literal 区分
+- [LineEdit 工具在转义字符串和上下文匹配场景中的降效问题](domains/tui.md#issue_2026-06-06-lineedit-escape-and-context-matching-issues) — tui
+
+### brackets 验证
+- [LineEdit 工具在转义字符串和上下文匹配场景中的降效问题](domains/tui.md#issue_2026-06-06-lineedit-escape-and-context-matching-issues) — tui
+
+### 行注释检测
+- [LineEdit bracket 校验对 Markdown 内容中 URL :// 的误报](domains/tui.md#issue_2026-06-06-lineedit-bracket-false-positive) — tui
+
+### URL ://
+- [LineEdit bracket 校验对 Markdown 内容中 URL :// 的误报](domains/tui.md#issue_2026-06-06-lineedit-bracket-false-positive) — tui
+
+### brackets 误报
+- [LineEdit bracket 校验对 Markdown 内容中 URL :// 的误报](domains/tui.md#issue_2026-06-06-lineedit-bracket-false-positive) — tui
+
+### update_config 静默返回
+- [Login 面板 / 快捷键切换 provider 后 ACP 侧实际未生效](domains/tui.md#issue_2026-05-31-login-panel-switch-provider-ignored) — tui
+
+### 无 session 路径
+- [Login 面板 / 快捷键切换 provider 后 ACP 侧实际未生效](domains/tui.md#issue_2026-05-31-login-panel-switch-provider-ignored) — tui
+
+### ACP notification
+- [Login 面板 / 快捷键切换 provider 后 ACP 侧实际未生效](domains/tui.md#issue_2026-05-31-login-panel-switch-provider-ignored) — tui
+
+### GLM 回归
+- [GLM Anthropic 兼容端口 500 回归: tool_result block 缺少 id 属性](domains/tui.md#issue_2026-06-06-glm-anthropic-tool-result-id-500-regression) — tui
+
+### Anthropic 兼容
+- [GLM Anthropic 兼容端口 500 回归: tool_result block 缺少 id 属性](domains/tui.md#issue_2026-06-06-glm-anthropic-tool-result-id-500-regression) — tui
+
+### 多轮工具调用
+- [GLM Anthropic 兼容端口 500 回归: tool_result block 缺少 id 属性](domains/tui.md#issue_2026-06-06-glm-anthropic-tool-result-id-500-regression) — tui
+
+### AgentResult 轮询
+- [Agent 反复轮询 AgentResult 而非等待后台任务通知](domains/agent.md#issue_2026-06-06-agent-polls-agentresult-repeatedly) — agent
+
+### 后台任务通知
+- [Agent 反复轮询 AgentResult 而非等待后台任务通知](domains/agent.md#issue_2026-06-06-agent-polls-agentresult-repeatedly) — agent
+
+### 系统提示词行为引导
+- [Agent 反复轮询 AgentResult 而非等待后台任务通知](domains/agent.md#issue_2026-06-06-agent-polls-agentresult-repeatedly) — agent
+
+### broker timeout
+- [HITL 审批与 Cancel 竞态条件缺少测试](domains/agent.md#issue_2026-06-06-test-gap-hitl-cancel-race) — agent
+
+### 无超时等待
+- [HITL 审批与 Cancel 竞态条件缺少测试](domains/agent.md#issue_2026-06-06-test-gap-hitl-cancel-race) — agent
+
+### cleanup_prepended 泄漏
+- [测试缺口：LLM 错误路径下 system 消息 cleanup 行为无测试](domains/agent.md#issue_2026-06-06-test-gap-llm-error-cleanup-prepended) — agent
+
+### try_break 宏
+- [测试缺口：LLM 错误路径下 system 消息 cleanup 行为无测试](domains/agent.md#issue_2026-06-06-test-gap-llm-error-cleanup-prepended) — agent
+
+### 循环内错误传播
+- [测试缺口：LLM 错误路径下 system 消息 cleanup 行为无测试](domains/agent.md#issue_2026-06-06-test-gap-llm-error-cleanup-prepended) — agent
+
+### preprocess_messages
+- [Full Compact 后 Agent 使用错误的项目路径前缀](domains/compact.md#issue_2026-06-07-full-compact-loses-project-path-context) — compact
+
+### 工具参数丢失
+- [Full Compact 后 Agent 使用错误的项目路径前缀](domains/compact.md#issue_2026-06-07-full-compact-loses-project-path-context) — compact
+
+### cwd 注入
+- [Full Compact 后 Agent 使用错误的项目路径前缀](domains/compact.md#issue_2026-06-07-full-compact-loses-project-path-context) — compact
+
+### compact 摘要质量
+- [Full Compact 后 Agent 使用错误的项目路径前缀](domains/compact.md#issue_2026-06-07-full-compact-loses-project-path-context) — compact
+
+### 插件 MCP 环境变量
+- [插件 MCP 子进程缺少 CLAUDE_PLUGIN_ROOT/DATA 环境变量注入](domains/mcp.md#issue_2026-06-07-hindsight-mcp-server-init-failed) — mcp
+
+### CLAUDE_PLUGIN_ROOT
+- [插件 MCP 子进程缺少 CLAUDE_PLUGIN_ROOT/DATA 环境变量注入](domains/mcp.md#issue_2026-06-07-hindsight-mcp-server-init-failed) — mcp
+
+### spawn_stdio_transport
+- [插件 MCP 子进程缺少 CLAUDE_PLUGIN_ROOT/DATA 环境变量注入](domains/mcp.md#issue_2026-06-07-hindsight-mcp-server-init-failed) — mcp
+
+### 子进程 env
+- [插件 MCP 子进程缺少 CLAUDE_PLUGIN_ROOT/DATA 环境变量注入](domains/mcp.md#issue_2026-06-07-hindsight-mcp-server-init-failed) — mcp
+
+### 截断落盘
+- [WebFetch 截断后未落盘，长网页内容直接丢弃](domains/tools.md#issue_2026-06-10-webfetch-truncation-no-disk-persist) — tools
+
+### persist_truncated_output
+- [WebFetch 截断后未落盘，长网页内容直接丢弃](domains/tools.md#issue_2026-06-10-webfetch-truncation-no-disk-persist) — tools
+
+### 工具一致性
+- [WebFetch 截断后未落盘，长网页内容直接丢弃](domains/tools.md#issue_2026-06-10-webfetch-truncation-no-disk-persist) — tools
+
+### 插件 skill 全文加载
+- [SkillPreloadMiddleware 无法加载插件提供的 Skill 全文](domains/plugin.md#issue_2026-06-10-skill-preload-cannot-load-plugin-skills) — plugin
+
+### resolve_dirs 硬编码
+- [SkillPreloadMiddleware 无法加载插件提供的 Skill 全文](domains/plugin.md#issue_2026-06-10-skill-preload-cannot-load-plugin-skills) — plugin
+
+### with_extra_dirs
+- [SkillPreloadMiddleware 无法加载插件提供的 Skill 全文](domains/plugin.md#issue_2026-06-10-skill-preload-cannot-load-plugin-skills) — plugin
+
+### Built-in Agent
+- [Web Researcher Agent 升级为 Built-in Agent，支持原生 WebFetch/WebSearch 及复杂研究工作流](domains/agent.md#issue_2026-06-12-web-researcher-builtin-upgrade) — agent
+- [Coder 升级为 Built-in Agent，工具减量和反循环 prompt](domains/agent.md#issue_2026-06-09-coder-builtin-agent) — agent
+
+### BUILT_IN_AGENTS
+- [Web Researcher Agent 升级为 Built-in Agent，支持原生 WebFetch/WebSearch 及复杂研究工作流](domains/agent.md#issue_2026-06-12-web-researcher-builtin-upgrade) — agent
+
+### parent_tools
+- [SubAgent 缺少 WebFetch 和 WebSearch 工具](domains/agent.md#issue_2026-06-12-subagent-missing-web-tools) — agent
+
+### SubAgent 工具继承
+- [SubAgent 缺少 WebFetch 和 WebSearch 工具](domains/agent.md#issue_2026-06-12-subagent-missing-web-tools) — agent
+
+### WebFetch/WebSearch
+- [SubAgent 缺少 WebFetch 和 WebSearch 工具](domains/agent.md#issue_2026-06-12-subagent-missing-web-tools) — agent
+
+### web-researcher
+- [Web Researcher Agent 升级为 Built-in Agent，支持原生 WebFetch/WebSearch 及复杂研究工作流](domains/agent.md#issue_2026-06-12-web-researcher-builtin-upgrade) — agent
+
+### Write 工具
+- [Write 工具超长内容流式输出时 LLM Provider 响应极慢](domains/agent.md#issue_2026-06-12-large-write-streaming-slow) — agent
+
+### append 模式
+- [Write 工具超长内容流式输出时 LLM Provider 响应极慢](domains/agent.md#issue_2026-06-12-large-write-streaming-slow) — agent
+- [Write 工具 append 模式分段写入减少上下文消耗](domains/agent.md#issue_2026-06-06-write-tool-append-mode) — agent
+
+### 大文件写入
+- [Write 工具超长内容流式输出时 LLM Provider 响应极慢](domains/agent.md#issue_2026-06-12-large-write-streaming-slow) — agent
+
+### 子Agent 工具传播
+- [SubAgent 缺少 WebFetch 和 WebSearch 工具](domains/agent.md#issue_2026-06-12-subagent-missing-web-tools) — agent
+
+### 子Agent 升级
+- [Web Researcher Agent 升级为 Built-in Agent，支持原生 WebFetch/WebSearch 及复杂研究工作流](domains/agent.md#issue_2026-06-12-web-researcher-builtin-upgrade) — agent
+
+### 原生工具
+- [Web Researcher Agent 升级为 Built-in Agent，支持原生 WebFetch/WebSearch 及复杂研究工作流](domains/agent.md#issue_2026-06-12-web-researcher-builtin-upgrade) — agent
+
+### 流式性能
+- [Write 工具超长内容流式输出时 LLM Provider 响应极慢](domains/agent.md#issue_2026-06-12-large-write-streaming-slow) — agent
+
+### 超时机制
+- [Write 工具超长内容流式输出时 LLM Provider 响应极慢](domains/agent.md#issue_2026-06-12-large-write-streaming-slow) — agent
+
+### system-reminder 标签
+- [system-reminder 标签导致 UserBubble 折叠和上下文注入](domains/compact.md#issue_2026-06-02-system-reminder-compact-summary) — compact
+
+### UserBubble 折叠
+- [system-reminder 标签导致 UserBubble 折叠和上下文注入](domains/compact.md#issue_2026-06-02-system-reminder-compact-summary) — compact
+
+### 上下文注入
+- [system-reminder 标签导致 UserBubble 折叠和上下文注入](domains/compact.md#issue_2026-06-02-system-reminder-compact-summary) — compact
+
+### compact 持久化
+- [compact 持久化恢复时消息重复](domains/compact.md#issue_2026-06-02-session-restore-compact-message-duplication) — compact
+
+### compact 渲染
+- [compact 渲染打破 text_selection 和 loading 状态](domains/compact.md#issue_2026-06-07-compact-breaks-rendering-selection-loading) — compact
+
+### text_selection
+- [compact 渲染打破 text_selection 和 loading 状态](domains/compact.md#issue_2026-06-07-compact-breaks-rendering-selection-loading) — compact
+
+### loading 丢失
+- [compact 渲染打破 text_selection 和 loading 状态](domains/compact.md#issue_2026-06-07-compact-breaks-rendering-selection-loading) — compact
+
+### 斜杠命令
+- [未知斜杠命令静默 fallback 吞掉用户输入](domains/tui.md#issue_2026-06-05-unknown-slash-command-input-swallowed) — tui
+
+### 命令分发
+- [未知斜杠命令静默 fallback 吞掉用户输入](domains/tui.md#issue_2026-06-05-unknown-slash-command-input-swallowed) — tui
+
+### 静默 fallback
+- [未知斜杠命令静默 fallback 吞掉用户输入](domains/tui.md#issue_2026-06-05-unknown-slash-command-input-swallowed) — tui
+
+### 内联补全
+- [Skills/Commands 内联补全触发与 SlashHintState 和 @mention 回溯](domains/tui.md#issue_2026-06-06-inline-slash-trigger-for-skills-and-commands) — tui
+
+### SlashHintState
+- [Skills/Commands 内联补全触发与 SlashHintState 和 @mention 回溯](domains/tui.md#issue_2026-06-06-inline-slash-trigger-for-skills-and-commands) — tui
+
+### @mention 回溯
+- [Skills/Commands 内联补全触发与 SlashHintState 和 @mention 回溯](domains/tui.md#issue_2026-06-06-inline-slash-trigger-for-skills-and-commands) — tui
+
+### 数据源去重
+- [数据源去重导致 ACP 命令和 skill hints 显示异常](domains/agent.md#issue_2026-06-01-skill-prefix-hints-unknown-command) — agent
+
+### ACP 命令
+- [数据源去重导致 ACP 命令和 skill hints 显示异常](domains/agent.md#issue_2026-06-01-skill-prefix-hints-unknown-command) — agent
+
+### skill hints
+- [数据源去重导致 ACP 命令和 skill hints 显示异常](domains/agent.md#issue_2026-06-01-skill-prefix-hints-unknown-command) — agent
+
+### 工具减量
+- [Coder 升级为 Built-in Agent，工具减量和反循环 prompt](domains/agent.md#issue_2026-06-09-coder-builtin-agent) — agent
+
+### 反循环 prompt
+- [Coder 升级为 Built-in Agent，工具减量和反循环 prompt](domains/agent.md#issue_2026-06-09-coder-builtin-agent) — agent
+
+### Langfuse flush
+- [Langfuse flush 阻塞 event pump 导致并发 BG Agent 后下一 prompt 挂起](domains/agent.md#issue_2026-06-03-concurrent-bg-agent-next-prompt-hangs) — agent
+
+### event pump 阻塞
+- [Langfuse flush 阻塞 event pump 导致并发 BG Agent 后下一 prompt 挂起](domains/agent.md#issue_2026-06-03-concurrent-bg-agent-next-prompt-hangs) — agent
+
+### 遥测死锁
+- [Langfuse flush 阻塞 event pump 导致并发 BG Agent 后下一 prompt 挂起](domains/agent.md#issue_2026-06-03-concurrent-bg-agent-next-prompt-hangs) — agent
+
+### Hook 权限
+- [Hook PermissionRequest 在 bypass 模式下错误触发](domains/agent.md#issue_2026-06-01-hook-permission-request-fires-in-bypass) — agent
+
+### PermissionRequest
+- [Hook PermissionRequest 在 bypass 模式下错误触发](domains/agent.md#issue_2026-06-01-hook-permission-request-fires-in-bypass) — agent
+
+### bypass 检查
+- [Hook PermissionRequest 在 bypass 模式下错误触发](domains/agent.md#issue_2026-06-01-hook-permission-request-fires-in-bypass) — agent
+
+### 全局 Hook
+- [全局 Hook 设置未从 settings.json 启动加载](domains/agent.md#issue_2026-06-06-global-settings-hooks-not-loaded) — agent
+
+### settings.json
+- [全局 Hook 设置未从 settings.json 启动加载](domains/agent.md#issue_2026-06-06-global-settings-hooks-not-loaded) — agent
+
+### 启动加载
+- [全局 Hook 设置未从 settings.json 启动加载](domains/agent.md#issue_2026-06-06-global-settings-hooks-not-loaded) — agent
+
+### LLM 流式错误
+- [LLM 流式错误导致 Agent 失忆，history 未保护](domains/agent.md#issue_2026-05-29-llm-stream-error-causes-amnesia) — agent
+
+### Agent 失忆
+- [LLM 流式错误导致 Agent 失忆，history 未保护](domains/agent.md#issue_2026-05-29-llm-stream-error-causes-amnesia) — agent
+
+### history 保护
+- [LLM 流式错误导致 Agent 失忆，history 未保护](domains/agent.md#issue_2026-05-29-llm-stream-error-causes-amnesia) — agent
+
+### block_in_place 死锁
+- [block_in_place 死锁、配置验证和持久化顺序不一致](domains/agent.md#issue_2026-05-29-new-thread-deadlock-and-update-config-inconsistency) — agent
+
+### 配置验证
+- [block_in_place 死锁、配置验证和持久化顺序不一致](domains/agent.md#issue_2026-05-29-new-thread-deadlock-and-update-config-inconsistency) — agent
+
+### 持久化顺序
+- [block_in_place 死锁、配置验证和持久化顺序不一致](domains/agent.md#issue_2026-05-29-new-thread-deadlock-and-update-config-inconsistency) — agent
+
+### 参数别名
+- [Read 工具 file_path 参数别名兼容](domains/agent.md#issue_2026-06-02-read-tool-path-alias-for-file_path) — agent
+
+### file_path
+- [Read 工具 file_path 参数别名兼容](domains/agent.md#issue_2026-06-02-read-tool-path-alias-for-file_path) — agent
+
+### 工具兼容
+- [Read 工具 file_path 参数别名兼容](domains/agent.md#issue_2026-06-02-read-tool-path-alias-for-file_path) — agent
+
+### 分段写入
+- [Write 工具 append 模式分段写入减少上下文消耗](domains/agent.md#issue_2026-06-06-write-tool-append-mode) — agent
+
+### 上下文消耗
+- [Write 工具 append 模式分段写入减少上下文消耗](domains/agent.md#issue_2026-06-06-write-tool-append-mode) — agent
+
+### 多层数据流
+- [多层数据流问题导致端到端 PredictionReady 建议不生效](domains/agent.md#issue_2026-06-10-prompt-suggestion-not-working) — agent
+
+### 端到端验证
+- [多层数据流问题导致端到端 PredictionReady 建议不生效](domains/agent.md#issue_2026-06-10-prompt-suggestion-not-working) — agent
+
+### PredictionReady
+- [多层数据流问题导致端到端 PredictionReady 建议不生效](domains/agent.md#issue_2026-06-10-prompt-suggestion-not-working) — agent
+
 ## 更新记录
+
+- 2026-06-14: 归档 27 个 Fixed/Done issue（本轮第二次大批量归档）
+- 2026-06-14: 归档 3 个 issue（SubAgent Web 工具缺失、web-researcher 升级、Write 大文件流式慢）
+
+- 2026-06-11: 归档 19 个 issue（tui 12 + agent 3 + compact 1 + mcp 1 + tools 1 + plugin 1），新增 56 个关键词索引
 
 - 2026-06-06: 归档 3 个 issue（agent 2 + tui 1），新增 12 个关键词索引
 - 2026-06-03: 归档 3 个 issue（at-mention 搜索、rewind 消息丢失、多 session 分屏移除）

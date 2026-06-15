@@ -2,9 +2,8 @@
 
 use std::any::Any;
 
-use tui_textarea::Input;
-
 use ratatui::{layout::Rect, Frame};
+use tui_textarea::Input;
 
 use super::{
     agent_panel::AgentPanel, betas_panel::BetasPanel, config_panel::ConfigPanel,
@@ -136,12 +135,12 @@ pub enum EventResult {
 /// 穷举存储面板实例（编译时完整性保证）
 pub enum PanelState {
     Model(ModelPanel),
-    Login(LoginPanel),
+    Login(Box<LoginPanel>),
     Agent(AgentPanel),
     Hooks(HooksPanel),
-    Config(ConfigPanel),
-    ThreadBrowser(ThreadBrowser),
-    Mcp(McpPanel),
+    Config(Box<ConfigPanel>),
+    ThreadBrowser(Box<ThreadBrowser>),
+    Mcp(Box<McpPanel>),
     Plugin(Box<PluginPanel>),
     Cron(CronPanel),
     Status(StatusPanel),
@@ -174,12 +173,12 @@ impl PanelState {
     pub fn as_any_ref(&self) -> &dyn Any {
         match self {
             PanelState::Model(p) => p as &dyn Any,
-            PanelState::Login(p) => p as &dyn Any,
+            PanelState::Login(p) => p.as_ref() as &dyn Any,
             PanelState::Agent(p) => p as &dyn Any,
             PanelState::Hooks(p) => p as &dyn Any,
-            PanelState::Config(p) => p as &dyn Any,
-            PanelState::ThreadBrowser(p) => p as &dyn Any,
-            PanelState::Mcp(p) => p as &dyn Any,
+            PanelState::Config(p) => p.as_ref() as &dyn Any,
+            PanelState::ThreadBrowser(p) => p.as_ref() as &dyn Any,
+            PanelState::Mcp(p) => p.as_ref() as &dyn Any,
             PanelState::Plugin(p) => p.as_ref() as &dyn Any,
             PanelState::Cron(p) => p as &dyn Any,
             PanelState::Status(p) => p as &dyn Any,
@@ -193,12 +192,12 @@ impl PanelState {
     pub fn as_any_mut(&mut self) -> &mut dyn Any {
         match self {
             PanelState::Model(p) => p as &mut dyn Any,
-            PanelState::Login(p) => p as &mut dyn Any,
+            PanelState::Login(p) => p.as_mut() as &mut dyn Any,
             PanelState::Agent(p) => p as &mut dyn Any,
             PanelState::Hooks(p) => p as &mut dyn Any,
-            PanelState::Config(p) => p as &mut dyn Any,
-            PanelState::ThreadBrowser(p) => p as &mut dyn Any,
-            PanelState::Mcp(p) => p as &mut dyn Any,
+            PanelState::Config(p) => p.as_mut() as &mut dyn Any,
+            PanelState::ThreadBrowser(p) => p.as_mut() as &mut dyn Any,
+            PanelState::Mcp(p) => p.as_mut() as &mut dyn Any,
             PanelState::Plugin(p) => p.as_mut() as &mut dyn Any,
             PanelState::Cron(p) => p as &mut dyn Any,
             PanelState::Status(p) => p as &mut dyn Any,
@@ -289,6 +288,11 @@ impl PanelContext<'_> {
             None => return,
         };
         let acp = acp_client.clone();
+        tracing::debug!(
+            active_provider = %cfg.config.active_provider_id,
+            active_alias = %cfg.config.active_alias,
+            "sync_acp_config: sending update_config"
+        );
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 if let Err(e) = acp.update_config(&cfg).await {

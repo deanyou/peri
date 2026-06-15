@@ -95,7 +95,7 @@ struct GraphLayout { rows: Vec<GraphRow>, max_lane: usize }
 
 ## 依赖
 
-独立 workspace，不依赖主项目（仅依赖 `peri-widgets` 用于文件树组件）。
+Workspace member（`Cargo.toml` 中 `side-projects/git-graph`），仅依赖 `peri-widgets` 用于文件树组件。
 
 ## 编码规范
 

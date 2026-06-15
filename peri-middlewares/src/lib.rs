@@ -21,6 +21,7 @@ pub mod agent_define;
 pub mod agents_md;
 pub mod claude_agent_parser;
 pub mod compact_middleware;
+pub mod goal_middleware;
 pub mod subagent;
 pub use claude_agent_parser::{
     format_agent_id, parse_agent_file, ClaudeAgent, ClaudeAgentFrontmatter, ToolsValue,
@@ -57,6 +58,7 @@ pub use ask_user::{
 pub use at_mention::AtMentionMiddleware;
 pub use attribution::GitAttributionMiddleware;
 pub use cron::{CronMiddleware, CronScheduler, CronTask, CronTrigger};
+pub use goal_middleware::GoalMiddleware;
 pub use hitl::{
     default_requires_approval, effective_tool_name, is_yolo_mode, AutoClassifier, BatchItem,
     Classification, HitlDecision, HumanInTheLoopMiddleware, LlmAutoClassifier, PermissionMode,
@@ -67,8 +69,9 @@ pub use skills::{
     list_skills, load_global_skills_dir, load_skill_metadata, SkillMetadata, SkillsMiddleware,
 };
 pub use subagent::{
-    scan_agents, scan_agents_with_extra_dirs, BackgroundTask, BackgroundTaskRegistry,
-    BackgroundTaskStatus, SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool,
+    infer_agent_capability, scan_agents, scan_agents_detailed, scan_agents_with_extra_dirs,
+    AgentCapability, BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus,
+    SkillPreloadMiddleware, SubAgentMiddleware, SubAgentTool,
 };
 pub use tool_search::{
     is_deferred_tool, resolve_effective_tool_name, ToolSearchMiddleware, CORE_TOOLS,
@@ -79,6 +82,9 @@ pub use tools::{ArcToolWrapper, AskUserTool, BoxToolWrapper};
 
 /// Prelude - 常用类型一次性导入
 pub mod prelude {
+    // 重导出 peri-agent 核心类型
+    pub use peri_agent::prelude::*;
+
     pub use crate::{
         agent_define::AgentDefineMiddleware,
         agents_md::AgentsMdMiddleware,
@@ -111,6 +117,4 @@ pub mod prelude {
             WriteFileTool,
         },
     };
-    // 重导出 peri-agent 核心类型
-    pub use peri_agent::prelude::*;
 }

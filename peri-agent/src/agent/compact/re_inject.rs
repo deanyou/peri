@@ -1,9 +1,11 @@
+use std::path::Path;
+
+use tracing::{debug, warn};
+
 use crate::{
     agent::{compact::config::CompactConfig, events::CompactFileInfo},
     messages::BaseMessage,
 };
-use std::path::Path;
-use tracing::{debug, warn};
 
 #[derive(Debug, Clone)]
 pub struct ReInjectResult {
@@ -27,7 +29,13 @@ fn extract_recent_files(messages: &[BaseMessage], max_files: usize) -> Vec<Strin
     for msg in messages.iter().rev() {
         for tc in msg.tool_calls() {
             if tc.name == "Read" {
-                if let Some(path) = tc.arguments.get("path").and_then(|v| v.as_str()) {
+                // LLM 可能用 "file_path" 或 "path" 作为参数名
+                let path = tc
+                    .arguments
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| tc.arguments.get("path").and_then(|v| v.as_str()));
+                if let Some(path) = path {
                     if is_skills_path(path) {
                         continue;
                     }
@@ -59,7 +67,13 @@ fn extract_skills_paths(messages: &[BaseMessage]) -> Vec<String> {
         // 路径 1：扫描 Ai 消息的 tool_calls（旧格式兼容）
         for tc in msg.tool_calls() {
             if tc.name == "Read" {
-                if let Some(path) = tc.arguments.get("path").and_then(|v| v.as_str()) {
+                // LLM 可能用 "file_path" 或 "path" 作为参数名
+                let path = tc
+                    .arguments
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| tc.arguments.get("path").and_then(|v| v.as_str()));
+                if let Some(path) = path {
                     if is_skills_path(path) && seen.insert(path.to_string()) {
                         paths.push(path.to_string());
                     }

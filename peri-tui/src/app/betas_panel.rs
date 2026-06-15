@@ -19,7 +19,7 @@ pub struct BetaEntry {
 }
 
 /// Beta 功能开关键值
-const BETA_KEYS: &[&str] = &["lineEdit"];
+const BETA_KEYS: &[&str] = &[];
 
 /// /betas 面板状态
 #[derive(Debug, Clone)]
@@ -32,22 +32,14 @@ pub struct BetasPanel {
 
 impl BetasPanel {
     /// 从 PeriConfig 构建 BetasPanel
-    pub fn from_config(cfg: &crate::config::PeriConfig) -> Self {
+    pub fn from_config(_cfg: &crate::config::PeriConfig) -> Self {
         let entries = BETA_KEYS
             .iter()
-            .map(|&key| match key {
-                "lineEdit" => BetaEntry {
-                    key: key.to_string(),
-                    label: "LineEdit".to_string(),
-                    description: "基于行号的精确编辑模式".to_string(),
-                    enabled: cfg.config.betas.line_edit,
-                },
-                _ => BetaEntry {
-                    key: key.to_string(),
-                    label: key.to_string(),
-                    description: String::new(),
-                    enabled: false,
-                },
+            .map(|&key| BetaEntry {
+                key: key.to_string(),
+                label: key.to_string(),
+                description: String::new(),
+                enabled: false,
             })
             .collect();
 
@@ -62,12 +54,8 @@ impl BetasPanel {
     }
 
     /// 将面板状态应用到 PeriConfig
-    pub fn apply_to_config(&self, cfg: &mut crate::config::PeriConfig) {
-        for entry in &self.entries {
-            if entry.key == "lineEdit" {
-                cfg.config.betas.line_edit = entry.enabled;
-            }
-        }
+    pub fn apply_to_config(&self, _cfg: &mut crate::config::PeriConfig) {
+        // 当前无活跃 beta 功能，无配置可应用
     }
 }
 

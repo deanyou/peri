@@ -18,7 +18,6 @@ pub const EXTRA_TOOL_PARAMS_FIELD: &str = "params";
 pub const TOOL_BASH: &str = "Bash";
 pub const TOOL_WRITE: &str = "Write";
 pub const TOOL_EDIT: &str = "Edit";
-pub const TOOL_LINE_EDIT: &str = "LineEdit";
 pub const TOOL_READ: &str = "Read";
 pub const TOOL_GLOB: &str = "Glob";
 pub const TOOL_GREP: &str = "Grep";
@@ -29,22 +28,19 @@ pub const TOOL_WEBSEARCH: &str = "WebSearch";
 pub const TOOL_ASK_USER: &str = "AskUserQuestion";
 pub const TOOL_TODO: &str = "TodoWrite";
 
-/// 核心工具白名单（始终发送给 LLM，共 13 个）
+/// 核心工具白名单（始终发送给 LLM，共 12 个）
 ///
-/// - 文件操作 (7): Read, Write, Edit, LineEdit, Glob, Grep, folder_operations
+/// - 文件操作 (6): Read, Write, Edit, Glob, Grep, folder_operations
 /// - 执行 (1): Bash
 /// - Web (2): WebFetch, WebSearch
 /// - 交互 (2): Agent, AskUserQuestion
 /// - 管理 (1): TodoWrite
-///
-/// 注意：Edit、LineEdit 不会同时存在，运行时按模式选择其一。
 pub static CORE_TOOLS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
         // 文件操作
         TOOL_READ,
         TOOL_WRITE,
         TOOL_EDIT,
-        TOOL_LINE_EDIT,
         TOOL_GLOB,
         TOOL_GREP,
         TOOL_FOLDER_OPS,

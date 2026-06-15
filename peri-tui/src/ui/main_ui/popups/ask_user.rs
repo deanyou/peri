@@ -1,13 +1,12 @@
+use peri_widgets::{BorderedPanel, ScrollState, ScrollableArea, TabBar, TabState, TabStyle};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
-
-use peri_widgets::{BorderedPanel, ScrollState, ScrollableArea, TabBar, TabState, TabStyle};
 
 use crate::{app::App, ui::theme};
 
@@ -146,7 +145,7 @@ pub(crate) fn render_ask_user_popup(f: &mut Frame, app: &mut App, area: Rect) {
     // 自定义输入前加空行分隔
     lines.push(Line::from(""));
 
-    // 记录 textarea label 在 lines 中的起始行号（用于后续 overlay）
+    // 记录 textarea label 在 lines 中的逻辑行索引
     let textarea_label_line = lines.len() as u16;
 
     // 自定义输入 label 行（前缀 "❯ N. "）
@@ -185,6 +184,24 @@ pub(crate) fn render_ask_user_popup(f: &mut Frame, app: &mut App, area: Rect) {
     let ta_render_height = cur.custom_input.render_height();
     let scroll_offset = prompt.scroll_offset;
 
+    // ── 计算 textarea label 行的视觉行偏移（考虑 ScrollableArea 的 word wrapping）──
+    // ScrollableArea 内部用 Paragraph + Wrap{trim:false} 渲染，逻辑行索引 ≠ 视觉行位置。
+    // 当前置内容（问题文本、选项等）因面板宽度发生换行时，逻辑行索引会产生偏移。
+    // 使用 Paragraph::line_count()（与 ratatui WordWrapper 算法完全一致）精确计算。
+    let text_width = if content_area.height < lines.len() as u16 {
+        content_area.width.saturating_sub(1) // 有滚动条时少 1 列
+    } else {
+        content_area.width
+    };
+    let visual_label_offset: u16 = if textarea_label_line == 0 || text_width == 0 {
+        0
+    } else {
+        let prefix_text: Vec<Line> = lines[..textarea_label_line as usize].to_vec();
+        Paragraph::new(Text::from(prefix_text))
+            .wrap(Wrap { trim: false })
+            .line_count(text_width) as u16
+    };
+
     let mut scroll_state = ScrollState::with_offset(scroll_offset);
     let metrics = ScrollableArea::new(Text::from(lines))
         .scrollbar_style(Style::default().fg(theme::MUTED))
@@ -205,7 +222,7 @@ pub(crate) fn render_ask_user_popup(f: &mut Frame, app: &mut App, area: Rect) {
 
     // ── textarea overlay：在 label 行右侧渲染 FieldTextarea widget ──────────
     if needs_overlay {
-        let visible_label_y = content_area.y + textarea_label_line.saturating_sub(scroll_offset);
+        let visible_label_y = content_area.y + visual_label_offset.saturating_sub(scroll_offset);
         if visible_label_y >= content_area.y
             && visible_label_y < content_area.y + content_area.height
         {

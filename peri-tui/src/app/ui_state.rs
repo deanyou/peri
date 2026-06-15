@@ -5,6 +5,12 @@ use super::at_mention::AtMentionState;
 use super::hint_ops::SlashHintState;
 use crate::app::text_selection::{PanelTextSelection, TextSelection};
 
+/// 预测输入状态：agent 完成后 LLM 生成的下一步输入建议。
+pub struct PredictionState {
+    pub text: String,
+    pub received_at: std::time::Instant,
+}
+
 /// UI 交互状态：会话级的输入、滚动、选区、历史等。
 pub struct UiState {
     pub textarea: TextArea<'static>,
@@ -47,6 +53,10 @@ pub struct UiState {
     pub bg_bar_area: Option<ratatui::layout::Rect>,
     /// Write/Edit 工具结果内联 diff 是否可见
     pub diff_visible: bool,
+    /// Rewind 完成后待回填到输入框的用户消息文本
+    pub pending_rewind_text: Option<String>,
+    /// 预测输入建议（灰色 placeholder，Tab 接受）
+    pub prediction: Option<PredictionState>,
 }
 
 impl UiState {
@@ -83,6 +93,8 @@ impl UiState {
             bg_bar_cursor: None,
             bg_bar_area: None,
             diff_visible: diff_enabled,
+            pending_rewind_text: None,
+            prediction: None,
         }
     }
 }

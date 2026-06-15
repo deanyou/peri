@@ -10,7 +10,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::RwLock;
-
 use peri_agent::{
     agent::{
         compact::CompactConfig,
@@ -235,11 +234,11 @@ pub fn build_agent(
     let ask_user_tool = AskUserTool::new(permission_broker.clone());
 
     // 父工具集（供子 agent 继承）
-    let line_edit_mode = peri_config.config.betas.line_edit;
-    let filesystem_middleware = FilesystemMiddleware::new().with_line_edit_mode(line_edit_mode);
+    let filesystem_middleware = FilesystemMiddleware::new();
     let mut parent_tools: Vec<Box<dyn peri_agent::tools::BaseTool>> =
-        FilesystemMiddleware::build_tools_with_mode(&cwd, line_edit_mode);
+        FilesystemMiddleware::build_tools(&cwd);
     parent_tools.extend(TerminalMiddleware::build_tools(&cwd));
+    parent_tools.extend(WebMiddleware::build_tools());
     if let Some(ref pool) = mcp_pool {
         let mcp_tools = peri_middlewares::mcp::build_tool_bridges(pool);
         for tool in mcp_tools {
@@ -409,13 +408,16 @@ pub fn build_agent(
         }))
         .add_middleware(Box::new(AgentDefineMiddleware::new()))
         .add_middleware(Box::new({
-            let mut mw = SkillsMiddleware::new().with_extra_dirs(plugin_skill_dirs);
+            let mut mw = SkillsMiddleware::new().with_extra_dirs(plugin_skill_dirs.clone());
             if let Some(summary) = frozen_skill_summary {
                 mw = mw.with_frozen_summary(summary);
             }
             mw
         }))
-        .add_middleware(Box::new(SkillPreloadMiddleware::new(preload_skills, &cwd)))
+        .add_middleware(Box::new(
+            SkillPreloadMiddleware::new(preload_skills, &cwd)
+                .with_extra_dirs(plugin_skill_dirs.clone()),
+        ))
         .add_middleware(Box::new(peri_middlewares::AtMentionMiddleware::new(
             cwd.clone().into(),
         )))

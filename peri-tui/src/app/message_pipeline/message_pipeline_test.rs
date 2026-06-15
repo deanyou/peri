@@ -1,8 +1,10 @@
+use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest};
+use serde_json::json;
+use std::time::{Duration, Instant};
+
 use super::*;
 use crate::ui::message_view::aggregate_batch_groups;
 use crate::ui::message_view::ContentBlockView;
-use peri_agent::messages::{BaseMessage, ContentBlock, MessageContent, ToolCallRequest};
-use serde_json::json;
 
 fn _normalize_vms(vms: Vec<MessageViewModel>) -> Vec<String> {
     vms.iter().map(|vm| format!("{:?}", vm)).collect()

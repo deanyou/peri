@@ -1,10 +1,9 @@
 pub mod loader;
 
-pub use loader::{list_skills, load_skill_metadata, SkillMetadata};
-
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+pub use loader::{list_skills, load_skill_metadata, SkillMetadata};
 use peri_agent::{
     agent::state::State, error::AgentResult, messages::BaseMessage, middleware::r#trait::Middleware,
 };
@@ -122,55 +121,40 @@ impl SkillsMiddleware {
 
     /// 在无 `&self` 时解析 skills 目录列表（供静态 frozen 构造使用）。
     pub fn resolve_dirs_static(cwd: &str, extra_dirs: &[PathBuf]) -> Vec<PathBuf> {
-        let user_dir = dirs_next::home_dir()
-            .map(|h| h.join(".claude").join("skills"))
-            .unwrap_or_default();
-
-        let global_dir = load_global_skills_dir();
-
-        let project_dir = PathBuf::from(cwd).join(".claude").join("skills");
-
-        // 按优先级：~/.claude/skills > globalConfig > ./.claude/skills > 插件
-        let mut dirs = vec![user_dir];
-        if let Some(global) = global_dir {
-            dirs.push(global);
-        }
-        dirs.push(project_dir);
-        for dir in extra_dirs {
-            if dir.is_dir() {
-                dirs.push(dir.clone());
-            }
-        }
-        dirs
+        loader::resolve_skill_dirs(cwd, extra_dirs)
     }
 
     /// 根据 cwd 解析实际搜索目录列表（用户级优先于项目级）
     fn resolve_dirs(&self, cwd: &str) -> Vec<PathBuf> {
-        let user_dir = self.user_skills_dir.clone().unwrap_or_else(|| {
-            dirs_next::home_dir()
-                .map(|h| h.join(".claude").join("skills"))
-                .unwrap_or_default()
-        });
-
-        let global_dir = self.global_skills_dir.clone();
-
-        let project_dir = self
-            .project_skills_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(cwd).join(".claude").join("skills"));
-
-        // 按优先级：~/.claude/skills > globalConfig > ./.claude/skills > 插件
-        let mut dirs = vec![user_dir];
-        if let Some(global) = global_dir {
-            dirs.push(global);
-        }
-        dirs.push(project_dir);
-        for dir in &self.extra_dirs {
-            if dir.is_dir() {
-                dirs.push(dir.clone());
+        // 有 override 字段时走测试隔离路径
+        if self.user_skills_dir.is_some()
+            || self.global_skills_dir.is_some()
+            || self.project_skills_dir.is_some()
+        {
+            let user_dir = self.user_skills_dir.clone().unwrap_or_else(|| {
+                dirs_next::home_dir()
+                    .map(|h| h.join(".claude").join("skills"))
+                    .unwrap_or_default()
+            });
+            let global_dir = self.global_skills_dir.clone();
+            let project_dir = self
+                .project_skills_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(cwd).join(".claude").join("skills"));
+            let mut dirs = vec![user_dir];
+            if let Some(global) = global_dir {
+                dirs.push(global);
             }
+            dirs.push(project_dir);
+            for dir in &self.extra_dirs {
+                if dir.is_dir() {
+                    dirs.push(dir.clone());
+                }
+            }
+            dirs
+        } else {
+            Self::resolve_dirs_static(cwd, &self.extra_dirs)
         }
-        dirs
     }
 
     /// 生成 skills 摘要系统消息内容
@@ -238,8 +222,9 @@ impl<S: State> Middleware<S> for SkillsMiddleware {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use peri_agent::agent::state::AgentState;
     use tempfile::tempdir;
+
+    use super::*;
     include!("mod_test.rs");
 }

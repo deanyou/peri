@@ -33,3 +33,25 @@
         let skill_a = skills.iter().find(|s| s.name == "skill-a").unwrap();
         assert_eq!(skill_a.description, "from dir1"); // dir1 优先
     }
+
+    #[test]
+    fn test_resolve_skill_dirs_returns_standard_paths() {
+        let cwd = "/tmp/test-project";
+        let dirs = resolve_skill_dirs(cwd, &[]);
+        // 应包含用户目录和项目目录
+        assert!(dirs.iter().any(|d| d.ends_with(".claude/skills")), "应包含 ~/.claude/skills");
+        assert!(dirs.iter().any(|d| d == &PathBuf::from("/tmp/test-project/.claude/skills")), "应包含项目 .claude/skills");
+    }
+
+    #[test]
+    fn test_resolve_skill_dirs_includes_extra_dirs() {
+        let extra = tempfile::tempdir().unwrap();
+        let dirs = resolve_skill_dirs("/tmp", &[extra.path().to_path_buf()]);
+        assert!(dirs.contains(&extra.path().to_path_buf()), "应包含 extra_dirs 中的目录");
+    }
+
+    #[test]
+    fn test_resolve_skill_dirs_skips_nonexistent_extra_dirs() {
+        let dirs = resolve_skill_dirs("/tmp", &[PathBuf::from("/nonexistent/path")]);
+        assert!(!dirs.iter().any(|d| d.to_str() == Some("/nonexistent/path")), "不存在的 extra_dirs 应被跳过");
+    }

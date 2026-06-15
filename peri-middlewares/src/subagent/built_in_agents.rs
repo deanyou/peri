@@ -26,7 +26,11 @@ pub fn get_built_in_agent(agent_id: &str) -> Option<&'static BuiltInAgent> {
     BUILT_IN_AGENTS.iter().find(|a| a.agent_id == agent_id)
 }
 
-static BUILT_IN_AGENTS: [BuiltInAgent; 4] = [
+static BUILT_IN_AGENTS: [BuiltInAgent; 6] = [
+    BuiltInAgent {
+        agent_id: "coder",
+        content: include_str!("built-in/coder.md"),
+    },
     BuiltInAgent {
         agent_id: "explore",
         content: include_str!("built-in/explore.md"),
@@ -42,6 +46,10 @@ static BUILT_IN_AGENTS: [BuiltInAgent; 4] = [
     BuiltInAgent {
         agent_id: "verification",
         content: include_str!("built-in/verification.md"),
+    },
+    BuiltInAgent {
+        agent_id: "web-researcher",
+        content: include_str!("built-in/web-researcher.md"),
     },
 ];
 

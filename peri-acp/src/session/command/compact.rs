@@ -105,7 +105,7 @@ impl AgentCommand for CompactCommand {
 
         // 执行 full_compact（支持 Ctrl+C 取消）
         let compact_result = tokio::select! {
-            r = full_compact(&history, compact_model.as_ref(), &compact_config, "") => {
+            r = full_compact(&history, compact_model.as_ref(), &compact_config, "", &cwd) => {
                 match r {
                     Ok(r) => r,
                     Err(e) => {

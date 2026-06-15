@@ -9,9 +9,6 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
-use tracing::{info, warn};
-
 use peri_agent::{
     agent::{
         compact::{
@@ -28,6 +25,8 @@ use peri_agent::{
     messages::BaseMessage,
     middleware::r#trait::Middleware,
 };
+use tokio::sync::mpsc;
+use tracing::{info, warn};
 
 use crate::hooks::{self, RegisteredHook};
 
@@ -162,7 +161,7 @@ impl CompactMiddleware {
                 state.messages_mut().extend(own_messages);
                 return Ok(());
             }
-            result = full_compact(&own_messages, model.as_ref(), &self.config, "") => {
+            result = full_compact(&own_messages, model.as_ref(), &self.config, "", &self.cwd) => {
                 match result {
                     Ok(r) => r,
                     Err(e) => {
