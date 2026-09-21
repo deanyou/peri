@@ -3,15 +3,16 @@
   "version": "0.2.0",
   "type": "module",
   "scripts": {
-    "tool-reliability": "bun run src/metrics/tool_reliability.ts",
-    "session-efficiency": "bun run src/metrics/session_efficiency.ts",
-    "resource-consumption": "bun run src/metrics/resource_consumption.ts",
-    "feature-adoption": "bun run src/metrics/feature_adoption.ts",
-    "edit-quality": "bun run src/metrics/edit_quality.ts",
-    "subagent-collab": "bun run src/metrics/subagent_collab.ts"
-  },
-  "dependencies": {
-    "chalk": "^5.3.0"
+    "inspect": "bun run src/cli.ts inspect",
+    "report": "bun run src/cli.ts report",
+    "sample": "bun run src/cli.ts sample",
+    "evidence": "bun run src/cli.ts evidence",
+    "compare": "bun run src/cli.ts compare",
+    "task-sample": "bun run src/cli.ts task-sample",
+    "task-packet": "bun run src/cli.ts task-packet",
+    "task-review": "bun run src/cli.ts task-review",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "latest",

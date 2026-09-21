@@ -15,7 +15,7 @@ langfuse api <resource> <action>
 ## Discovery
 
 ```bash
-bunx langfuse-cli api __schema
+bunx langfuse-cli api --help
 bunx langfuse-cli api <resource> --help
 bunx langfuse-cli api <resource> <action> --help
 bunx langfuse-cli api <resource> <action> --curl
@@ -37,6 +37,5 @@ LANGFUSE_HOST=https://cloud.langfuse.com
 - Use `--curl` to preview the HTTP request without executing
 - Pagination: use `--limit` and `--page` on list endpoints
 - All list commands support filtering — check `<resource> <action> --help` for available options
-- Prefer `observations-v2s` over `observations` — the v2 endpoint returns richer data
-- Prefer `metrics-v2s` over `metrics` — the v2 endpoint returns richer data
-- Prefer `score-v2s` over `scores` — the v1 `scores` resource only supports create/delete; use `score-v2s` for list and get operations
+- Resource names vary by installed CLI version; discover them with `api --help` instead of assuming version-specific aliases
+- For traces and observations, prefer the bundled project scripts when their pagination and field projection match the task

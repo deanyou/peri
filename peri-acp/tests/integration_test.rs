@@ -2,7 +2,8 @@
 //!
 //! Tests key components end-to-end: transport, broker, event mapping.
 
-use agent_client_protocol::schema::SessionId;
+use agent_client_protocol::schema::v1::SessionId;
+use peri_acp_types::PeriCaps;
 use serde_json::json;
 
 #[tokio::test]
@@ -73,7 +74,7 @@ async fn test_broker_approval_flow() {
 #[tokio::test]
 async fn test_event_mapper_tool_start() {
     use peri_acp::event::map_event;
-    use peri_agent::{agent::events::AgentEvent as ExecutorEvent, messages::MessageId};
+    use peri_agent::{agent::events::ExecutorEvent, messages::MessageId};
 
     let event = ExecutorEvent::ToolStart {
         message_id: MessageId::new(),
@@ -83,13 +84,12 @@ async fn test_event_mapper_tool_start() {
         source_agent_id: None,
     };
 
-    let mapped = map_event(&event, 200000);
+    let mapped = map_event(&event, 200000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1, "ToolStart must produce one MappedEvent");
     assert!(
         !mapped[0].updates.is_empty(),
         "ToolStart must produce SessionUpdate"
     );
-    assert!(!mapped[0].forward_to_tui, "ToolStart is category ①");
     assert!(
         mapped[0].source_agent_id.is_none(),
         "ToolStart has no source_agent_id"
@@ -99,7 +99,7 @@ async fn test_event_mapper_tool_start() {
 #[tokio::test]
 async fn test_event_mapper_text_chunk() {
     use peri_acp::event::map_event;
-    use peri_agent::{agent::events::AgentEvent as ExecutorEvent, messages::MessageId};
+    use peri_agent::{agent::events::ExecutorEvent, messages::MessageId};
 
     let event = ExecutorEvent::TextChunk {
         message_id: MessageId::new(),
@@ -107,13 +107,12 @@ async fn test_event_mapper_text_chunk() {
         source_agent_id: None,
     };
 
-    let mapped = map_event(&event, 200000);
+    let mapped = map_event(&event, 200000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1, "TextChunk must produce one MappedEvent");
     assert!(
         !mapped[0].updates.is_empty(),
         "TextChunk must produce SessionUpdate"
     );
-    assert!(!mapped[0].forward_to_tui, "TextChunk is category ①");
     assert!(
         mapped[0].source_agent_id.is_none(),
         "TextChunk has no source_agent_id"
@@ -122,9 +121,9 @@ async fn test_event_mapper_text_chunk() {
 
 #[test]
 fn test_event_mapper_todo_update_maps_to_plan() {
-    use agent_client_protocol::schema::{PlanEntryPriority, PlanEntryStatus, SessionUpdate};
+    use agent_client_protocol::schema::v1::{PlanEntryPriority, PlanEntryStatus, SessionUpdate};
     use peri_acp::event::map_event;
-    use peri_agent::agent::events::{AgentEvent as ExecutorEvent, TodoEntry, TodoStatus};
+    use peri_agent::agent::events::{ExecutorEvent, TodoEntry, TodoStatus};
 
     let event = ExecutorEvent::TodoUpdate(vec![
         TodoEntry {
@@ -144,13 +143,12 @@ fn test_event_mapper_todo_update_maps_to_plan() {
         },
     ]);
 
-    let mapped = map_event(&event, 200000);
+    let mapped = map_event(&event, 200000, &PeriCaps::default());
     assert_eq!(
         mapped.len(),
         1,
         "TodoUpdate must produce exactly one MappedEvent"
     );
-    assert!(!mapped[0].forward_to_tui, "TodoUpdate is category ①");
 
     match &mapped[0].updates[0] {
         SessionUpdate::Plan(plan) => {

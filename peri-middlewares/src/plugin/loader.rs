@@ -1,26 +1,41 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use async_trait::async_trait;
 use gray_matter::{engine::YAML, Matter};
-use peri_lsp::config::{LspConfigSource, LspServerConfig};
+use peri_acp_types::command::command_route::{
+    CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource as RouteCommandSource,
+    RouteEntry,
+};
+use peri_acp_types::command::{CommandContext, CommandHandler, CommandOutcome};
+use peri_resources::lsp::config::{lsp_config_from_plugin, LspServerConfig};
 use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, warn};
 
 use crate::{
-    hooks::types::{HooksConfig, RegisteredHook},
+    hooks::types::RegisteredHook,
     mcp::{config::McpConfigFile, McpServerConfig},
     plugin::{
         config::{
             load_claude_settings, load_installed_plugins, load_plugin_manifest,
-            marketplaces_cache_dir,
+            marketplaces_cache_dir, ClaudeSettings,
         },
         installer::generate_synthetic_manifest,
         marketplace::read_manifest_from_path,
         types::{InstalledPlugins, McpServerEntry, PluginCommandEntry, PluginManifest},
     },
+    skills::{SkillRoot, SkillSource},
+};
+
+// 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::plugin`）。
+// `CommandSource` / `CommandEntry` / `LoadedPlugin` / `PluginLoadResult` 自本文件
+// 迁出；本模块保留 re-export 保兼容。`CommandProvider` 随迁（trait 引用迁出类型）。
+pub use peri_acp_types::plugin::{
+    CommandEntry, CommandProvider, CommandSource, LoadedPlugin, PluginLoadResult,
 };
 
 #[derive(Debug, Error)]
@@ -31,23 +46,6 @@ pub enum LoaderError {
     ConfigError(#[from] crate::plugin::PluginConfigError),
     #[error("IO 错误: {0}")]
     Io(#[from] std::io::Error),
-}
-
-#[derive(Debug, Clone)]
-pub enum CommandSource {
-    Builtin,
-    Plugin { path: PathBuf },
-}
-
-#[derive(Debug, Clone)]
-pub struct CommandEntry {
-    pub name: String,
-    pub description: String,
-    pub source: CommandSource,
-}
-
-pub trait CommandProvider: Send + Sync {
-    fn commands(&self) -> Vec<CommandEntry>;
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -74,24 +72,6 @@ pub fn parse_command_md(path: &Path) -> Option<(CommandFrontmatter, String)> {
         None => CommandFrontmatter::default(),
     };
     Some((fm, result.content))
-}
-
-#[derive(Debug, Clone)]
-pub struct LoadedPlugin {
-    pub name: String,
-    pub version: String,
-    pub install_path: PathBuf,
-    pub manifest: PluginManifest,
-    pub commands: Vec<CommandEntry>,
-    pub skills_dirs: Vec<PathBuf>,
-    pub agents_dirs: Vec<PathBuf>,
-    pub mcp_servers: HashMap<String, McpServerConfig>,
-    /// 插件数据目录（install_path/.claude-plugin/data），供 ${CLAUDE_PLUGIN_DATA} 展开
-    pub data_path: PathBuf,
-    /// 插件 hooks 配置（从 hooks/hooks.json 或 plugin.json hooks 字段提取）
-    pub hooks_config: Option<HooksConfig>,
-    /// 插件来源 marketplace（如 "claude-plugins-official"），用于追踪插件来源
-    pub marketplace: String,
 }
 
 pub fn load_manifest(plugin_dir: &Path) -> Result<PluginManifest, LoaderError> {
@@ -242,7 +222,9 @@ fn process_command_file(
             .unwrap_or("unknown")
     });
 
-    let full_name = format!("{plugin_name}:{cmd_name}");
+    // 与 CommandSource::Plugin 语义对齐（namespace = 插件名）：`plugin:{plugin}:{cmd}`
+    // 三层形态——原 `{plugin}:{cmd}` 二层形态对第二等级（外部来源）非法，必须显式 plugin 域前缀。
+    let full_name = format!("plugin:{plugin_name}:{cmd_name}");
     let description = fm
         .description
         .or(explicit_description.map(String::from))
@@ -257,16 +239,87 @@ fn process_command_file(
     });
 }
 
-/// Extract skill directories from plugin manifest.
+/// 插件命令占位 handler（Phase 6 B2；设计「正交维度」：外部系统命令不改变
+/// 执行通路，仅要求路由表支持运行时注册 / 注销）。
+///
+/// 占位实现（执行语义未定）：返回 [`CommandOutcome::Inject`] 空串——拦截
+/// 路径对 Inject 的既有处理为 warn + fall-through（原文进 agent 管线，
+/// 命令不被吞，与 `mcp/skill_discovery.rs` 的 `McpSkillPlaceholder` /
+/// `peri-acp` 的 `PassthroughPlaceholder` 同构）。UI-only 反馈「插件命令
+/// 执行待后续版本」与正式执行体留待 Phase 5+ 补齐（注册 / 注销 / 投影
+/// 链路本 Phase 全量生效）。
+#[derive(Clone)]
+pub struct PluginCommandHandler {
+    /// 命令来源（插件命令文件路径；占位期仅承载来源信息）。
+    pub source: CommandSource,
+}
+
+#[async_trait]
+impl CommandHandler for PluginCommandHandler {
+    async fn execute(&self, _ctx: CommandContext) -> CommandOutcome {
+        // 占位：Inject 空串 → 拦截路径 fall-through，原文进 agent 管线。
+        CommandOutcome::Inject(String::new())
+    }
+}
+
+/// `CommandEntry` → `RouteEntry`（plugin 域；name 形如 `plugin:{plugin}:{cmd}`，
+/// B1 词法迁移后的三层形态，设计 §44-59 第二等级）。
+///
+/// fullname 原样使用（`plugin:{plugin}:{cmd}`）；kind = [`CommandEntryKind::Command`]
+/// （plugin 域暂归 Command，设计 §85 注）；provenance = `CommandSource::Plugin`
+/// （**剥离 `plugin:` 前缀**的插件名——register 域校验将核对词法 namespace
+/// 段 == 插件名，设计 §58，未剥离 → ProvenanceMismatch 全量拒绝）+
+/// [`CommandLifecycle::Connected`]（静态装配，与 MCP 动态注入的 Discovered
+/// 相对）；handler = [`PluginCommandHandler`] 占位。含 `plugin:` 前缀但缺
+/// 末段 cmd（词法异常，如 `plugin:x`）→ 跳过并告警；非 plugin 域 name
+/// （如 `foo:bar`）不属本函数职责，静默跳过（register 词法校验兜底）。
+pub fn plugin_route_entries(entries: &[CommandEntry]) -> Vec<RouteEntry> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            // 先剥 "plugin:" 域前缀（非 plugin 域 → 静默跳过），再取末段
+            // cmd：`plugin:ecc:deploy` → ("ecc", "deploy")；`plugin:x`（单层
+            // 非法）→ None → 告警跳过（register 词法校验兜底）。
+            let rest = e.name.strip_prefix("plugin:")?;
+            let Some((plugin, _cmd)) = rest.rsplit_once(':') else {
+                warn!(name = %e.name, "插件命令名词法异常，跳过 plugin 域注册");
+                return None;
+            };
+            Some(RouteEntry {
+                fullname: e.name.clone(), // "plugin:{plugin}:{cmd}"
+                aliases: vec![],
+                description: e.description.clone(),
+                kind: CommandEntryKind::Command, // plugin 域暂归 Command（设计 §85 注）
+                category: None,
+                args_schema: None,
+                handler: Arc::new(PluginCommandHandler {
+                    source: e.source.clone(),
+                }),
+                provenance: CommandProvenance {
+                    source: RouteCommandSource::Plugin {
+                        name: plugin.to_string(),
+                    },
+                    lifecycle: CommandLifecycle::Connected,
+                },
+            })
+        })
+        .collect()
+}
+
+/// Extract skill roots from plugin manifest.
 ///
 /// Manifest `skills` entries are treated as paths relative to the plugin root
 /// (matching Claude Code convention: `skills: ["./skills/"]` or `skills: ["skills/tdd"]`).
-/// If an entry points to a directory containing `SKILL.md`, it is used directly.
-/// Otherwise the entry is treated as a container directory and scanned for
-/// subdirectories that contain `SKILL.md`.
+/// Each entry becomes a `SkillRoot` (`source=Plugin`, `plugin_name=plugin_name`),
+/// regardless of whether it directly contains `SKILL.md` or is a container——
+/// `scan_skill_roots` handles both cases via leaf semantics.
 ///
-/// Falls back to scanning `base_dir/skills/` when no manifest skills are declared.
-pub(crate) fn extract_skills_paths(manifest: &PluginManifest, base_dir: &Path) -> Vec<PathBuf> {
+/// Falls back to `base_dir/skills/` as a single root when no manifest skills are declared.
+pub(crate) fn extract_skills_paths(
+    manifest: &PluginManifest,
+    base_dir: &Path,
+    plugin_name: &str,
+) -> Vec<SkillRoot> {
     let mut result = Vec::new();
 
     // 1. manifest 显式声明（每条 entry 是相对于插件根目录的路径）
@@ -278,32 +331,24 @@ pub(crate) fn extract_skills_paths(manifest: &PluginManifest, base_dir: &Path) -
                     debug!(path = %skill_path.display(), "插件 skill 路径不存在，跳过");
                     continue;
                 }
-                if skill_path.join("SKILL.md").exists() {
-                    result.push(skill_path);
-                } else {
-                    // 容器目录：扫描含 SKILL.md 的子目录
-                    if let Ok(children) = std::fs::read_dir(&skill_path) {
-                        for child in children.flatten() {
-                            let p = child.path();
-                            if p.is_dir() && p.join("SKILL.md").exists() {
-                                result.push(p);
-                            }
-                        }
-                    }
-                }
+                result.push(SkillRoot {
+                    path: skill_path,
+                    source: SkillSource::Plugin,
+                    plugin_name: Some(plugin_name.to_string()),
+                });
             }
             return result;
         }
     }
 
-    // 2. fallback：扫描 base_dir/skills/ 下所有含 SKILL.md 的子目录
+    // 2. fallback：base_dir/skills/ 作为一个 root（由 scan_skill_roots 递归扫描）
     let skills_dir = base_dir.join("skills");
-    if let Ok(entries) = std::fs::read_dir(&skills_dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() && entry.path().join("SKILL.md").exists() {
-                result.push(entry.path());
-            }
-        }
+    if skills_dir.is_dir() {
+        result.push(SkillRoot {
+            path: skills_dir,
+            source: SkillSource::Plugin,
+            plugin_name: Some(plugin_name.to_string()),
+        });
     }
 
     result
@@ -467,7 +512,7 @@ pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, L
         };
 
         let commands = extract_commands(&manifest, &plugin.install_path, &plugin.name);
-        let skills_dirs = extract_skills_paths(&manifest, &plugin.install_path);
+        let skills_roots = extract_skills_paths(&manifest, &plugin.install_path, &plugin.name);
         let agents_dirs = extract_agents_paths(&manifest, &plugin.install_path);
         let mcp_servers = extract_mcp_servers(&manifest, &plugin.install_path);
         let data_path = plugin.install_path.join(".claude-plugin").join("data");
@@ -479,7 +524,7 @@ pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, L
             install_path: plugin.install_path.clone(),
             manifest,
             commands,
-            skills_dirs,
+            skills_roots,
             agents_dirs,
             mcp_servers,
             data_path,
@@ -492,23 +537,51 @@ pub fn load_plugins(installed: &InstalledPlugins) -> Result<Vec<LoadedPlugin>, L
     Ok(result)
 }
 
-pub fn load_enabled_plugins(claude_dir: &Path) -> Result<Vec<LoadedPlugin>, LoaderError> {
+/// 合并用户级和项目级的 enabledPlugins
+///
+/// 规则：
+/// 1. 项目级不存在 → 用用户级
+/// 2. 项目级 enabledPlugins 为空 → 沿用用户级
+/// 3. 项目级非空 → 以项目为准（完全替换，与 Claude Code 行为一致）
+fn merge_enabled_plugins(
+    user: &ClaudeSettings,
+    project: Option<&ClaudeSettings>,
+) -> HashSet<String> {
+    let Some(project) = project else {
+        return user.enabled_plugins.iter().cloned().collect();
+    };
+
+    // 项目级 enabledPlugins 为空 → 沿用用户级
+    if project.enabled_plugins.is_empty() {
+        return user.enabled_plugins.iter().cloned().collect();
+    }
+
+    // 项目级非空 → 完全替换
+    project.enabled_plugins.iter().cloned().collect()
+}
+
+pub fn load_enabled_plugins(
+    claude_dir: &Path,
+    cwd: Option<&Path>,
+) -> Result<Vec<LoadedPlugin>, LoaderError> {
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let settings_path = claude_dir.join("settings.json");
 
     let installed = load_installed_plugins(Some(&plugins_path))?;
-    let settings = load_claude_settings(Some(&settings_path))?;
+    let user_settings = load_claude_settings(Some(&settings_path))?;
 
-    let enabled_ids: std::collections::HashSet<&str> = settings
-        .enabled_plugins
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
+    // 尝试加载项目级 settings.json（与 P0-1 hooks 加载一致）
+    let project_settings = cwd
+        .map(|p| p.join(".claude").join("settings.json"))
+        .filter(|p| p.exists())
+        .and_then(|p| load_claude_settings(Some(&p)).ok());
+
+    let enabled_ids = merge_enabled_plugins(&user_settings, project_settings.as_ref());
 
     let filtered: Vec<_> = installed
         .plugins
         .into_iter()
-        .filter(|p| enabled_ids.contains(p.id.as_str()))
+        .filter(|p| enabled_ids.contains(&p.id))
         .collect();
 
     let filtered_installed = InstalledPlugins {
@@ -540,7 +613,9 @@ pub fn merge_plugin_mcp_servers(plugins: &[LoadedPlugin]) -> HashMap<String, Mcp
     let mut result = HashMap::new();
     for plugin in plugins {
         for (name, config) in &plugin.mcp_servers {
-            // 与 Claude Code 一致：使用 plugin:{插件名}:{服务器名} 前缀
+            // config 层唯一键（与 Claude Code 一致）：`plugin:{插件名}:{服务器名}`
+            // 不进命令命名空间——命令词法层（plugin 域 `plugin:{plugin}:{cmd}`）与
+            // MCP server 键各自独立，互不交叉。
             let namespaced = format!("plugin:{}:{}", plugin.name, name);
             result.insert(namespaced, config.clone());
         }
@@ -549,27 +624,19 @@ pub fn merge_plugin_mcp_servers(plugins: &[LoadedPlugin]) -> HashMap<String, Mcp
 }
 
 /// 所有已启用插件的聚合加载结果
-#[derive(Debug, Clone)]
-pub struct PluginLoadResult {
-    pub plugins: Vec<LoadedPlugin>,
-    pub all_skill_dirs: Vec<PathBuf>,
-    pub all_mcp_servers: HashMap<String, McpServerConfig>,
-    pub all_agent_dirs: Vec<PathBuf>,
-    pub all_commands: Vec<CommandEntry>,
-    pub all_hooks: Vec<RegisteredHook>,
-    /// 聚合所有插件的 LSP 服务器配置
-    pub all_lsp_servers: Vec<LspServerConfig>,
-}
 
 /// 加载所有已启用插件，返回聚合结果（skills 路径、MCP 服务器、agent 路径、命令列表）
-pub fn load_enabled_plugins_aggregated(claude_dir: &Path) -> PluginLoadResult {
-    let plugins = match load_enabled_plugins(claude_dir) {
+///
+/// `cwd`：项目工作目录，用于发现项目级 `.claude/settings.json` 的 `enabledPlugins`。
+/// 传 `None` 时仅读取用户级 `~/.claude/settings.json`。
+pub fn load_enabled_plugins_aggregated(claude_dir: &Path, cwd: Option<&Path>) -> PluginLoadResult {
+    let plugins = match load_enabled_plugins(claude_dir, cwd) {
         Ok(p) => p,
         Err(_) => {
             // 静默失败，避免在 TUI 上打印错误日志
             return PluginLoadResult {
                 plugins: vec![],
-                all_skill_dirs: vec![],
+                all_skill_roots: vec![],
                 all_mcp_servers: HashMap::new(),
                 all_agent_dirs: vec![],
                 all_commands: vec![],
@@ -579,7 +646,10 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path) -> PluginLoadResult {
         }
     };
 
-    let all_skill_dirs: Vec<PathBuf> = plugins.iter().flat_map(|p| p.skills_dirs.clone()).collect();
+    let all_skill_roots: Vec<SkillRoot> = plugins
+        .iter()
+        .flat_map(|p| p.skills_roots.clone())
+        .collect();
 
     let all_mcp_servers = merge_plugin_mcp_servers(&plugins);
 
@@ -635,19 +705,15 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path) -> PluginLoadResult {
             Some(
                 servers
                     .iter()
-                    .map(|s| LspServerConfig {
-                        name: s.name.clone(),
-                        command: s.command.clone(),
-                        args: s.args.clone(),
-                        env: None,
-                        extension_to_language: s.extension_to_language.clone(),
-                        initialization_options: None,
-                        disabled: None,
-                        max_restarts: None,
-                        startup_timeout: None,
-                        source: Some(LspConfigSource::Plugin {
-                            plugin_name: plugin.name.clone(),
-                        }),
+                    .map(|s| {
+                        lsp_config_from_plugin(
+                            &plugin.name,
+                            &s.name,
+                            &s.command,
+                            &s.args,
+                            &plugin.install_path,
+                            s.extension_to_language.clone(),
+                        )
                     })
                     .collect::<Vec<_>>(),
             )
@@ -657,7 +723,7 @@ pub fn load_enabled_plugins_aggregated(claude_dir: &Path) -> PluginLoadResult {
 
     PluginLoadResult {
         plugins,
-        all_skill_dirs,
+        all_skill_roots,
         all_mcp_servers,
         all_agent_dirs,
         all_commands,

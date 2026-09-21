@@ -149,12 +149,24 @@ deno.lock
 .xyd
 data
 
+# Analysis source lives beside ignored local datasets.
+!side-projects/agent-defect-analyzer/src/data/
+side-projects/agent-defect-analyzer/src/data/*
+!side-projects/agent-defect-analyzer/src/data/*.ts
+!side-projects/peri-db-viewer/src/data/
+side-projects/peri-db-viewer/src/data/*
+!side-projects/peri-db-viewer/src/data/*.ts
+side-projects/agent-defect-analyzer/output/
+
 claude-blog
 claude-blog-cn
 
 *.py
+!scripts/test-i386.py
+!scripts/test-loongarch64.py
 build
 .tmp
+tmp/
 target
 
 .idea/*
@@ -178,13 +190,59 @@ deploy/peri-arm32-v0.1.0/lib/
 deploy/peri-arm32-*.tar.gz
 
 vendor/
+!peri-tui/vendor/
+!side-projects/site-project/public/vendor/
 
 .claude/skills/*-workspace
+
+# site-project workspace state (per-developer)
+side-projects/site-project/workspace.json
 .wrangler.worktrees/
 .worktrees/
 
-.peri
+.peri/*
 node_modules
 dist
+!npm-packages/@peri-workflow/dist/
+!npm-packages/@peri-workflow/dist/peri-workflow.js
 settings.json
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/auto-data-researcher/
+!.claude/skills/auto-data-researcher/**
+!.claude/skills/agent-task-evaluator/
+!.claude/skills/agent-task-evaluator/**
+!.claude/skills/learn-from-history/**
+!.claude/skills/learn-from-history/
+!.claude/skills/start-devflow/**
+!.claude/skills/start-devflow/
+!.claude/skills/auto-issue-fixer/**
+!.claude/skills/auto-issue-fixer/
+!.claude/skills/project-maturity/**
+!.claude/skills/project-maturity/
+!.claude/skills/advisor-consultation/**
+!.claude/skills/advisor-consultation/
+!.claude/skills/heavy-verify-loop/**
+!.claude/skills/heavy-verify-loop/
+!.claude/skills/codebase-index/**
+!.claude/skills/codebase-index/
+!.claude/skills/langfuse/
+!.claude/skills/langfuse/scripts/
+!.claude/skills/langfuse/scripts/**
+!.claude/agents/
+!.claude/agents/coder.md
+.qoder/**/*
+.superpowers
+skills-lock.json
+.agents
+!.peri/theme/
+e2e/results
+__pycache__
+.codex
+dsh-tui
+acp-hub/web/test-results/
+peri
+
+# Dated research, eval and ADLC run artifacts
+/side-projects/agent-defect-analyzer/reports/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]*

@@ -1,14 +1,12 @@
+//! Tests for setup_wizard
 use super::*;
-use crate::config::{AppConfig, ProviderConfig};
+use serial_test::serial;
 
 #[test]
+#[serial]
 fn test_needs_setup_empty_providers_no_env() {
-    let config = AppConfig::default();
-    // 无 providers 且显式移除所有已知 API key 环境变量 → 需要 setup
-    // 显式设为空值模拟"没有配置"的场景
-    std::env::set_var("MODEL_PROVIDER", "__nonexistent__");
-    std::env::remove_var("OPENAI_API_KEY");
-    std::env::remove_var("ANTHROPIC_API_KEY");
+    let _env = EnvKeys::clear();
+    let config = crate::config::AppConfig::default();
     assert!(
         needs_setup(&config),
         "无 providers 且无有效 env 时应需要 setup"
@@ -16,41 +14,21 @@ fn test_needs_setup_empty_providers_no_env() {
 }
 
 #[test]
-fn test_needs_setup_empty_providers_but_env_key() {
-    let config = AppConfig::default();
-    // 无 providers 但 OPENAI_API_KEY + MODEL_PROVIDER=openai → 不需要 setup
-    std::env::set_var("MODEL_PROVIDER", "openai");
-    std::env::set_var("OPENAI_API_KEY", "sk-fake-test-key");
-    std::env::remove_var("ANTHROPIC_API_KEY");
-    assert!(
-        !needs_setup(&config),
-        "有 OPENAI_API_KEY env 时应不需要 setup"
-    );
-}
-
-#[test]
+#[serial]
 fn test_needs_setup_api_key_from_config() {
-    let mut config = AppConfig::default();
-    config.providers.push(ProviderConfig {
-        id: "test".to_string(),
-        provider_type: "openai".to_string(),
-        api_key: "sk-test".to_string(),
-        base_url: String::new(),
+    let _env = EnvKeys::clear();
+    let mut config = crate::config::AppConfig {
+        active_alias: "sonnet".into(),
+        ..Default::default()
+    };
+    config.profiles.sonnet.provider = "test".into();
+    config.providers.push(crate::config::ProviderConfig {
+        id: "test".into(),
+        provider_type: "openai".into(),
+        api_key: "sk-fake-test-key".into(),
         ..Default::default()
     });
     assert!(!needs_setup(&config));
-}
-
-#[test]
-fn test_setup_wizard_new_defaults() {
-    let wizard = SetupWizardPanel::new();
-    assert_eq!(wizard.step, SetupStep::Language);
-    assert_eq!(wizard.language, "en");
-    assert_eq!(wizard.language_cursor, 0);
-    assert_eq!(wizard.providers.len(), 1);
-    assert_eq!(wizard.providers[0].provider_type, ProviderType::Anthropic);
-    assert!(wizard.providers[0].field_api_key.is_empty());
-    assert!(wizard.providers[0].selected);
 }
 
 #[test]
@@ -63,628 +41,356 @@ fn test_provider_type_cycle() {
 }
 
 #[test]
-fn test_migrated_provider_new() {
-    let mp = MigratedProvider::new(ProviderType::OpenAiCompatible);
-    assert_eq!(mp.field_provider_id.value(), "openai");
-    assert_eq!(mp.field_base_url.value(), "https://api.openai.com/v1");
-    assert!(mp.selected);
-    assert!(mp.field_api_key.is_empty());
-}
-
-#[test]
 fn test_migrated_provider_is_complete() {
-    let mut mp = MigratedProvider::new(ProviderType::Anthropic);
-    assert!(!mp.is_complete()); // api_key empty
-    mp.field_api_key.set_value("sk-test");
-    assert!(mp.is_complete());
-    mp.aliases[0].field_model_id.clear();
+    let mp = MigratedProvider::new(ProviderType::Anthropic);
+    // 新创建的 provider api_key 为空，不完整
     assert!(!mp.is_complete());
+
+    let mut mp2 = MigratedProvider::new(ProviderType::Anthropic);
+    mp2.api_key = "sk-test".to_string();
+    assert!(mp2.is_complete());
 }
 
 #[test]
-fn test_migrate_from_claude_code_no_file() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.source = SetupSource::MigrateClaudeCode;
-    // 使用不存在的路径
-    let result = wizard.migrate_from_claude_code();
-    // 不应该 panic，返回 false 或 true 取决于是否有 ~/.claude/settings.json
-    // 只要不 panic 就行
-    let _ = result;
-}
-
-#[test]
-fn test_migrate_syncs_all_fields() {
-    // 构造一个临时 settings.json 模拟 Claude Code 配置
-    let temp_dir = std::env::temp_dir().join(format!("zen-migrate-test-{}", uuid::Uuid::now_v7()));
-    let claude_dir = temp_dir.join(".claude");
-    std::fs::create_dir_all(&claude_dir).unwrap();
-
-    let settings = serde_json::json!({
-        "env": {
-            "ANTHROPIC_API_KEY": "sk-ant-123",
-            "ANTHROPIC_BASE_URL": "https://proxy.example.com",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.1",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5-turbo",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.7",
-            "OPENAI_API_KEY": "sk-openai-456",
-            "OPENAI_BASE_URL": "https://api.deepseek.com/v1",
-            "OPENAI_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
-            "OPENAI_DEFAULT_SONNET_MODEL": "deepseek-v4-pro",
-            "OPENAI_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
-        }
-    });
-    std::fs::write(claude_dir.join("settings.json"), settings.to_string()).unwrap();
-
-    // 临时修改 home_dir 指向 temp_dir
-    // 由于 migrate_from_claude_code 用 dirs_next::home_dir，
-    // 我们无法直接 mock，所以用真实路径测试
-    // 改为直接调用测试函数
-    let env = settings["env"].as_object().unwrap().clone();
-
-    // 验证 env_get 辅助函数
-    assert_eq!(env_get(&env, "ANTHROPIC_API_KEY"), "sk-ant-123");
+fn test_mask_api_key() {
+    assert_eq!(mask_api_key("sk-short"), "••••••••");
     assert_eq!(
-        env_get(&env, "ANTHROPIC_BASE_URL"),
-        "https://proxy.example.com"
+        mask_api_key("sk-ant-api03-very-long-key-here"),
+        "sk-a••••here"
     );
+}
+
+#[test]
+fn test_peri_free_provider_fields() {
+    let mp = peri_free_provider();
+    assert_eq!(mp.provider_id, "peri");
+    assert_eq!(mp.base_url, PERI_FREE_BASE_URL);
+    assert_eq!(mp.api_key, "public");
+    assert_eq!(mp.provider_type, ProviderType::OpenAiCompatible);
+    assert_eq!(mp.aliases, PERI_FREE_MODEL_IDS.map(String::from));
+    assert!(mp.selected, "免费服务应默认选中");
+    assert!(mp.is_complete(), "免费服务配置应视为完整");
+}
+
+#[test]
+fn test_build_wizard_config_peri_free_profiles() {
+    let state = SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::PeriFreeService,
+        providers: vec![peri_free_provider()],
+        language: "zh-CN".to_string(),
+        ..Default::default()
+    };
+    let cfg = build_wizard_config(&state);
     assert_eq!(
-        env_get(&env, "OPENAI_DEFAULT_OPUS_MODEL"),
-        "deepseek-v4-pro"
+        cfg.config.active_alias, "sonnet",
+        "免费服务默认档位为 sonnet"
     );
-    assert_eq!(env_get(&env, "NONEXISTENT"), "");
-
-    // 验证空 API key 但有 base_url 的前缀会生成条目
-    let env_partial = serde_json::json!({
-        "env": {
-            "ANTHROPIC_BASE_URL": "https://proxy.example.com",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.1",
-        }
-    });
-    let env_obj = env_partial["env"].as_object().unwrap();
-    assert_eq!(env_get(env_obj, "ANTHROPIC_API_KEY"), "");
-    assert_eq!(
-        env_get(env_obj, "ANTHROPIC_BASE_URL"),
-        "https://proxy.example.com"
-    );
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
-}
-
-#[test]
-fn test_migrate_auth_token_fallback() {
-    // 验证 ANTHROPIC_AUTH_TOKEN 在没有 ANTHROPIC_API_KEY 时被使用
-    let env = serde_json::json!({
-        "ANTHROPIC_AUTH_TOKEN": "token-abc",
-        "ANTHROPIC_BASE_URL": "https://proxy.example.com",
-    });
-    let env_obj = env.as_object().unwrap();
-
-    // ANTHROPIC_API_KEY 优先
-    assert_eq!(env_get(env_obj, "ANTHROPIC_API_KEY"), "");
-    assert_eq!(env_get(env_obj, "ANTHROPIC_AUTH_TOKEN"), "token-abc");
-
-    // 模拟 key_names 优先级查找逻辑
-    let key_names = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
-    let found = key_names
-        .iter()
-        .map(|k| env_get(env_obj, k))
-        .find(|v| !v.is_empty())
-        .unwrap_or_default();
-    assert_eq!(found, "token-abc");
-}
-
-#[test]
-fn test_form_field_navigation() {
-    assert_eq!(FormField::ProviderType.next(), FormField::ProviderId);
-    assert_eq!(FormField::HaikuModel.next(), FormField::Confirm);
-    assert_eq!(FormField::Confirm.next(), FormField::ProviderType);
-
-    assert_eq!(FormField::ProviderType.prev(), FormField::Confirm);
-    assert_eq!(FormField::Confirm.prev(), FormField::HaikuModel);
-    assert_eq!(FormField::ProviderId.prev(), FormField::ProviderType);
-
-    // TestConnectivity 插入在 BaseUrl 之后、ApiKey 之前
-    assert_eq!(FormField::BaseUrl.next(), FormField::TestConnectivity);
-    assert_eq!(FormField::TestConnectivity.next(), FormField::ApiKey);
-    assert_eq!(FormField::ApiKey.prev(), FormField::TestConnectivity);
-    assert_eq!(FormField::TestConnectivity.prev(), FormField::BaseUrl);
-    // TestConnectivity 不是文本输入
-    assert!(!FormField::TestConnectivity.is_text_input());
-}
-
-#[test]
-fn test_connectivity_empty_base_url() {
-    let (ok, msg) = test_connectivity("");
-    assert!(!ok);
-    assert!(msg.contains("Base URL"));
-}
-
-#[test]
-fn test_connectivity_unreachable_url() {
-    // 无法连接的 URL (TEST-NET 地址不会路由)
-    let (ok, _msg) = test_connectivity("https://192.0.2.1");
-    assert!(!ok);
-}
-
-#[test]
-fn test_connectivity_parse_url_parts() {
-    assert!(parse_url_parts("").is_none());
-    let (host, port, path) = parse_url_parts("https://localhost:8443/v1/models").unwrap();
-    assert_eq!(host, "localhost");
-    assert_eq!(port, 8443);
-    assert_eq!(path, "/v1/models");
-    let (_host, port, path) = parse_url_parts("http://localhost:8080").unwrap();
-    assert_eq!(port, 8080);
-    assert_eq!(path, "/");
-    let (host, port, _) = parse_url_parts("127.0.0.1:9999").unwrap();
-    assert_eq!(host, "127.0.0.1");
-    assert_eq!(port, 9999);
-    let (_, port, _) = parse_url_parts("https://api.openai.com/v1").unwrap();
-    assert_eq!(port, 443);
-}
-
-#[test]
-fn test_connectivity_enter_triggers_test() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Edit;
-    wizard.form_focus = FormField::TestConnectivity;
-    wizard.providers[0]
-        .field_base_url
-        .set_value("https://example.com");
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert!(wizard.connectivity_result.is_some());
-}
-
-#[test]
-fn test_edit_base_url_clears_connectivity() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Edit;
-    wizard.form_focus = FormField::BaseUrl;
-    wizard.connectivity_result = Some((true, "old result".into()));
-    // 任意按键在 BaseUrl 焦点上应清空结果
-    let _ = handle_setup_wizard_key(&mut wizard, make_char('x'));
-    assert!(wizard.connectivity_result.is_none());
-}
-
-// ── Event handling tests ──
-
-use tui_textarea::{Input, Key};
-
-fn make_char(c: char) -> Input {
-    Input {
-        key: Key::Char(c),
-        ctrl: false,
-        alt: false,
-        shift: false,
-    }
-}
-fn make_key(key: Key) -> Input {
-    Input {
-        key,
-        ctrl: false,
-        alt: false,
-        shift: false,
-    }
-}
-fn type_text(wizard: &mut SetupWizardPanel, text: &str) {
-    for c in text.chars() {
-        let _ = handle_setup_wizard_key(wizard, make_char(c));
-    }
-}
-
-// ── Step: Choose ──
-
-#[test]
-fn test_choose_arrow_cycles_source() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Choose;
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Down));
-    assert_eq!(wizard.source, SetupSource::MigrateClaudeCode);
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Up));
-    assert_eq!(wizard.source, SetupSource::CustomApi);
-}
-
-#[test]
-fn test_choose_enter_custom_advances_to_form() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Choose;
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.step, SetupStep::Form);
-    assert_eq!(wizard.form_mode, FormMode::Browse);
-    assert_eq!(wizard.providers.len(), 1);
-}
-
-#[test]
-fn test_choose_esc_back_to_language() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Choose;
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert_eq!(wizard.step, SetupStep::Language);
-}
-
-// ── Step: Language ──
-
-#[test]
-fn test_language_arrow_navigates() {
-    let mut wizard = SetupWizardPanel::new();
-    assert_eq!(wizard.step, SetupStep::Language);
-    assert_eq!(wizard.language_cursor, 0);
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Down));
-    assert_eq!(wizard.language_cursor, 1);
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Down));
-    assert_eq!(wizard.language_cursor, 0); // wraps around
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Up));
-    assert_eq!(wizard.language_cursor, 1); // wraps around
-}
-
-#[test]
-fn test_language_enter_selects_and_advances_to_choose() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.language_cursor = 1; // zh-CN
-    let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert!(matches!(
-        action,
-        Some(SetupWizardAction::SetLanguage(ref s)) if s == "zh-CN"
-    ));
-    assert_eq!(wizard.language, "zh-CN");
-    assert_eq!(wizard.step, SetupStep::Choose);
-}
-
-#[test]
-fn test_language_space_selects_and_advances() {
-    let mut wizard = SetupWizardPanel::new();
-    let action = handle_setup_wizard_key(&mut wizard, make_char(' '));
-    assert!(matches!(
-        action,
-        Some(SetupWizardAction::SetLanguage(ref s)) if s == "en"
-    ));
-    assert_eq!(wizard.language, "en");
-    assert_eq!(wizard.step, SetupStep::Choose);
-}
-
-#[test]
-fn test_language_esc_quits() {
-    let mut wizard = SetupWizardPanel::new();
-    let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert!(matches!(action, Some(SetupWizardAction::Skip)));
-}
-
-#[test]
-fn test_language_default_is_en() {
-    let wizard = SetupWizardPanel::new();
-    assert_eq!(wizard.language, "en");
-    assert_eq!(wizard.language_cursor, 0);
-    assert_eq!(wizard.step, SetupStep::Language);
-}
-
-// ── Step: Form (Browse mode) ──
-
-#[test]
-fn test_browse_arrow_navigates() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Browse;
-    assert_eq!(wizard.browse_cursor, 0);
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Down));
-    assert_eq!(wizard.browse_cursor, 1); // Submit position
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Down));
-    assert_eq!(wizard.browse_cursor, 1); // clamped
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Up));
-    assert_eq!(wizard.browse_cursor, 0); // back to first provider
-}
-
-#[test]
-fn test_browse_space_toggles_select() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Browse;
-    assert!(wizard.providers[0].selected);
-    let _ = handle_setup_wizard_key(&mut wizard, make_char(' '));
-    assert!(!wizard.providers[0].selected);
-    let _ = handle_setup_wizard_key(&mut wizard, make_char(' '));
-    assert!(wizard.providers[0].selected);
-}
-
-#[test]
-fn test_browse_enter_opens_edit() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Browse;
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.form_mode, FormMode::Edit);
-    assert_eq!(wizard.active_provider, 0);
-}
-
-#[test]
-fn test_browse_enter_submit_validates() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Browse;
-    wizard.browse_cursor = wizard.providers.len(); // Submit
-                                                   // Empty api_key → blocked
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.step, SetupStep::Form);
-    // Fill and retry
-    wizard.providers[0].field_api_key.set_value("sk-test");
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.step, SetupStep::Done);
-}
-
-#[test]
-fn test_browse_esc_back_to_choose() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Browse;
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert_eq!(wizard.step, SetupStep::Choose);
-}
-
-// ── Step: Form (Edit mode) ──
-
-#[test]
-fn test_edit_arrow_navigates_fields() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Edit;
-    assert_eq!(wizard.form_focus, FormField::ProviderType);
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Down));
-    assert_eq!(wizard.form_focus, FormField::ProviderId);
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Up));
-    assert_eq!(wizard.form_focus, FormField::ProviderType);
-}
-
-#[test]
-fn test_edit_confirm_returns_to_browse() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Edit;
-    wizard.form_focus = FormField::Confirm;
-    // 填写必要字段
-    wizard.providers[0].field_api_key.set_value("sk-test");
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.form_mode, FormMode::Browse);
-}
-
-#[test]
-fn test_edit_confirm_stays_in_edit_when_incomplete() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Edit;
-    wizard.form_focus = FormField::Confirm;
-    // api_key 为空 → 不完整，保持在 Edit 模式
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.form_mode, FormMode::Edit);
-}
-
-#[test]
-fn test_edit_esc_returns_to_browse() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Edit;
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert_eq!(wizard.form_mode, FormMode::Browse);
-}
-
-#[test]
-fn test_edit_api_key() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Form;
-    wizard.form_mode = FormMode::Edit;
-    wizard.form_focus = FormField::ApiKey;
-    type_text(&mut wizard, "sk-test");
-    assert_eq!(wizard.providers[0].field_api_key.value(), "sk-test");
-}
-
-// ── Step: Done ──
-
-#[test]
-fn test_done_enter_returns_save() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Done;
-    let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert!(matches!(action, Some(SetupWizardAction::SaveAndClose)));
-}
-
-#[test]
-fn test_done_esc_back_to_form() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.step = SetupStep::Done;
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert_eq!(wizard.step, SetupStep::Form);
-}
-
-#[test]
-fn test_save_setup_creates_valid_config() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.providers[0].field_api_key.set_value("sk-test-key");
-    let temp_dir = std::env::temp_dir().join(format!("zen-setup-unit-{}", uuid::Uuid::now_v7()));
-    let config_path = temp_dir.join("settings.json");
-    let cfg = save_setup_to(&wizard, &config_path).expect("save_setup_to should succeed");
     assert_eq!(cfg.config.providers.len(), 1);
-    assert_eq!(cfg.config.providers[0].provider_type, "anthropic");
-    assert_eq!(cfg.config.providers[0].api_key, "sk-test-key");
-    let _ = std::fs::remove_dir_all(&temp_dir);
-}
-
-#[test]
-fn test_save_setup_skips_unselected() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.providers[0].field_api_key.set_value("sk-test");
-    wizard.providers[0].selected = false;
-    wizard
-        .providers
-        .push(MigratedProvider::new(ProviderType::OpenAiCompatible));
-    wizard.providers[1].field_api_key.set_value("sk-openai");
-    wizard.providers[1].selected = true;
-
-    let temp_dir = std::env::temp_dir().join(format!("zen-setup-skip-{}", uuid::Uuid::now_v7()));
-    let config_path = temp_dir.join("settings.json");
-    let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
-    assert_eq!(cfg.config.providers.len(), 1);
-    assert_eq!(cfg.config.providers[0].provider_type, "openai");
-    let _ = std::fs::remove_dir_all(&temp_dir);
-}
-
-#[test]
-fn test_save_setup_writes_language() {
-    let mut wizard = SetupWizardPanel::new();
-    wizard.providers[0].field_api_key.set_value("sk-test");
-    wizard.language = "zh-CN".to_string();
-    let temp_dir = std::env::temp_dir().join(format!("zen-lang-setup-{}", uuid::Uuid::now_v7()));
-    let config_path = temp_dir.join("settings.json");
-    let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
+    let p = &cfg.config.providers[0];
+    assert_eq!(p.id, "peri");
+    assert_eq!(p.base_url, PERI_FREE_BASE_URL);
+    assert_eq!(p.api_key, "public");
+    assert_eq!(
+        [
+            p.models.fable.as_str(),
+            p.models.opus.as_str(),
+            p.models.sonnet.as_str(),
+            p.models.haiku.as_str()
+        ],
+        PERI_FREE_MODEL_IDS
+    );
+    assert_eq!(cfg.config.profiles.fable.effort, "max");
+    assert_eq!(cfg.config.profiles.opus.effort, "medium");
+    assert_eq!(cfg.config.profiles.sonnet.effort, "max");
+    assert_eq!(cfg.config.profiles.haiku.effort, "low");
+    for alias in ["fable", "opus", "sonnet", "haiku"] {
+        assert_eq!(
+            cfg.config.profiles.get(alias).unwrap().provider,
+            "peri",
+            "{alias} 档位应绑定 peri provider"
+        );
+    }
     assert_eq!(cfg.config.language.as_deref(), Some("zh-CN"));
-    let _ = std::fs::remove_dir_all(&temp_dir);
-}
-
-// ── E2E flow tests (migrated from headless_test.rs) ──
-
-fn advance_to_form(wizard: &mut SetupWizardPanel) {
-    wizard.step = SetupStep::Choose;
-    let _ = handle_setup_wizard_key(wizard, make_key(Key::Enter));
-    assert_eq!(wizard.step, SetupStep::Form);
-    assert_eq!(wizard.form_mode, FormMode::Browse);
-}
-
-/// 进入 Edit 模式，填写 API Key，Confirm 回到 Browse，然后 Submit
-fn fill_and_submit(wizard: &mut SetupWizardPanel, api_key: &str) {
-    wizard.browse_cursor = 0;
-    let _ = handle_setup_wizard_key(wizard, make_key(Key::Enter));
-    assert_eq!(wizard.form_mode, FormMode::Edit);
-    wizard.form_focus = FormField::ApiKey;
-    type_text(wizard, api_key);
-    wizard.form_focus = FormField::Confirm;
-    let _ = handle_setup_wizard_key(wizard, make_key(Key::Enter));
-    assert_eq!(wizard.form_mode, FormMode::Browse);
-    wizard.browse_cursor = wizard.providers.len();
-    let _ = handle_setup_wizard_key(wizard, make_key(Key::Enter));
 }
 
 #[test]
-fn test_setup_wizard_full_flow_anthropic() {
-    let mut wizard = SetupWizardPanel::new();
-    advance_to_form(&mut wizard);
-    assert_eq!(wizard.providers.len(), 1);
-    assert_eq!(wizard.providers[0].provider_type, ProviderType::Anthropic);
-
-    fill_and_submit(&mut wizard, "sk-ant-test-key-12345");
-    assert_eq!(wizard.step, SetupStep::Done);
-
-    let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert!(matches!(action, Some(SetupWizardAction::SaveAndClose)));
-
-    let temp_dir = std::env::temp_dir().join(format!("zen-setup-test-{}", uuid::Uuid::now_v7()));
-    let config_path = temp_dir.join("settings.json");
-    let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
-    assert_eq!(cfg.config.providers.len(), 1);
-    assert_eq!(cfg.config.providers[0].provider_type, "anthropic");
-    assert_eq!(cfg.config.providers[0].api_key, "sk-ant-test-key-12345");
-    assert!(!needs_setup(&cfg.config));
-    let _ = std::fs::remove_dir_all(&temp_dir);
+fn test_build_wizard_config_custom_api_keeps_opus_only() {
+    let mut mp = MigratedProvider::new(ProviderType::Anthropic);
+    mp.api_key = "sk-test".to_string();
+    let state = SetupWizardState {
+        step: SetupStep::Form,
+        source: SetupSource::CustomApi,
+        providers: vec![mp],
+        ..Default::default()
+    };
+    let cfg = build_wizard_config(&state);
+    assert_eq!(cfg.config.active_alias, "opus", "手动配置默认档位仍为 opus");
+    assert_eq!(cfg.config.profiles.opus.provider, "anthropic");
+    // 非 Peri 免费服务来源：其余档位保持默认
+    assert!(cfg.config.profiles.fable.is_default());
+    assert!(cfg.config.profiles.sonnet.is_default());
+    assert!(cfg.config.profiles.haiku.is_default());
 }
 
-#[test]
-fn test_setup_wizard_full_flow_openai() {
-    let mut wizard = SetupWizardPanel::new();
-    advance_to_form(&mut wizard);
+struct EnvKeys(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.form_mode, FormMode::Edit);
-    wizard.form_focus = FormField::ProviderType;
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Right));
+impl EnvKeys {
+    fn clear() -> Self {
+        let saved = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect::<Vec<_>>();
+        for (name, _) in &saved {
+            unsafe { std::env::remove_var(name) };
+        }
+        Self(saved)
+    }
+}
+
+impl Drop for EnvKeys {
+    fn drop(&mut self) {
+        for (name, value) in &self.0 {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
+
+/// [回归测试] setup 检测必须与实际 provider 构造使用相同的 active_alias。
+#[test]
+#[serial]
+fn test_needs_setup_empty_alias_matches_runtime_resolution() {
+    let _env = EnvKeys::clear();
+    let mut cfg = build_wizard_config(&SetupWizardState {
+        providers: vec![peri_free_provider()],
+        ..Default::default()
+    });
+    cfg.config.active_alias.clear();
+    assert!(crate::app::agent::LlmProvider::from_config(&cfg).is_none());
+    assert!(needs_setup(&cfg.config));
+}
+
+/// [回归测试] 重开表单后保存仅编辑 provider 字段，保留用户的档位和扩展配置。
+#[test]
+fn test_reopened_setup_preserves_active_profile_and_provider_metadata() {
+    let mut cfg = build_wizard_config(&SetupWizardState {
+        providers: vec![peri_free_provider()],
+        ..Default::default()
+    });
+    cfg.config.active_alias = "haiku".into();
+    cfg.config.profiles.haiku.provider = "peri".into();
+    cfg.config.profiles.haiku.model = Some("custom-model".into());
+    cfg.config.profiles.haiku.effort = "low".into();
+    cfg.config.profiles.haiku.max_tokens = 1234;
+    cfg.config.providers[0].name = Some("My endpoint".into());
+    cfg.config.providers[0]
+        .extra
+        .insert("custom-option".into(), serde_json::json!(true));
+    cfg.config
+        .extra
+        .insert("unrelated-option".into(), serde_json::json!(42));
+    let profiles = serde_json::to_value(&cfg.config.profiles).unwrap();
+    let mut draft = state_from_config(&cfg);
+    assert!(draft.from_command);
+    assert_eq!(draft.step, SetupStep::Form);
+    assert_eq!(draft.form_mode, FormMode::Browse);
+    draft.providers[0].base_url = "http://localhost:7001/v1".into();
+    let merged = merge_setup(&draft, cfg);
+    assert_eq!(merged.config.active_alias, "haiku");
     assert_eq!(
-        wizard.providers[0].provider_type,
-        ProviderType::OpenAiCompatible
+        serde_json::to_value(&merged.config.profiles).unwrap(),
+        profiles
     );
-
-    wizard.form_focus = FormField::ApiKey;
-    type_text(&mut wizard, "sk-openai-test-key");
-
-    wizard.form_focus = FormField::Confirm;
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.form_mode, FormMode::Browse);
-
-    wizard.browse_cursor = wizard.providers.len();
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.step, SetupStep::Done);
-
-    let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert!(matches!(action, Some(SetupWizardAction::SaveAndClose)));
-
-    let temp_dir =
-        std::env::temp_dir().join(format!("zen-setup-test-openai-{}", uuid::Uuid::now_v7()));
-    let config_path = temp_dir.join("settings.json");
-    let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
-    assert_eq!(cfg.config.providers[0].provider_type, "openai");
-    assert_eq!(cfg.config.providers[0].api_key, "sk-openai-test-key");
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    assert_eq!(
+        merged.config.providers[0].base_url,
+        "http://localhost:7001/v1"
+    );
+    assert_eq!(
+        merged.config.providers[0].name.as_deref(),
+        Some("My endpoint")
+    );
+    assert_eq!(merged.config.providers[0].extra["custom-option"], true);
+    assert_eq!(merged.config.extra["unrelated-option"], 42);
 }
 
 #[test]
-fn test_setup_wizard_esc_navigation() {
-    let mut wizard = SetupWizardPanel::new();
-    advance_to_form(&mut wizard);
+fn test_wizard_replaces_broken_active_selection_with_usable_profile() {
+    let mut cfg = crate::config::PeriConfig::default();
+    cfg.config.active_alias = "missing".into();
+    let draft = SetupWizardState {
+        from_command: true,
+        providers: vec![peri_free_provider()],
+        ..Default::default()
+    };
+    let merged = merge_setup(&draft, cfg);
+    assert!(crate::app::agent::LlmProvider::from_config(&merged).is_some());
+    assert_eq!(merged.config.active_alias, "opus");
+}
 
-    // Browse → Submit → Enter (empty key, should stay)
-    wizard.browse_cursor = wizard.providers.len();
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.step, SetupStep::Form);
+/// [回归测试] 删除、粘贴等所有文本修改均经过同一失效入口。
+#[test]
+fn test_edit_invalidates_pending_connectivity() {
+    let mut state = SetupWizardState {
+        connectivity_generation: 9,
+        connectivity_in_progress: true,
+        connectivity_result: Some((true, "old result".into())),
+        form_focus: FormField::BaseUrl,
+        ..Default::default()
+    };
+    state.set_active_field_value("http://localhost:7002".into());
+    assert_eq!(state.connectivity_generation, 10);
+    assert!(!state.connectivity_in_progress);
+    assert!(state.connectivity_result.is_none());
+}
 
-    fill_and_submit(&mut wizard, "test-key");
-    assert_eq!(wizard.step, SetupStep::Done);
+#[tokio::test]
+async fn test_connectivity_http_status_and_errors_do_not_expose_url_or_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (response, expected_success) in [
+        ("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", true),
+        (
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
+            false,
+        ),
+        (
+            "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n",
+            false,
+        ),
+        ("not an HTTP response: private-body", false),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let received = stream.read(&mut request).await.unwrap();
+            assert!(received > 0, "客户端应发送 HTTP 请求");
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let result =
+            test_connectivity(&format!("http://{address}/v1?credential=private-query")).await;
+        server.await.unwrap();
+        assert_eq!(result.0, expected_success);
+        assert!(!result.1.contains("private-query"));
+        assert!(!result.1.contains("private-body"));
+        assert!(!result.1.contains(&address.to_string()));
+    }
+}
 
-    // Done → Esc → Form
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert_eq!(wizard.step, SetupStep::Form);
+#[tokio::test]
+async fn test_connectivity_rejects_embedded_credentials_safely() {
+    for url in [
+        "http://user:private-password@localhost",
+        "bad-url?key=private-query",
+        "file:///private-path",
+    ] {
+        let (success, message) = test_connectivity(url).await;
+        assert!(!success);
+        assert!(!message.contains("private-"));
+        assert!(!message.contains(url));
+    }
+}
 
-    // Form → Esc → Choose
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert_eq!(wizard.step, SetupStep::Choose);
+/// [回归测试] 超时覆盖“TCP 已连接但 HTTP 永不响应”，避免后台请求永久存活。
+#[tokio::test]
+async fn test_connectivity_stalled_http_response_times_out() {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let received = stream.read(&mut request).await.unwrap();
+        assert!(received > 0, "客户端应发送 HTTP 请求");
+        std::future::pending::<()>().await;
+        drop(stream);
+    });
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(7),
+        test_connectivity(&format!("http://{address}")),
+    )
+    .await;
+    server.abort();
+    let _ = server.await;
+    let (success, message) = result.expect("HTTP 检查应在 5 秒内自行超时");
+    assert!(!success);
+    assert!(!message.contains(&address.to_string()));
+}
 
-    // Choose → Esc → Language
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Esc));
-    assert_eq!(wizard.step, SetupStep::Language);
+/// [回归测试] 已持久化的 provider 切换协议不改身份，当前档位实际使用新协议。
+#[test]
+fn test_persisted_provider_type_change_preserves_identity_and_active_binding() {
+    let mut provider = MigratedProvider::new(ProviderType::Anthropic);
+    provider.api_key = "test-only".into();
+    let cfg = build_wizard_config(&SetupWizardState {
+        providers: vec![provider],
+        ..Default::default()
+    });
+    let mut draft = state_from_config(&cfg);
+    let provider = &mut draft.providers[0];
+    provider.provider_type.cycle();
+    provider.refresh_provider_defaults();
+    assert_eq!(provider.provider_id, "anthropic");
+    assert_eq!(
+        provider.base_url,
+        ProviderType::OpenAiCompatible.default_base_url()
+    );
+    let merged = merge_setup(&draft, cfg);
+    assert_eq!(merged.config.providers.len(), 1);
+    assert_eq!(merged.config.profiles.opus.provider, "anthropic");
+    assert!(matches!(
+        crate::app::agent::LlmProvider::from_config(&merged),
+        Some(crate::app::agent::LlmProvider::OpenAi { .. })
+    ));
 }
 
 #[test]
-fn test_setup_wizard_multi_provider() {
-    let mut wizard = SetupWizardPanel::new();
-    advance_to_form(&mut wizard);
-    wizard
-        .providers
-        .push(MigratedProvider::new(ProviderType::OpenAiCompatible));
-    wizard.providers[1].field_api_key.set_value("sk-openai");
-    wizard.providers[0].field_api_key.set_value("sk-ant");
+fn test_new_provider_type_change_keeps_matching_default_identity() {
+    let mut provider = MigratedProvider::new(ProviderType::Anthropic);
+    provider.provider_type.cycle();
+    provider.refresh_provider_defaults();
+    assert_eq!(provider.provider_id, "openai");
+}
 
-    // Browse: Submit
-    wizard.browse_cursor = wizard.providers.len();
-    let _ = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert_eq!(wizard.step, SetupStep::Done);
-
-    let temp_dir = std::env::temp_dir().join(format!("zen-setup-multi-{}", uuid::Uuid::now_v7()));
-    let config_path = temp_dir.join("settings.json");
-    let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
-    assert_eq!(cfg.config.providers.len(), 2);
-    let _ = std::fs::remove_dir_all(&temp_dir);
+/// [回归测试] 向导不提供已有身份改名；手动输入不能留下孤立旧绑定。
+#[test]
+fn test_persisted_provider_id_cannot_be_edited_or_saved_as_another_id() {
+    let cfg = build_wizard_config(&SetupWizardState {
+        providers: vec![peri_free_provider()],
+        ..Default::default()
+    });
+    let mut draft = state_from_config(&cfg);
+    draft.form_focus = FormField::ProviderId;
+    assert!(!draft.active_field_is_editable());
+    draft.set_active_field_value("other".into());
+    assert_eq!(draft.providers[0].provider_id, "peri");
+    draft.providers[0].provider_id = "other".into();
+    assert!(
+        save_setup(&draft).is_err(),
+        "非法改名应在任何磁盘读写前拒绝"
+    );
 }
 
 #[test]
-fn test_setup_wizard_saves_and_clears() {
-    let mut wizard = SetupWizardPanel::new();
-    advance_to_form(&mut wizard);
-    fill_and_submit(&mut wizard, "sk-final-test");
-    assert_eq!(wizard.step, SetupStep::Done);
-
-    // Verify SaveAndClose action
-    let action = handle_setup_wizard_key(&mut wizard, make_key(Key::Enter));
-    assert!(matches!(action, Some(SetupWizardAction::SaveAndClose)));
-
-    // Verify save produces valid config
-    let temp_dir = std::env::temp_dir().join(format!("zen-setup-final-{}", uuid::Uuid::now_v7()));
-    let config_path = temp_dir.join("settings.json");
-    let cfg = save_setup_to(&wizard, &config_path).expect("save should succeed");
-    assert!(!needs_setup(&cfg.config));
-    let _ = std::fs::remove_dir_all(&temp_dir);
+fn test_provider_identity_provenance_survives_state_roundtrip() {
+    let cfg = build_wizard_config(&SetupWizardState {
+        providers: vec![peri_free_provider()],
+        ..Default::default()
+    });
+    let state = state_from_config(&cfg);
+    let encoded = serde_json::to_value(state).unwrap();
+    let restored: SetupWizardState = serde_json::from_value(encoded).unwrap();
+    assert!(!restored.providers[0].provider_id_is_editable());
+    let mut old_provider = serde_json::to_value(peri_free_provider()).unwrap();
+    old_provider
+        .as_object_mut()
+        .unwrap()
+        .remove("original_provider_id");
+    let restored: MigratedProvider = serde_json::from_value(old_provider).unwrap();
+    assert!(restored.provider_id_is_editable());
 }

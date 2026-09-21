@@ -8,6 +8,8 @@ use tokio::{
 use tracing::{info, warn};
 
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
+const OAUTH_SUCCESS_BODY: &str = include_str!("descriptions/oauth_success.html");
+const OAUTH_FAILURE_BODY: &str = include_str!("descriptions/oauth_failure.html");
 
 #[derive(Debug, Error)]
 pub enum CallbackError {
@@ -23,7 +25,6 @@ pub enum CallbackError {
 
 pub struct OAuthCallbackServer {
     listener: TcpListener,
-    state_param: String,
 }
 
 impl OAuthCallbackServer {
@@ -36,13 +37,7 @@ impl OAuthCallbackServer {
             .map_err(|e| CallbackError::BindFailed(e.to_string()))?;
         let redirect_uri = format!("http://{}/callback", addr);
         info!("OAuth 回调服务器已启动: {}", redirect_uri);
-        Ok((
-            Self {
-                listener,
-                state_param: String::new(),
-            },
-            redirect_uri,
-        ))
+        Ok((Self { listener }, redirect_uri))
     }
 
     pub async fn wait_for_code(mut self) -> Result<(String, String), CallbackError> {
@@ -85,16 +80,22 @@ impl OAuthCallbackServer {
         }
 
         let url_path = request_line.split_whitespace().nth(1).unwrap_or("");
-        let callback_result = parse_callback_url(url_path, &self.state_param);
+        let callback_result = parse_callback_url(url_path);
 
         let response = match &callback_result {
-            Ok((code, _)) => {
-                info!(code = %code, "OAuth 回调成功");
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><h1>OAuth 授权成功</h1><p>您可以关闭此窗口并返回终端。</p></body></html>"
+            Ok((_code, _)) => {
+                info!("OAuth 回调成功");
+                &format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+                    OAUTH_SUCCESS_BODY
+                )[..]
             }
             Err(e) => {
                 warn!(error = %e, "OAuth 回调处理失败");
-                &format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><h1>OAuth 授权失败</h1><p>{}</p></body></html>", e)[..]
+                &format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+                    OAUTH_FAILURE_BODY.replace("{error}", &e.to_string())
+                )[..]
             }
         };
 
@@ -110,10 +111,13 @@ impl OAuthCallbackServer {
     }
 }
 
-pub(crate) fn parse_callback_url(
-    url_path: &str,
-    expected_state: &str,
-) -> Result<(String, String), CallbackError> {
+/// 解析 OAuth 回调 URL，提取 `code` 和 `state` 参数。
+///
+/// **CSRF 校验不在本函数完成**：state 值会原样返回给上层，
+/// 由 rmcp 在 `OAuthState::handle_callback()` 的 token 交换阶段
+/// 通过 state_store 查找机制做最终校验（找不到匹配项则报错，
+/// 且每个 state 一次性使用）。本函数只负责 URL 解析，不持有 secret。
+pub(crate) fn parse_callback_url(url_path: &str) -> Result<(String, String), CallbackError> {
     let url_str = if url_path.starts_with('/') {
         &format!("http://localhost{}", url_path)[..]
     } else {
@@ -134,12 +138,6 @@ pub(crate) fn parse_callback_url(
         .get("state")
         .ok_or_else(|| CallbackError::ParseFailed("回调 URL 缺少 state 参数".into()))?
         .clone();
-    if !expected_state.is_empty() && state != expected_state {
-        return Err(CallbackError::ParseFailed(format!(
-            "CSRF state 不匹配: 期望 {}, 收到 {}",
-            expected_state, state
-        )));
-    }
     Ok((code, state))
 }
 

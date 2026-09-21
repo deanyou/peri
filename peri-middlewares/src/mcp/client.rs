@@ -1,143 +1,102 @@
-use std::{collections::HashMap, sync::Arc};
+//! MCP pool 的状态所有权、构造、基础查询与宿主端口。
+//! 缓存、OAuth、生命周期及状态投影分别由私有子模块实现。
 
-use rmcp::{
-    model::{Resource, Tool},
-    service::{Peer, QuitReason, RoleClient, RunningService, ServiceError},
+mod cache;
+mod lifecycle;
+mod oauth;
+pub(crate) mod process;
+mod service;
+mod status;
+mod subscription;
+mod transport;
+mod types;
+
+use super::{config::McpServerConfig, oauth_flow::OAuthFlowEvent};
+use lifecycle::ServiceShutdownState;
+use oauth::{OAuthFlowKey, PendingOAuthCallback};
+use peri_acp_types::{
+    mcp::McpSubscriptionPort, ports::McpPoolShutdownReport, session::InboxHandle,
 };
-use thiserror::Error;
+use rmcp::model::{Resource, Tool};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
-use super::{
-    channel_handler::ChannelHandler,
-    config::{ConfigSource, McpServerConfig},
+pub(crate) use cache::cache_scope_allows_persistence;
+pub use oauth::OAuthStartDisposition;
+#[cfg(test)]
+pub(crate) use service::ControlledMcpService;
+pub(crate) use service::{
+    mcpp_client_info_for_profile, peer_declares_skills, McpServiceOwner, McpServiceWrapper,
 };
-
-/// Wrapper for RunningService that can hold either handler type
-pub(crate) enum McpServiceWrapper {
-    Default(RunningService<RoleClient, ()>),
-    Channel(RunningService<RoleClient, Arc<ChannelHandler>>),
-}
-
-impl McpServiceWrapper {
-    pub async fn close_with_timeout(
-        &mut self,
-        timeout: std::time::Duration,
-    ) -> Result<Option<QuitReason>, tokio::task::JoinError> {
-        match self {
-            McpServiceWrapper::Default(svc) => svc.close_with_timeout(timeout).await,
-            McpServiceWrapper::Channel(svc) => svc.close_with_timeout(timeout).await,
-        }
-    }
-
-    pub async fn list_all_tools(&self) -> Result<Vec<Tool>, ServiceError> {
-        match self {
-            McpServiceWrapper::Default(svc) => svc.list_all_tools().await,
-            McpServiceWrapper::Channel(svc) => svc.list_all_tools().await,
-        }
-    }
-
-    pub async fn list_all_resources(&self) -> Result<Vec<Resource>, ServiceError> {
-        match self {
-            McpServiceWrapper::Default(svc) => svc.list_all_resources().await,
-            McpServiceWrapper::Channel(svc) => svc.list_all_resources().await,
-        }
-    }
-
-    pub fn peer(&self) -> &Peer<RoleClient> {
-        match self {
-            McpServiceWrapper::Default(svc) => svc.peer(),
-            McpServiceWrapper::Channel(svc) => svc.peer(),
-        }
-    }
-}
-
-/// MCP 客户端连接状态
-#[derive(Debug, Clone, PartialEq)]
-pub enum ClientStatus {
-    Connected,
-    Failed(String),
-    Disconnected,
-    Disabled,
-    /// 配置存在但从未尝试连接（不在 clients 表中，仅在 configs 表中）
-    Uninitialized,
-}
-
-/// MCP 连接池初始化状态
-#[derive(Debug, Clone, PartialEq)]
-pub enum McpInitStatus {
-    Pending,
-    Initializing { connected: usize, total: usize },
-    Ready { total: usize },
-    Failed(String),
-}
-
-/// MCP 服务器 OAuth 授权状态
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum OAuthStatus {
-    /// 不使用 OAuth（stdio 传输或未配置 OAuth）
-    #[default]
-    None,
-    /// 已授权（token 有效）
-    Authorized,
-    /// 需要授权（HTTP 传输且配置了 OAuth，但 token 缺失或过期）
-    NeedsAuthorization,
-}
-
-/// 单个 MCP 服务器的详细信息（用于 TUI 面板展示）
-#[derive(Debug, Clone)]
-pub struct ServerInfo {
-    pub name: String,
-    pub transport_type: String,
-    pub status: ClientStatus,
-    pub tool_count: usize,
-    pub resource_count: usize,
-    /// OAuth 授权状态
-    pub oauth_status: OAuthStatus,
-    /// 配置来源
-    pub source: Option<ConfigSource>,
-    /// 服务器 URL（HTTP 传输）
-    pub url: Option<String>,
-    /// 插件来源标识（`"name@marketplace"`），非插件 server 为 None
-    pub plugin_source: Option<String>,
-}
-
-/// 连接池级别错误
-#[derive(Debug, Error)]
-pub enum McpPoolError {
-    #[error("MCP 服务器 \"{server}\" 连接失败: {reason}")]
-    ConnectionFailed { server: String, reason: String },
-    #[error("MCP 服务器 \"{server}\" 工具发现失败: {reason}")]
-    ToolDiscoveryFailed { server: String, reason: String },
-    #[error("MCP 服务器 \"{server}\" 未连接 (状态: {status:?})")]
-    NotConnected {
-        server: String,
-        status: ClientStatus,
-    },
-}
-
-/// 单个 MCP 服务器的客户端句柄
-#[derive(Clone)]
-pub struct McpClientHandle {
-    pub name: String,
-    pub peer: Option<Peer<RoleClient>>,
-    pub tools: Vec<Tool>,
-    pub resources: Vec<Resource>,
-    pub status: ClientStatus,
-    pub oauth_status: OAuthStatus,
-    /// 配置来源
-    pub source: Option<ConfigSource>,
-    /// 服务器 URL（HTTP 传输）
-    pub url: Option<String>,
-    /// Whether the MCP server declared experimental.claude/channel capability
-    pub channel_capable: bool,
-}
+pub use status::redact_mcp_error;
+#[cfg(test)]
+pub(crate) use status::status_change_text;
+#[cfg(test)]
+use status::{mcp_error_summary, mcp_status_label};
+#[cfg(test)]
+pub(crate) use subscription::build_subscription_filter;
+pub(crate) use subscription::setup_subscription;
+pub(crate) use transport::{build_authed_transport, build_http_transport, serve_client_auto};
+pub(crate) use types::McpConnectionKey;
+pub use types::{
+    ClientStatus, McpClientHandle, McpInitStatus, McpPoolError, OAuthStatus, ServerInfo,
+};
 
 /// MCP 客户端连接池
 pub struct McpClientPool {
+    shared_services: parking_lot::Mutex<Vec<Arc<McpServiceOwner>>>,
+    /// Includes failed handshakes until their actual process tree and stderr have drained.
+    processes: parking_lot::Mutex<Vec<Arc<process::McpProcessOwner>>>,
+    /// Static transports reconnect in the same session directory used for initial discovery.
+    pub(crate) execution_cwd: std::sync::OnceLock<std::path::PathBuf>,
+    /// Pool-wide admission gate. 0=open, 1=closing, 2=closed.
+    lifecycle: std::sync::atomic::AtomicU8,
+    pub(crate) lifecycle_registration: parking_lot::Mutex<()>,
+    /// Pool-owned terminal service-close transaction. Awaiting a borrowed
+    /// handle is cancellation-safe: a dropped waiter cannot detach the worker
+    /// or the drained services it owns.
+    service_shutdown: tokio::sync::Mutex<ServiceShutdownState>,
+    pub(crate) task_spawner: super::task_scope::McpTaskSpawner,
     pub(crate) clients: parking_lot::RwLock<HashMap<String, Arc<McpClientHandle>>>,
-    pub(crate) services: tokio::sync::Mutex<HashMap<String, McpServiceWrapper>>,
+    handle_generations:
+        parking_lot::Mutex<HashMap<String, Vec<(std::sync::Weak<McpClientHandle>, u64)>>>,
+    next_handle_generation: std::sync::atomic::AtomicU64,
+    pub(crate) services: parking_lot::Mutex<HashMap<String, McpServiceWrapper>>,
     pub(crate) configs: parking_lot::RwLock<HashMap<String, McpServerConfig>>,
+    pub(crate) cache_versions: parking_lot::RwLock<HashMap<String, String>>,
     /// 插件来源旁路表：key 为 server name（如 `"plugin:p1:srv1"`），value 为 `"name@marketplace"`
     pub(crate) plugin_sources: parking_lot::RwLock<HashMap<String, String>>,
+    /// 初始化阶段内部存储（M-TUI 收口：TUI 不再持有 watch channel，`mcp/list`
+    /// 命令面经 `McpPoolPort::snapshot` 读取；`run_initialize` 与外部
+    /// `status_tx` 同步更新）。
+    pub(crate) init_status: parking_lot::RwLock<McpInitStatus>,
+    /// 初始化是否已完成。完成前发生的状态写入**不**产生上下线通知——
+    /// 会话首 turn 的 `first_turn_reminder` 概览已覆盖初始连接结果，避免与
+    /// 逐台上线事件重复（初始化未完成时，迟到的连接成功自然成为运行中变化）。
+    pub(crate) initialized: std::sync::atomic::AtomicBool,
+    /// 运行中状态变化的待注入文本缓冲（McpMiddleware::before_model drain 后
+    /// 以 Info 消息推送进模型上下文；全局缓冲，任一会话消费一次即清空）。
+    pub(crate) pending_changes: parking_lot::Mutex<Vec<String>>,
+    /// 状态变化通知回调（装配时注入；发布 system-notification 给 TUI 通知面）。
+    notifier: parking_lot::RwLock<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
+    /// OAuth 流程事件回调（装配时注入；`AuthorizationNeeded` 需把
+    /// `callback_tx` 注册进 `pending_oauth_callbacks` 供授权码回传 RPC 投递，
+    /// 其余事件转发为 ACP `oauth-needed` / `oauth-completed` / `oauth-failed`）。
+    oauth_event_callback: parking_lot::RwLock<Option<Arc<dyn Fn(OAuthFlowEvent) + Send + Sync>>>,
+    /// 待完成 OAuth 授权的回调通道。物理连接与 flow identity 共同定位，
+    /// dynamic 路径不得降维为裸 server name。
+    pending_oauth_callbacks: parking_lot::Mutex<HashMap<OAuthFlowKey, PendingOAuthCallback>>,
+    /// 每个 scoped connection 最多一个活跃 OAuth flow。
+    active_oauth_flows: parking_lot::Mutex<HashMap<McpConnectionKey, String>>,
+    /// subscriptions/listen 会话 inbox 注册表（session_id → InboxHandle）。
+    /// SessionManager（peri-acp）经 `McpSubscriptionPort` 注册；订阅通知到达
+    /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
+    pub(crate) session_inboxes: parking_lot::RwLock<HashMap<String, InboxHandle>>,
+    /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
+    pub(crate) resource_cache: super::resource_cache::McpResourceCache,
+    /// 进程启动时冻结的 deployment capability profile；初始连接和重连复用。
+    pub(crate) capability_profile: super::apps::McpCapabilityProfile,
+    /// 初始模型 MCP tool invocation 签发、`peri/mcp/open` 单次消费的租约。
+    pub(crate) app_binding_leases: Arc<super::apps::McpAppBindingLeaseRegistry>,
 }
 
 pub(crate) const STDIO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -146,186 +105,77 @@ pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::fr
 
 impl McpClientPool {
     pub fn new_pending() -> Self {
+        Self::new_pending_with_spawner(super::task_scope::McpTaskSpawner::closed())
+    }
+
+    pub fn new_pending_with_spawner(spawner: super::task_scope::McpTaskSpawner) -> Self {
+        Self::new_pending_with_spawner_and_profile(
+            spawner,
+            super::apps::McpCapabilityProfile::disabled(),
+        )
+    }
+
+    pub fn new_pending_with_spawner_and_profile(
+        spawner: super::task_scope::McpTaskSpawner,
+        capability_profile: super::apps::McpCapabilityProfile,
+    ) -> Self {
         Self {
+            shared_services: parking_lot::Mutex::new(Vec::new()),
+            processes: parking_lot::Mutex::new(Vec::new()),
+            execution_cwd: std::sync::OnceLock::new(),
+            lifecycle: std::sync::atomic::AtomicU8::new(0),
+            lifecycle_registration: parking_lot::Mutex::new(()),
+            service_shutdown: tokio::sync::Mutex::new(ServiceShutdownState::Idle),
+            task_spawner: spawner,
             clients: parking_lot::RwLock::new(HashMap::new()),
-            services: tokio::sync::Mutex::new(HashMap::new()),
+            handle_generations: parking_lot::Mutex::new(HashMap::new()),
+            next_handle_generation: std::sync::atomic::AtomicU64::new(1),
+            services: parking_lot::Mutex::new(HashMap::new()),
             configs: parking_lot::RwLock::new(HashMap::new()),
+            cache_versions: parking_lot::RwLock::new(HashMap::new()),
             plugin_sources: parking_lot::RwLock::new(HashMap::new()),
+            init_status: parking_lot::RwLock::new(McpInitStatus::Pending),
+            initialized: std::sync::atomic::AtomicBool::new(false),
+            pending_changes: parking_lot::Mutex::new(Vec::new()),
+            notifier: parking_lot::RwLock::new(None),
+            oauth_event_callback: parking_lot::RwLock::new(None),
+            pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),
+            active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
+            session_inboxes: parking_lot::RwLock::new(HashMap::new()),
+            resource_cache: super::resource_cache::McpResourceCache::new(),
+            capability_profile,
+            app_binding_leases: Arc::new(super::apps::McpAppBindingLeaseRegistry::default()),
         }
+    }
+
+    pub fn bind_execution_cwd(&self, cwd: &std::path::Path) -> std::io::Result<&std::path::Path> {
+        let result = (|| {
+            let cwd = std::path::absolute(cwd)?;
+            let stored = self.execution_cwd.get_or_init(|| cwd.clone());
+            if stored != &cwd {
+                return Err(std::io::Error::other(
+                    "MCP pool cannot change its execution directory",
+                ));
+            }
+            Ok(stored.as_path())
+        })();
+        if let Err(error) = &result {
+            *self.init_status.write() = McpInitStatus::Failed(error.to_string());
+        }
+        result
     }
 
     #[cfg(test)]
     pub fn new_empty() -> Self {
-        Self::new_pending()
+        let mut pool = Self::new_pending();
+        pool.resource_cache = super::resource_cache::McpResourceCache::isolated_for_test();
+        pool
     }
 
     /// 查询指定 server 的插件来源标识，非插件 server 返回 None
     /// key 格式为 `"plugin_name__server_name"`，返回 `"name@marketplace"`
     pub fn plugin_source_of(&self, name: &str) -> Option<String> {
         self.plugin_sources.read().get(name).cloned()
-    }
-
-    pub(crate) fn insert_failed(pool: &Arc<Self>, name: &str, reason: String) {
-        let (source, url) = pool
-            .configs
-            .read()
-            .get(name)
-            .map(|c| (c.source.clone(), c.url.clone()))
-            .unwrap_or((None, None));
-        pool.clients.write().insert(
-            name.to_string(),
-            Arc::new(McpClientHandle {
-                name: name.to_string(),
-                peer: None,
-                tools: vec![],
-                resources: vec![],
-                status: ClientStatus::Failed(reason.clone()),
-                oauth_status: OAuthStatus::default(),
-                source,
-                url,
-                channel_capable: false,
-            }),
-        );
-        peri_agent::metrics::emit(
-            "mcp.error",
-            serde_json::json!({
-                "server": name,
-                "tool": "connect",
-                "error": reason,
-            }),
-            None,
-            None,
-        );
-    }
-
-    /// 插入需要 OAuth 授权的服务器（HTTP 传输收到 401/AuthRequired 时使用）
-    pub(crate) fn insert_needs_auth(pool: &Arc<Self>, name: &str, reason: String) {
-        tracing::info!(server = %name, "HTTP 服务器需要 OAuth 授权，可在 MCP 面板按 r 键触发");
-        let (source, url) = pool
-            .configs
-            .read()
-            .get(name)
-            .map(|c| (c.source.clone(), c.url.clone()))
-            .unwrap_or((None, None));
-        pool.clients.write().insert(
-            name.to_string(),
-            Arc::new(McpClientHandle {
-                name: name.to_string(),
-                peer: None,
-                tools: vec![],
-                resources: vec![],
-                status: ClientStatus::Failed(reason),
-                oauth_status: OAuthStatus::NeedsAuthorization,
-                source,
-                url,
-                channel_capable: false,
-            }),
-        );
-    }
-
-    /// 检测错误是否为 HTTP 401 认证错误
-    pub(crate) fn is_auth_required_error(error: &str, transport_is_http: bool) -> bool {
-        transport_is_http && (error.contains("Auth required") || error.contains("AuthRequired"))
-    }
-
-    pub async fn remove_server(self: &Arc<Self>, server_name: &str) {
-        self.clients.write().remove(server_name);
-        if let Some(mut svc) = self.services.lock().await.remove(server_name) {
-            let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-        }
-        self.configs.write().remove(server_name);
-    }
-
-    /// 将服务器标记为 Disabled：关闭连接但保留 config 和 handle（用于面板展示）
-    pub async fn set_disabled(self: &Arc<Self>, server_name: &str) {
-        // 关闭实际连接
-        if let Some(mut svc) = self.services.lock().await.remove(server_name) {
-            let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-        }
-        // 更新 handle 为 Disabled 状态（保留 config 引用）
-        let (source, url) = self
-            .configs
-            .read()
-            .get(server_name)
-            .map(|c| (c.source.clone(), c.url.clone()))
-            .unwrap_or((None, None));
-        self.clients.write().insert(
-            server_name.to_string(),
-            Arc::new(McpClientHandle {
-                name: server_name.to_string(),
-                peer: None,
-                tools: vec![],
-                resources: vec![],
-                status: ClientStatus::Disabled,
-                oauth_status: OAuthStatus::default(),
-                source,
-                url,
-                channel_capable: false,
-            }),
-        );
-    }
-
-    pub fn server_infos(&self) -> Vec<ServerInfo> {
-        self.clients
-            .read()
-            .values()
-            .map(|h| ServerInfo {
-                name: h.name.clone(),
-                transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
-                status: h.status.clone(),
-                tool_count: h.tools.len(),
-                resource_count: h.resources.len(),
-                oauth_status: h.oauth_status.clone(),
-                source: h.source.clone(),
-                url: h.url.clone(),
-                plugin_source: self.plugin_source_of(&h.name),
-            })
-            .collect()
-    }
-
-    /// 返回所有 MCP 服务器信息（合并 configs + clients）
-    ///
-    /// config 中有但 clients 中没有的 server 会被标记为 Uninitialized。
-    /// 这覆盖了连接失败后被移除、运行时新增配置、以及 disabled 后被清理等场景。
-    pub fn all_server_infos(&self) -> Vec<ServerInfo> {
-        let clients = self.clients.read();
-        let configs = self.configs.read();
-
-        let mut result: Vec<ServerInfo> = Vec::new();
-
-        // 先遍历 clients 表中的所有条目
-        for h in clients.values() {
-            result.push(ServerInfo {
-                name: h.name.clone(),
-                transport_type: if h.url.is_some() { "http" } else { "stdio" }.to_string(),
-                status: h.status.clone(),
-                tool_count: h.tools.len(),
-                resource_count: h.resources.len(),
-                oauth_status: h.oauth_status.clone(),
-                source: h.source.clone(),
-                url: h.url.clone(),
-                plugin_source: self.plugin_source_of(&h.name),
-            });
-        }
-
-        // 遍历 configs，补充 clients 中不存在的条目（标记为 Uninitialized）
-        for (name, sc) in configs.iter() {
-            if !clients.contains_key(name) {
-                result.push(ServerInfo {
-                    name: name.clone(),
-                    transport_type: if sc.url.is_some() { "http" } else { "stdio" }.to_string(),
-                    status: ClientStatus::Uninitialized,
-                    tool_count: 0,
-                    resource_count: 0,
-                    oauth_status: OAuthStatus::default(),
-                    source: sc.source.clone(),
-                    url: sc.url.clone(),
-                    plugin_source: self.plugin_source_of(name),
-                });
-            }
-        }
-
-        result
     }
 
     pub fn get_tools(&self, name: &str) -> Vec<Tool> {
@@ -370,7 +220,7 @@ impl McpClientPool {
                     c.name,
                     c.resources
                         .iter()
-                        .map(|r| r.raw.uri.clone())
+                        .map(|r| r.uri.clone())
                         .collect::<Vec<_>>()
                         .join(", "),
                     c.resources.len()
@@ -379,127 +229,63 @@ impl McpClientPool {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
 
-    pub async fn shutdown(&self) {
-        let names: Vec<String> = self.clients.read().keys().cloned().collect();
-        for name in &names {
-            if let Some(c) = self.clients.write().get_mut(name) {
-                if matches!(c.status, ClientStatus::Connected) {
-                    tracing::info!(server = %name, "关闭连接");
-                }
-                let h = Arc::make_mut(c);
-                h.status = ClientStatus::Disconnected;
-                h.peer = None;
-            }
-        }
-        for (_name, mut svc) in self.services.lock().await.drain() {
-            let _ = svc.close_with_timeout(SHUTDOWN_TIMEOUT).await;
-        }
+// 3.0 批 2 波 2：装配注入端口实现（ACP 侧只持 `Arc<dyn McpPoolPort>`）。
+// M-TUI 收口：`shutdown`（host/shutdown 命令面）与 `snapshot`（mcp/list
+// 命令面）为新增数据端口；TUI 不再直持池句柄与 watch channel。
+#[async_trait::async_trait]
+impl peri_acp_types::ports::McpPoolPort for McpClientPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn begin_shutdown(&self) {
+        McpClientPool::begin_shutdown(self);
+    }
+
+    async fn shutdown(&self) -> McpPoolShutdownReport {
+        McpClientPool::shutdown(self).await
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        let init_phase = match &*self.init_status.read() {
+            McpInitStatus::Pending => "pending",
+            McpInitStatus::Initializing { .. } => "initializing",
+            McpInitStatus::Ready { .. } => "ready",
+            McpInitStatus::Failed(_) => "failed",
+        };
+        let infos = self.all_server_infos();
+        serde_json::json!({
+            "initPhase": init_phase,
+            "servers": infos.iter().map(|info| serde_json::json!({
+                "name": info.name.clone(),
+                "status": format!("{:?}", info.status).to_lowercase(),
+                "transport": info.transport_type.clone(),
+                "toolsCount": info.tool_count,
+            })).collect::<Vec<_>>(),
+        })
     }
 }
 
-pub(crate) fn spawn_stdio_transport(
-    command: &str,
-    args: &[String],
-    env: &HashMap<String, String>,
-) -> std::io::Result<rmcp::transport::child_process::TokioChildProcess> {
-    use std::process::Stdio;
-
-    let arg_strs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let mut cmd = crate::process::shell_command(command, &arg_strs);
-    cmd.envs(env);
-
-    let builder = rmcp::transport::child_process::TokioChildProcess::builder(cmd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let (child_process, stderr_opt) = builder.spawn()?;
-
-    // 启动后台任务消费 stderr 并记录到 tracing
-    if let Some(stderr) = stderr_opt {
-        let cmd_name = command.to_string();
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(
-                    command = %cmd_name,
-                    stderr = %line,
-                    "MCP 子进程 stderr"
-                );
-            }
-        });
+/// `McpSubscriptionPort` 实现：SessionManager（peri-acp）在 session 创建 /
+/// 销毁时注册 / 注销 inbox；订阅通知到达时经 inbox 唤醒 agent。
+impl McpSubscriptionPort for McpClientPool {
+    fn register_inbox(&self, session_id: &str, handle: InboxHandle) {
+        self.session_inboxes
+            .write()
+            .insert(session_id.to_string(), handle);
     }
 
-    Ok(child_process)
-}
+    fn unregister_inbox(&self, session_id: &str) {
+        self.session_inboxes.write().remove(session_id);
+    }
 
-pub(crate) fn build_http_transport(
-    url: &str,
-    headers: &HashMap<String, String>,
-) -> rmcp::transport::StreamableHttpClientTransport<reqwest::Client> {
-    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-    let mut config = StreamableHttpClientTransportConfig::with_uri(url);
-    let mut custom_headers = std::collections::HashMap::new();
-    for (key, value) in headers {
-        match reqwest::header::HeaderName::try_from(key.as_str()) {
-            Ok(name) => match reqwest::header::HeaderValue::from_str(value) {
-                Ok(val) => {
-                    custom_headers.insert(name, val);
-                }
-                Err(e) => {
-                    tracing::warn!(header = %key, error = %e, "header 值无效");
-                }
-            },
-            Err(e) => {
-                tracing::warn!(header = %key, error = %e, "header 名称无效");
-            }
-        }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
-    if !custom_headers.is_empty() {
-        config = config.custom_headers(custom_headers);
-    }
-    rmcp::transport::StreamableHttpClientTransport::with_client(reqwest::Client::new(), config)
-}
-
-pub(crate) fn build_authed_transport(
-    url: &str,
-    headers: &HashMap<String, String>,
-    auth_manager: rmcp::transport::auth::AuthorizationManager,
-) -> rmcp::transport::StreamableHttpClientTransport<
-    rmcp::transport::auth::AuthClient<reqwest::Client>,
-> {
-    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-    let mut config = StreamableHttpClientTransportConfig::with_uri(url);
-    let mut custom_headers = std::collections::HashMap::new();
-    for (key, value) in headers {
-        match reqwest::header::HeaderName::try_from(key.as_str()) {
-            Ok(name) => match reqwest::header::HeaderValue::from_str(value) {
-                Ok(val) => {
-                    custom_headers.insert(name, val);
-                }
-                Err(e) => {
-                    tracing::warn!(header = %key, error = %e, "header 值无效");
-                }
-            },
-            Err(e) => {
-                tracing::warn!(header = %key, error = %e, "header 名称无效");
-            }
-        }
-    }
-    if !custom_headers.is_empty() {
-        config = config.custom_headers(custom_headers);
-    }
-    let auth_client = rmcp::transport::auth::AuthClient::new(reqwest::Client::new(), auth_manager);
-    rmcp::transport::StreamableHttpClientTransport::with_client(auth_client, config)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[cfg(test)]
-    include!("client_test.rs");
-}
+#[path = "client_test.rs"]
+mod tests;

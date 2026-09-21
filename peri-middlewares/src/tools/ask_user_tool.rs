@@ -83,6 +83,26 @@ impl BaseTool for AskUserTool {
         "AskUserQuestion"
     }
 
+    fn is_direct(&self) -> bool {
+        true
+    }
+
+    /// 提示词层声明分组（design v2 §2.5.1）：交互类工具归入 `interaction`。
+    fn namespace(&self) -> Option<&str> {
+        Some("interaction")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：向用户提问，含批量合并纪律。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Ask the user to decide → `{{name}}` ({{title}}): structured choices, 1 to 4 questions per call. Group every independent question into one call (3 questions in one call beats 3 separate calls; drop to 1 only when nothing else needs clarifying), and prefer `{{name}}` to free-text hedging or guessing."
+                .to_string(),
+        )
+    }
+
     fn description(&self) -> &str {
         ask_user_tool_definition().description.leak()
     }
@@ -91,9 +111,14 @@ impl BaseTool for AskUserTool {
         ask_user_tool_definition().parameters
     }
 
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let questions = parse_questions(input)?;
         let headers: Vec<String> = questions.iter().map(|q| q.header.clone()).collect();
@@ -121,15 +146,26 @@ impl BaseTool for AskUserTool {
                     .collect();
                 Ok(parts.join("\n\n"))
             }
+            InteractionResponse::Rejected => {
+                Err(Box::new(peri_agent::error::AgentError::ToolRejected {
+                    tool: "AskUserQuestion".to_string(),
+                    reason: "用户拒绝回答".to_string(),
+                }))
+            }
+            // 客户端声明无人可作答（如 `-p` 打印模式、无法识别的声明）：转述
+            // 真实原因。ToolRejected 只是失败的工具结果（模型侧 is_error），
+            // 不代表用户曾拒绝；绝不把空答案当作回答返回。
+            InteractionResponse::Unanswered { cause } => {
+                Err(Box::new(peri_agent::error::AgentError::ToolRejected {
+                    tool: "AskUserQuestion".to_string(),
+                    reason: cause.reason_text().to_string(),
+                }))
+            }
             _ => Err("ask_user_question: unexpected response type".into()),
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::*;
-    include!("ask_user_tool_test.rs");
-}
+#[path = "ask_user_tool_test.rs"]
+mod tests;

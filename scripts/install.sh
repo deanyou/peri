@@ -124,7 +124,7 @@ cleanup_old_versions() {
         exec 3<&0
     fi
 
-    echo -e "${YELLOW}[WARN]${NC}  Delete old versions? [y/N] " >&2
+    echo -e "${YELLOW}[WARN]${NC}  Delete old versions? [y/N] " >/dev/tty
     local answer
     read -r answer <&3
     exec 3<&-
@@ -270,6 +270,10 @@ main() {
                 fi
                 info "Added ${INSTALL_DIR} to PATH in ${SHELL_PROFILE}"
             fi
+            # 立即生效：export 到当前进程。以 `source` 方式执行脚本时直接作用于
+            # 当前窗口；管道/子进程执行时至少保证脚本内后续步骤与自检可用。
+            export PATH="${INSTALL_DIR}:${PATH}"
+            SHELL_PROFILE_SET=1
         else
             echo ""
             warn "Unknown shell. Add this directory to your PATH manually:"
@@ -281,6 +285,17 @@ main() {
     # Offer to clean up old versions
     cleanup_old_versions "${INSTALL_DIR}" "${VERSION_TAG}"
 
+    # --- Workflow dependency check ---
+    echo ""
+    step "Checking workflow runner..."
+    if command -v node &>/dev/null; then
+        info "node found — bundled workflow runner is ready"
+    else
+        warn "node not found. Install Node.js for workflow and PTC support:"
+        echo "    https://nodejs.org/"
+        echo ""
+    fi
+
     echo ""
     info "Installation complete! Version: ${VERSION_TAG}"
     echo ""
@@ -289,6 +304,20 @@ main() {
         info "Run 'peri' to start."
     else
         info "Run: ${BIN_LINK}"
+    fi
+    # 管道（curl | bash）或子进程（bash install.sh）执行时，脚本内 export
+    # 无法穿透到父 shell——给出当前窗口立即生效的一行命令（source 方式执行
+    # 则已生效，无需提示）。
+    # 注意：curl | bash（stdin）执行时 BASH_SOURCE 未定义，set -u 下必须给默认值
+    if [[ "${BASH_SOURCE[0]:-}" != "$0" && "${SHELL_PROFILE_SET:-}" == "1" ]]; then
+        echo ""
+        info "To use 'peri' in the current window immediately, run:"
+        if [[ "${SHELL}" == */fish ]]; then
+            echo "    set -gx PATH \"${INSTALL_DIR}\" \$PATH"
+        else
+            echo "    export PATH=\"${INSTALL_DIR}:\$PATH\""
+        fi
+        echo "    (or: source ${SHELL_PROFILE}; new terminal windows pick it up automatically)"
     fi
     echo ""
 }

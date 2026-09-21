@@ -26,14 +26,19 @@ pub fn get_built_in_agent(agent_id: &str) -> Option<&'static BuiltInAgent> {
     BUILT_IN_AGENTS.iter().find(|a| a.agent_id == agent_id)
 }
 
+/// 返回所有内置 subagent type 名（agent_id），用于 ToolRegistrySnapshot 构造
+pub fn built_in_agent_types() -> Vec<&'static str> {
+    BUILT_IN_AGENTS.iter().map(|a| a.agent_id).collect()
+}
+
 static BUILT_IN_AGENTS: [BuiltInAgent; 6] = [
     BuiltInAgent {
         agent_id: "coder",
         content: include_str!("built-in/coder.md"),
     },
     BuiltInAgent {
-        agent_id: "explore",
-        content: include_str!("built-in/explore.md"),
+        agent_id: "explorer",
+        content: include_str!("built-in/explorer.md"),
     },
     BuiltInAgent {
         agent_id: "general-purpose",

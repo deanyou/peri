@@ -92,7 +92,12 @@ fn test_format_search_results_no_content() {
 #[tokio::test]
 async fn test_websearch_missing_query() {
     let tool = WebSearchTool::new();
-    let result = tool.invoke(serde_json::json!({})).await;
+    let result = tool
+        .invoke(
+            serde_json::json!({}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
     let err = result.unwrap_err();
     assert!(
         err.to_string()
@@ -104,7 +109,12 @@ async fn test_websearch_missing_query() {
 #[tokio::test]
 async fn test_webfetch_missing_url() {
     let tool = WebFetchTool::new();
-    let result = tool.invoke(serde_json::json!({})).await;
+    let result = tool
+        .invoke(
+            serde_json::json!({}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
     let err = result.unwrap_err();
     assert!(
         err.to_string().contains("Missing url parameter"),
@@ -222,4 +232,22 @@ mod tavily_extract_deserialize {
                 || resp["failed_results"].as_array().unwrap().is_empty()
         );
     }
+}
+
+/// 浮点 num_results 必须显式报错（在发起 HTTP 请求之前），
+/// 不得被 as_u64() 静默吞掉回退默认值 10
+#[tokio::test]
+async fn test_websearch_fractional_num_results_rejected_before_request() {
+    let tool = WebSearchTool::new();
+    let result = tool
+        .invoke(
+            serde_json::json!({"query": "test", "num_results": 12.5}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await;
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("non-negative integer"),
+        "浮点 num_results 应报错而非静默回退: {err_msg}"
+    );
 }

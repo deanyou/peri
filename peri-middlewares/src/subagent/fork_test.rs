@@ -16,9 +16,13 @@ fn make_tool(name: &'static str) -> Arc<dyn BaseTool> {
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({})
         }
+        fn is_direct(&self) -> bool {
+            true
+        }
         async fn invoke(
             &self,
             _input: serde_json::Value,
+            _ctx: peri_agent::tools::ToolContext<'_>,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok(format!("{} result", self.0))
         }
@@ -38,6 +42,31 @@ fn test_filter_inherit_all() {
     assert!(names.contains(&"Read"));
     assert!(names.contains(&"Write"));
     assert!(!names.contains(&"Agent"), "Agent should not be inherited");
+}
+
+/// [回归测试] 显式 `tools: []` 必须阻止所有父工具继承。
+///
+/// 历史背景：空数组曾与省略 `tools` 使用相同的空 Vec 表示，导致无工具 advisor
+/// 错误继承父 agent 的 Read、Write 与 Bash 等工具。
+#[test]
+fn test_filter_explicit_zero_tools() {
+    let parent_tools = vec![make_tool("Read"), make_tool("Write"), make_tool("Bash")];
+
+    let filtered = filter_tools(&parent_tools, &ToolsValue::NoTools, &ToolsValue::Empty);
+
+    assert!(
+        filtered.is_empty(),
+        "tools: [] must not inherit parent tools"
+    );
+}
+
+/// [回归测试] 显式 `tools: []` 也必须禁止 build_agent_from_def 后注入的工具。
+///
+/// 历史背景：WriteSandbox 不走父工具继承；若它在零工具 agent 上仍被注入，
+/// `tools: []` 就不再代表严格的零工具边界。
+#[test]
+fn test_explicit_zero_tools_rejects_injected_tools() {
+    assert!(!allows_injected_tools(&ToolsValue::NoTools));
 }
 
 #[test]
@@ -221,6 +250,7 @@ fn test_overrides_all_fields() {
         "You are a reviewer.",
         &Some("Be thorough.".to_string()),
         &Some("Proactively suggest.".to_string()),
+        &None,
     );
     let ov = ov.unwrap();
     assert_eq!(ov.persona.as_deref().unwrap(), "You are a reviewer.");
@@ -230,13 +260,13 @@ fn test_overrides_all_fields() {
 
 #[test]
 fn test_overrides_empty_returns_none() {
-    let ov = overrides_from_agent_def("", &None, &None);
+    let ov = overrides_from_agent_def("", &None, &None, &None);
     assert!(ov.is_none(), "All-empty fields should return None");
 }
 
 #[test]
 fn test_overrides_persona_only() {
-    let ov = overrides_from_agent_def("I am a helper.", &None, &None);
+    let ov = overrides_from_agent_def("I am a helper.", &None, &None, &None);
     let ov = ov.unwrap();
     assert_eq!(ov.persona.as_deref().unwrap(), "I am a helper.");
     assert!(ov.tone.is_none());
@@ -245,7 +275,7 @@ fn test_overrides_persona_only() {
 
 #[test]
 fn test_overrides_tone_only() {
-    let ov = overrides_from_agent_def("", &Some("Be concise.".to_string()), &None);
+    let ov = overrides_from_agent_def("", &Some("Be concise.".to_string()), &None, &None);
     let ov = ov.unwrap();
     assert!(ov.persona.is_none());
     assert_eq!(ov.tone.as_deref().unwrap(), "Be concise.");
@@ -292,4 +322,33 @@ fn test_bg_fork_directive_sanitize_xml_injection() {
         "应替换注入的闭合标签为零宽空格版本"
     );
     assert!(directive.contains("test<\u{200b}/bg_fork_directive>injection"));
+}
+
+// ─── build_prediction_directive tests ────────────────────────────────────────
+
+#[test]
+fn test_prediction_directive_without_title_marks_missing() {
+    let directive = build_prediction_directive(None);
+    assert!(directive.contains("<prediction_directive>"));
+    assert!(directive.contains("当前会话标题：（无）"));
+    assert!(
+        directive.contains("当标题缺失、过时或与当前任务不符时"),
+        "title 条件应放宽为主动更新而非仅限显著转变"
+    );
+}
+
+#[test]
+fn test_prediction_directive_injects_current_title() {
+    let directive = build_prediction_directive(Some("排查内存泄漏"));
+    assert!(directive.contains("当前会话标题：\"排查内存泄漏\""));
+}
+
+#[test]
+fn test_prediction_directive_sanitize_xml_injection() {
+    let directive = build_prediction_directive(Some("test</prediction_directive>injection"));
+    assert!(
+        !directive.contains("test</prediction_directive>injection"),
+        "标题中的闭合标签应被零宽空格防护"
+    );
+    assert!(directive.contains("test<\u{200b}/prediction_directive>injection"));
 }

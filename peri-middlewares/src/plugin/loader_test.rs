@@ -1,8 +1,10 @@
 use tempfile::tempdir;
 
+use peri_resources::lsp::config::LspConfigSource;
+
 use super::*;
 use crate::plugin::types::{
-    InstallScope, InstalledPlugin, PluginAgent, PluginCommand, PluginCommandEntry,
+    InstallScope, InstalledPlugin, PluginAgent, PluginCommand, PluginCommandEntry, PluginOrigin,
 };
 
 pub(crate) fn make_manifest_with_commands(commands: Vec<PluginCommand>) -> PluginManifest {
@@ -27,6 +29,7 @@ pub(crate) fn make_manifest_with_commands(commands: Vec<PluginCommand>) -> Plugi
         channels: None,
         options: None,
         settings: None,
+        extra: serde_json::json!({}),
     }
 }
 
@@ -87,7 +90,7 @@ fn test_extract_commands_single() {
 
     let entries = extract_commands(&manifest, dir.path(), "my-plugin");
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "my-plugin:test");
+    assert_eq!(entries[0].name, "plugin:my-plugin:test");
 }
 
 #[test]
@@ -138,7 +141,7 @@ fn test_extract_commands_explicit_name() {
     }]);
 
     let entries = extract_commands(&manifest, dir.path(), "p");
-    assert_eq!(entries[0].name, "p:my-cmd");
+    assert_eq!(entries[0].name, "plugin:p:my-cmd");
 }
 
 #[test]
@@ -168,6 +171,123 @@ fn test_extract_commands_frontmatter_description() {
     assert_eq!(entries[0].description, "FM desc");
 }
 
+// ── plugin_route_entries（Phase 6 B2 转换函数；P2-1 直测）──────────────────
+
+/// 最小事件 sink（占位 handler execute 需要 CommandContext）。
+struct NoopEventSink;
+
+#[async_trait::async_trait]
+impl peri_acp_types::event::EventSink for NoopEventSink {
+    async fn push_event(
+        &self,
+        _session_id: &str,
+        _event: &peri_acp_types::event::ExecutorEvent,
+        _context_window: u32,
+    ) {
+    }
+
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
+}
+
+/// 转换主路径：fullname / 剥离 plugin: 前缀的 provenance / kind / lifecycle
+/// 全量锁定（P0-1 回归：未剥离前缀 → namespace 段校验失败 →
+/// ProvenanceMismatch 全量拒绝，本用例直接暴露）。
+#[test]
+fn test_plugin_route_entries_full() {
+    let entries = vec![CommandEntry {
+        name: "plugin:ecc:deploy".into(),
+        description: "Deploy to prod".into(),
+        source: CommandSource::Plugin {
+            path: PathBuf::from("/tmp/ecc/deploy.md"),
+        },
+    }];
+    let routes = plugin_route_entries(&entries);
+    assert_eq!(routes.len(), 1);
+    let r = &routes[0];
+    // fullname 原样使用（三层形态 `plugin:{plugin}:{cmd}`）
+    assert_eq!(r.fullname, "plugin:ecc:deploy");
+    assert!(r.aliases.is_empty(), "插件条目不得带 alias");
+    assert_eq!(r.description, "Deploy to prod");
+    // kind / lifecycle
+    assert_eq!(r.kind, CommandEntryKind::Command, "plugin 域暂归 Command");
+    assert_eq!(r.provenance.lifecycle, CommandLifecycle::Connected);
+    assert!(r.category.is_none());
+    assert!(r.args_schema.is_none());
+    // provenance.source：plugin: 前缀必须剥离（P0-1）
+    match &r.provenance.source {
+        RouteCommandSource::Plugin { name } => {
+            assert_eq!(name, "ecc", "plugin: 前缀必须剥离，实际: {name}");
+        }
+        other => panic!("source 应为 Plugin，实际: {other:?}"),
+    }
+    // 与词法 namespace 段一致（register 域校验通过面，设计 §58）
+    assert_eq!(r.provenance.source.namespace(), Some("ecc"));
+}
+
+/// 占位 handler 语义：execute → `Inject` 空串（fall-through 进 agent 管线，
+/// 命令不被吞——与 McpSkillPlaceholder / PassthroughPlaceholder 同构）。
+#[tokio::test]
+async fn test_plugin_route_entries_handler_is_placeholder_inject() {
+    let entries = vec![CommandEntry {
+        name: "plugin:ecc:deploy".into(),
+        description: String::new(),
+        source: CommandSource::Builtin,
+    }];
+    let routes = plugin_route_entries(&entries);
+    let outcome = routes[0]
+        .handler
+        .execute(CommandContext::new(
+            "test-session".into(),
+            vec![],
+            "/tmp".into(),
+            Arc::new(NoopEventSink),
+            tokio_util::sync::CancellationToken::new(),
+            Default::default(),
+        ))
+        .await;
+    assert!(
+        matches!(&outcome, CommandOutcome::Inject(s) if s.is_empty()),
+        "占位 handler 应 Inject 空串，实际 outcome 非 Inject"
+    );
+}
+
+/// 词法异常 name 全量跳过：单层 `plugin:x`（缺末段 cmd）、非 plugin 域
+/// `foo:bar`、无冒号裸名（register 阶段词法校验兜底）。
+#[test]
+fn test_plugin_route_entries_skips_lexically_abnormal() {
+    let entries = vec![
+        CommandEntry {
+            name: "plugin:x".into(),
+            description: String::new(),
+            source: CommandSource::Builtin,
+        },
+        CommandEntry {
+            name: "foo:bar".into(),
+            description: String::new(),
+            source: CommandSource::Builtin,
+        },
+        CommandEntry {
+            name: "nocolon".into(),
+            description: String::new(),
+            source: CommandSource::Builtin,
+        },
+        // 合法条目共存时仅合法者产出（过滤不得误伤）
+        CommandEntry {
+            name: "plugin:p:standalone".into(),
+            description: String::new(),
+            source: CommandSource::Builtin,
+        },
+    ];
+    let routes = plugin_route_entries(&entries);
+    assert_eq!(routes.len(), 1, "词法异常 name 应跳过，仅合法条目产出");
+    assert_eq!(routes[0].fullname, "plugin:p:standalone");
+    assert_eq!(
+        routes[0].provenance.source.namespace(),
+        Some("p"),
+        "合法条目 provenance 剥离 plugin: 前缀"
+    );
+}
+
 #[test]
 fn test_extract_skills_paths() {
     let dir = tempdir().unwrap();
@@ -185,9 +305,11 @@ fn test_extract_skills_paths() {
     let mut manifest = make_manifest_with_commands(vec![]);
     manifest.skills = Some(vec!["skills/code-review".into()]);
 
-    let paths = extract_skills_paths(&manifest, dir.path());
+    let paths = extract_skills_paths(&manifest, dir.path(), "test-plugin");
     assert_eq!(paths.len(), 1);
-    assert!(paths[0].ends_with("code-review"));
+    assert!(paths[0].path.ends_with("code-review"));
+    assert_eq!(paths[0].source, SkillSource::Plugin);
+    assert_eq!(paths[0].plugin_name.as_deref(), Some("test-plugin"));
 }
 
 #[test]
@@ -195,7 +317,7 @@ fn test_extract_skills_paths_missing_dir() {
     let mut manifest = make_manifest_with_commands(vec![]);
     manifest.skills = Some(vec!["nonexistent".into()]);
 
-    let paths = extract_skills_paths(&manifest, Path::new("/tmp"));
+    let paths = extract_skills_paths(&manifest, Path::new("/tmp"), "test-plugin");
     assert!(paths.is_empty());
 }
 
@@ -204,34 +326,42 @@ fn test_extract_skills_paths_none() {
     let dir = tempdir().unwrap();
     let manifest = make_manifest_with_commands(vec![]);
     // no skills dir at all → fallback finds nothing
-    let paths = extract_skills_paths(&manifest, dir.path());
+    let paths = extract_skills_paths(&manifest, dir.path(), "test-plugin");
     assert!(paths.is_empty());
 }
 
 #[test]
-fn test_extract_skills_paths_fallback_disk_scan() {
+fn test_extract_skills_paths_fallback_returns_container_root() {
     let dir = tempdir().unwrap();
     let skill_dir = dir.path().join("skills").join("my-skill");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(skill_dir.join("SKILL.md"), "---\nname: my-skill\n---\nbody").unwrap();
 
-    // manifest has no skills field → fallback to disk scan
+    // manifest has no skills field → fallback returns base_dir/skills/ as a single root;
+    // scan_skill_roots will recursively find my-skill inside.
     let manifest = make_manifest_with_commands(vec![]);
-    let paths = extract_skills_paths(&manifest, dir.path());
+    let paths = extract_skills_paths(&manifest, dir.path(), "test-plugin");
     assert_eq!(paths.len(), 1);
-    assert!(paths[0].ends_with("my-skill"));
+    assert!(paths[0].path.ends_with("skills"));
+    assert_eq!(paths[0].source, SkillSource::Plugin);
 }
 
 #[test]
-fn test_extract_skills_paths_fallback_ignores_no_skill_md() {
+fn test_extract_skills_paths_fallback_returns_root_even_without_skill_md() {
     let dir = tempdir().unwrap();
     let skill_dir = dir.path().join("skills").join("incomplete");
     std::fs::create_dir_all(&skill_dir).unwrap();
-    // no SKILL.md → should be skipped
+    // no SKILL.md inside, but fallback still returns the container root;
+    // scan_skill_roots will simply find no skills inside.
 
     let manifest = make_manifest_with_commands(vec![]);
-    let paths = extract_skills_paths(&manifest, dir.path());
-    assert!(paths.is_empty());
+    let paths = extract_skills_paths(&manifest, dir.path(), "test-plugin");
+    assert_eq!(
+        paths.len(),
+        1,
+        "fallback 仍返回容器根，由 scan_skill_roots 决定是否含 skill"
+    );
+    assert!(paths[0].path.ends_with("skills"));
 }
 
 #[test]
@@ -283,6 +413,8 @@ fn test_extract_mcp_servers() {
             headers: None,
             oauth: None,
             disabled: None,
+            protocol_version: None,
+            subscriptions: None,
             source: None,
         })),
     );
@@ -400,6 +532,8 @@ fn test_extract_mcp_servers_manifest_has_priority_over_fallback() {
             headers: None,
             oauth: None,
             disabled: None,
+            protocol_version: None,
+            subscriptions: None,
             source: None,
         })),
     );
@@ -465,7 +599,7 @@ fn test_merge_plugin_mcp_servers() {
         install_path: PathBuf::new(),
         manifest: make_manifest_with_commands(vec![]),
         commands: vec![],
-        skills_dirs: vec![],
+        skills_roots: vec![],
         agents_dirs: vec![],
         mcp_servers: HashMap::new(),
         data_path: PathBuf::new(),
@@ -482,6 +616,8 @@ fn test_merge_plugin_mcp_servers() {
             headers: None,
             oauth: None,
             disabled: None,
+            protocol_version: None,
+            subscriptions: None,
             source: None,
         },
     );
@@ -492,7 +628,7 @@ fn test_merge_plugin_mcp_servers() {
         install_path: PathBuf::new(),
         manifest: make_manifest_with_commands(vec![]),
         commands: vec![],
-        skills_dirs: vec![],
+        skills_roots: vec![],
         agents_dirs: vec![],
         mcp_servers: HashMap::new(),
         data_path: PathBuf::new(),
@@ -509,6 +645,8 @@ fn test_merge_plugin_mcp_servers() {
             headers: None,
             oauth: None,
             disabled: None,
+            protocol_version: None,
+            subscriptions: None,
             source: None,
         },
     );
@@ -540,6 +678,7 @@ fn test_load_plugins_success() {
             install_path: plugin_dir,
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
 
@@ -568,6 +707,7 @@ fn test_load_plugins_invalid_manifest() {
             install_path: dir.path().join("empty"),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
 
@@ -651,6 +791,7 @@ fn test_load_enabled_plugins() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -663,7 +804,7 @@ fn test_load_enabled_plugins() {
     let settings = r#"{"enabledPlugins":["my-plugin@test"]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let loaded = load_enabled_plugins(dir.path()).unwrap();
+    let loaded = load_enabled_plugins(dir.path(), None).unwrap();
     assert_eq!(loaded.len(), 1);
 }
 
@@ -681,6 +822,7 @@ fn test_load_enabled_plugins_disabled() {
             install_path: dir.path().join("fake"),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -693,7 +835,7 @@ fn test_load_enabled_plugins_disabled() {
     let settings = r#"{"enabledPlugins":[]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let loaded = load_enabled_plugins(dir.path()).unwrap();
+    let loaded = load_enabled_plugins(dir.path(), None).unwrap();
     assert!(loaded.is_empty());
 }
 
@@ -713,17 +855,17 @@ fn test_plugin_command_provider_multiple() {
             manifest: make_manifest_with_commands(vec![]),
             commands: vec![
                 CommandEntry {
-                    name: "p1:cmd1".into(),
+                    name: "plugin:p1:cmd1".into(),
                     description: "d1".into(),
                     source: CommandSource::Builtin,
                 },
                 CommandEntry {
-                    name: "p1:cmd2".into(),
+                    name: "plugin:p1:cmd2".into(),
                     description: "d2".into(),
                     source: CommandSource::Builtin,
                 },
             ],
-            skills_dirs: vec![],
+            skills_roots: vec![],
             agents_dirs: vec![],
             mcp_servers: HashMap::new(),
             data_path: PathBuf::new(),
@@ -737,17 +879,17 @@ fn test_plugin_command_provider_multiple() {
             manifest: make_manifest_with_commands(vec![]),
             commands: vec![
                 CommandEntry {
-                    name: "p2:cmd3".into(),
+                    name: "plugin:p2:cmd3".into(),
                     description: "d3".into(),
                     source: CommandSource::Builtin,
                 },
                 CommandEntry {
-                    name: "p2:cmd4".into(),
+                    name: "plugin:p2:cmd4".into(),
                     description: "d4".into(),
                     source: CommandSource::Builtin,
                 },
             ],
-            skills_dirs: vec![],
+            skills_roots: vec![],
             agents_dirs: vec![],
             mcp_servers: HashMap::new(),
             data_path: PathBuf::new(),
@@ -762,9 +904,9 @@ fn test_plugin_command_provider_multiple() {
 
 #[test]
 fn test_load_no_plugins_aggregated() {
-    let result = load_enabled_plugins_aggregated(Path::new("/nonexistent/path"));
+    let result = load_enabled_plugins_aggregated(Path::new("/nonexistent/path"), None);
     assert!(result.plugins.is_empty());
-    assert!(result.all_skill_dirs.is_empty());
+    assert!(result.all_skill_roots.is_empty());
     assert!(result.all_mcp_servers.is_empty());
     assert!(result.all_agent_dirs.is_empty());
     assert!(result.all_commands.is_empty());
@@ -793,6 +935,7 @@ fn test_load_enabled_plugins_aggregated() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -805,7 +948,7 @@ fn test_load_enabled_plugins_aggregated() {
     let settings = r#"{"enabledPlugins":["my-plugin@test"]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let result = load_enabled_plugins_aggregated(dir.path());
+    let result = load_enabled_plugins_aggregated(dir.path(), None);
     assert_eq!(result.plugins.len(), 1);
     assert_eq!(result.plugins[0].name, "my-plugin");
 }
@@ -838,6 +981,7 @@ fn test_load_plugin_skill_dirs_aggregated() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     })
     .unwrap();
@@ -850,9 +994,9 @@ fn test_load_plugin_skill_dirs_aggregated() {
     let settings = r#"{"enabledPlugins":["skill-plugin@test"]}"#;
     std::fs::write(dir.path().join("settings.json"), settings).unwrap();
 
-    let result = load_enabled_plugins_aggregated(dir.path());
-    assert_eq!(result.all_skill_dirs.len(), 1);
-    assert!(result.all_skill_dirs[0].ends_with("my-skill"));
+    let result = load_enabled_plugins_aggregated(dir.path(), None);
+    assert_eq!(result.all_skill_roots.len(), 1);
+    assert!(result.all_skill_roots[0].path.ends_with("my-skill"));
 }
 
 #[test]
@@ -878,8 +1022,11 @@ fn test_extract_commands_string_directory() {
     assert_eq!(entries.len(), 2);
     let mut names: Vec<_> = entries.iter().map(|e| e.name.clone()).collect();
     names.sort();
-    assert_eq!(names, vec!["ecc:deploy", "ecc:rollback"]);
-    let deploy = entries.iter().find(|e| e.name == "ecc:deploy").unwrap();
+    assert_eq!(names, vec!["plugin:ecc:deploy", "plugin:ecc:rollback"]);
+    let deploy = entries
+        .iter()
+        .find(|e| e.name == "plugin:ecc:deploy")
+        .unwrap();
     assert_eq!(deploy.description, "Deploy to production");
 }
 
@@ -906,5 +1053,312 @@ fn test_extract_commands_string_single_file() {
 
     let entries = extract_commands(&manifest, dir.path(), "p");
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "p:standalone");
+    assert_eq!(entries[0].name, "plugin:p:standalone");
+}
+
+// ===== 项目级插件发现测试 =====
+
+#[test]
+fn test_load_enabled_plugins_with_project_settings() {
+    // 场景：项目 settings 有 ["a"]，用户 settings 有 ["b"]，只启用 "a"（项目替换用户）
+    let dir = tempdir().unwrap();
+    let plugin_a_dir = dir.path().join("plugin-a");
+    let plugin_b_dir = dir.path().join("plugin-b");
+    std::fs::create_dir_all(plugin_a_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_a_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"plugin-a","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(plugin_b_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_b_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"plugin-b","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    // 用户级 settings.json (claude_dir)
+    let claude_dir = dir.path().join("claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![
+            InstalledPlugin {
+                id: "plugin-a@test".into(),
+                name: "plugin-a".into(),
+                version: "1.0.0".into(),
+                marketplace: "test".into(),
+                install_path: plugin_a_dir.clone(),
+                scope: InstallScope::User,
+                project_path: None,
+                origin: PluginOrigin::PeriInstalled,
+            },
+            InstalledPlugin {
+                id: "plugin-b@test".into(),
+                name: "plugin-b".into(),
+                version: "1.0.0".into(),
+                marketplace: "test".into(),
+                install_path: plugin_b_dir.clone(),
+                scope: InstallScope::User,
+                project_path: None,
+                origin: PluginOrigin::PeriInstalled,
+            },
+        ],
+    })
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+    // 用户级启用 "plugin-b@test"
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"enabledPlugins":["plugin-b@test"]}"#,
+    )
+    .unwrap();
+
+    // 项目级 settings.json (cwd/.claude/settings.json)
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+    std::fs::write(
+        cwd.join(".claude").join("settings.json"),
+        r#"{"enabledPlugins":["plugin-a@test"]}"#,
+    )
+    .unwrap();
+
+    let loaded = load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
+    assert_eq!(loaded.len(), 1, "项目级替换用户级，只应启用 plugin-a");
+    assert_eq!(loaded[0].name, "plugin-a");
+}
+
+#[test]
+fn test_load_enabled_plugins_project_fallback_to_user() {
+    // 场景：项目 settings 存在但无 enabledPlugins 字段，回退用户级
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("my-plugin");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"my-plugin","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let claude_dir = dir.path().join("claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: "my-plugin@test".into(),
+            name: "my-plugin".into(),
+            version: "1.0.0".into(),
+            marketplace: "test".into(),
+            install_path: plugin_dir.clone(),
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    })
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"enabledPlugins":["my-plugin@test"]}"#,
+    )
+    .unwrap();
+
+    // 项目级 settings 存在但没有 enabledPlugins 字段
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+    std::fs::write(
+        cwd.join(".claude").join("settings.json"),
+        r#"{"hooks": {}}"#,
+    )
+    .unwrap();
+
+    let loaded = load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
+    assert_eq!(loaded.len(), 1, "项目级无 enabledPlugins 应回退用户级");
+    assert_eq!(loaded[0].name, "my-plugin");
+}
+
+#[test]
+fn test_load_enabled_plugins_project_empty_enabled() {
+    // 场景：项目 settings enabledPlugins 为空数组，回退用户级
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("my-plugin");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"my-plugin","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let claude_dir = dir.path().join("claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: "my-plugin@test".into(),
+            name: "my-plugin".into(),
+            version: "1.0.0".into(),
+            marketplace: "test".into(),
+            install_path: plugin_dir.clone(),
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    })
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"enabledPlugins":["my-plugin@test"]}"#,
+    )
+    .unwrap();
+
+    // 项目级 settings 有 enabledPlugins 但为空数组
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+    std::fs::write(
+        cwd.join(".claude").join("settings.json"),
+        r#"{"enabledPlugins":[]}"#,
+    )
+    .unwrap();
+
+    let loaded = load_enabled_plugins(&claude_dir, Some(&cwd)).unwrap();
+    assert_eq!(
+        loaded.len(),
+        1,
+        "项目级 enabledPlugins 为空数组应回退用户级"
+    );
+    assert_eq!(loaded[0].name, "my-plugin");
+}
+
+#[test]
+fn test_load_enabled_plugins_missing_project() {
+    // 场景：cwd=None，仅读用户级 settings（向后兼容）
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("my-plugin");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"my-plugin","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let claude_dir = dir.path().join("claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: "my-plugin@test".into(),
+            name: "my-plugin".into(),
+            version: "1.0.0".into(),
+            marketplace: "test".into(),
+            install_path: plugin_dir.clone(),
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    })
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"enabledPlugins":["my-plugin@test"]}"#,
+    )
+    .unwrap();
+
+    let loaded = load_enabled_plugins(&claude_dir, None).unwrap();
+    assert_eq!(loaded.len(), 1, "cwd=None 时行为不变，仅读用户 settings");
+    assert_eq!(loaded[0].name, "my-plugin");
+}
+
+#[test]
+fn test_load_lsp_servers_aggregated_injects_plugin_root_env() {
+    // 插件 lspServers 经 lsp_config_from_plugin 转换：env 注入 CLAUDE_PLUGIN_ROOT，
+    // 插件根相对命令 ${CLAUDE_PLUGIN_ROOT}/bin/server 可解析（回归：曾手写构造 env: None）
+    let dir = tempdir().unwrap();
+    let plugin_dir = dir.path().join("lsp-plugin");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        r#"{
+            "name": "lsp-plugin",
+            "version": "1.0.0",
+            "lspServers": [
+                {
+                    "name": "my-server",
+                    "command": "${CLAUDE_PLUGIN_ROOT}/bin/server",
+                    "args": ["--stdio"],
+                    "extensionToLanguage": {".txt": "plaintext"}
+                }
+            ]
+        }"#,
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(dir.path().join("plugins")).unwrap();
+    let installed_json = serde_json::to_string(&InstalledPlugins {
+        version: 2,
+        plugins: vec![InstalledPlugin {
+            id: "lsp-plugin@test".into(),
+            name: "lsp-plugin".into(),
+            version: "1.0.0".into(),
+            marketplace: "test".into(),
+            install_path: plugin_dir.clone(),
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    })
+    .unwrap();
+    std::fs::write(
+        dir.path().join("plugins").join("installed_plugins.json"),
+        installed_json,
+    )
+    .unwrap();
+
+    let settings = r#"{"enabledPlugins":["lsp-plugin@test"]}"#;
+    std::fs::write(dir.path().join("settings.json"), settings).unwrap();
+
+    let result = load_enabled_plugins_aggregated(dir.path(), None);
+    assert_eq!(result.all_lsp_servers.len(), 1);
+    let server = &result.all_lsp_servers[0];
+    // env 注入断言：配置含 CLAUDE_PLUGIN_ROOT（插件根）
+    let env = server.env.as_ref().expect("插件 LSP 配置应注入 env");
+    assert_eq!(
+        env.get("CLAUDE_PLUGIN_ROOT").map(|s| s.as_str()),
+        Some(plugin_dir.to_string_lossy().as_ref())
+    );
+    // 插件根相对命令按注入 env 展开
+    assert_eq!(
+        server.command,
+        format!("{}/bin/server", plugin_dir.display())
+    );
+    // manifest 字段映射保留（name 命名空间化、args、extensionToLanguage、source）
+    assert_eq!(server.name, "plugin:lsp-plugin:my-server");
+    assert_eq!(server.args, vec!["--stdio"]);
+    assert_eq!(
+        server.extension_to_language.get(".txt").unwrap(),
+        "plaintext"
+    );
+    assert_eq!(
+        server.source,
+        Some(LspConfigSource::Plugin {
+            plugin_name: "lsp-plugin".to_string()
+        })
+    );
 }

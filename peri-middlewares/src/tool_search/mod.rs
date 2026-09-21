@@ -4,6 +4,7 @@
 //! 通过 SearchExtraTools + ExecuteExtraTool 两个元工具实现按需发现和代理执行。
 
 pub mod core_tools;
+pub mod declaration;
 pub mod execute_tool;
 pub mod keyword_search;
 pub mod middleware;
@@ -11,10 +12,10 @@ pub mod search_tool;
 pub mod tool_index;
 
 pub use core_tools::{
-    is_deferred_tool, resolve_effective_tool_name, CORE_TOOLS, EXECUTE_EXTRA_TOOL_NAME,
-    EXTRA_TOOL_NAME_FIELD, EXTRA_TOOL_PARAMS_FIELD, META_TOOLS, SEARCH_EXTRA_TOOLS_NAME,
+    resolve_effective_tool_name, EXECUTE_EXTRA_TOOL_NAME, EXTRA_TOOL_NAME_FIELD,
+    EXTRA_TOOL_PARAMS_FIELD, SEARCH_EXTRA_TOOLS_NAME,
 };
-pub use execute_tool::ExecuteExtraTool;
+pub use execute_tool::{ExecuteExtraTool, ExecuteExtraToolResolver};
 pub use middleware::ToolSearchMiddleware;
 pub use search_tool::SearchExtraTools;
 pub use tool_index::{SearchResult, ToolSearchIndex};

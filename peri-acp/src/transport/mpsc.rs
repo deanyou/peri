@@ -8,19 +8,12 @@
 //! messages and dispatches responses to the pending request map, so `send_request`
 //! can await the oneshot channel without deadlocking.
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicI64, Ordering},
-        Arc,
-    },
-};
-
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::mpsc;
 
 use super::{
+    router::{transport_closed_error, RequestRouter},
     types::{AcpError, IncomingMessage, RequestId},
     AcpTransport,
 };
@@ -46,35 +39,56 @@ enum ChannelMessage {
 
 // ---------- shared pending map ----------
 
-type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, AcpError>>>>>;
+/// Convert an internal `ChannelMessage` into a public `IncomingMessage` for dispatch.
+fn channel_to_incoming(msg: ChannelMessage) -> IncomingMessage {
+    match msg {
+        ChannelMessage::Request { id, method, params } => {
+            IncomingMessage::Request { id, method, params }
+        }
+        ChannelMessage::Notification { method, params } => {
+            IncomingMessage::Notification { method, params }
+        }
+        ChannelMessage::Response { id, result } => IncomingMessage::Response { id, result },
+    }
+}
 
-/// Background pump that reads from the incoming channel and dispatches
-/// Response messages to the pending request map.
-async fn pump_incoming(
-    mut rx: mpsc::UnboundedReceiver<ChannelMessage>,
-    pending: PendingMap,
-    outgoing_tx: mpsc::UnboundedSender<IncomingMessage>,
-) {
-    while let Some(msg) = rx.recv().await {
-        match msg {
-            ChannelMessage::Response { id, result } => {
-                if let RequestId::Number(n) = &id {
-                    if let Some(tx) = pending.lock().await.remove(n) {
-                        let _ = tx.send(result);
-                        continue; // consumed internally
+fn spawn_pump(
+    mut receiver: mpsc::UnboundedReceiver<ChannelMessage>,
+    router: RequestRouter,
+) -> mpsc::UnboundedReceiver<IncomingMessage> {
+    let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                message = receiver.recv() => {
+                    let Some(message) = message else {
+                        router.close();
+                        break;
+                    };
+                    let incoming = channel_to_incoming(message);
+                    if !router.dispatch(&incoming) && incoming_tx.send(incoming).is_err() {
+                        router.close();
+                        break;
                     }
                 }
-                // Unmatched response — forward to caller
-                let _ = outgoing_tx.send(IncomingMessage::Response { id, result });
-            }
-            ChannelMessage::Request { id, method, params } => {
-                let _ = outgoing_tx.send(IncomingMessage::Request { id, method, params });
-            }
-            ChannelMessage::Notification { method, params } => {
-                let _ = outgoing_tx.send(IncomingMessage::Notification { method, params });
+                () = router.wait_closed() => break,
             }
         }
-    }
+    });
+    incoming_rx
+}
+
+fn send_or_close(
+    sender: &mpsc::UnboundedSender<ChannelMessage>,
+    router: &RequestRouter,
+    message: ChannelMessage,
+) -> Result<(), AcpError> {
+    router.ensure_open()?;
+    sender.send(message).map_err(|_| {
+        router.close();
+        transport_closed_error()
+    })
 }
 
 // ---------- MpscClientTransport ----------
@@ -85,33 +99,27 @@ pub struct MpscClientTransport {
     client_tx: mpsc::UnboundedSender<ChannelMessage>,
     /// Receives processed incoming messages from the pump.
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
-    /// Pending requests awaiting response.
-    pending: PendingMap,
-    /// Next request ID.
-    next_id: Arc<AtomicI64>,
+    /// Shared request-response router.
+    router: RequestRouter,
 }
 
 impl MpscClientTransport {
+    /// 显式关闭两端共享 router，使保留 transport Arc 的 pump 和 pending 请求退出。
+    pub fn close(&self) {
+        self.router.close();
+    }
+
     fn new(
         client_tx: mpsc::UnboundedSender<ChannelMessage>,
         server_rx: mpsc::UnboundedReceiver<ChannelMessage>,
-        pending: PendingMap,
-        next_id: Arc<AtomicI64>,
+        router: RequestRouter,
     ) -> Self {
-        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let pending_clone = pending.clone();
-
-        // Background pump: dispatches Response messages to the pending map,
-        // forwards Requests and Notifications to incoming_rx.
-        tokio::spawn(async move {
-            pump_incoming(server_rx, pending_clone, incoming_tx).await;
-        });
+        let incoming_rx = spawn_pump(server_rx, router.clone());
 
         Self {
             client_tx,
             incoming_rx: tokio::sync::Mutex::new(incoming_rx),
-            pending,
-            next_id,
+            router,
         }
     }
 }
@@ -119,32 +127,31 @@ impl MpscClientTransport {
 #[async_trait]
 impl AcpTransport for MpscClientTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let id = RequestId::Number(id_num);
-        let (response_tx, response_rx) = oneshot::channel();
+        let pending = self.router.register()?;
+        let id = RequestId::Number(pending.id());
 
-        self.pending.lock().await.insert(id_num, response_tx);
-
-        self.client_tx
-            .send(ChannelMessage::Request {
-                id: id.clone(),
+        send_or_close(
+            &self.client_tx,
+            &self.router,
+            ChannelMessage::Request {
+                id,
                 method: method.to_string(),
                 params,
-            })
-            .map_err(|_| AcpError::new(-32603, "Transport closed"))?;
+            },
+        )?;
 
-        response_rx
-            .await
-            .map_err(|_| AcpError::new(-32603, "Request cancelled"))?
+        pending.wait().await
     }
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {
-        self.client_tx
-            .send(ChannelMessage::Notification {
+        send_or_close(
+            &self.client_tx,
+            &self.router,
+            ChannelMessage::Notification {
                 method: method.to_string(),
                 params,
-            })
-            .map_err(|_| AcpError::new(-32603, "Transport closed"))
+            },
+        )
     }
 
     async fn recv(&self) -> Option<IncomingMessage> {
@@ -156,9 +163,11 @@ impl AcpTransport for MpscClientTransport {
         id: RequestId,
         result: Result<Value, AcpError>,
     ) -> Result<(), AcpError> {
-        self.client_tx
-            .send(ChannelMessage::Response { id, result })
-            .map_err(|_| AcpError::new(-32603, "Transport closed"))
+        send_or_close(
+            &self.client_tx,
+            &self.router,
+            ChannelMessage::Response { id, result },
+        )
     }
 }
 
@@ -170,32 +179,22 @@ pub struct MpscServerTransport {
     server_tx: mpsc::UnboundedSender<ChannelMessage>,
     /// Receives processed incoming messages from the pump.
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
-    /// Pending responses from client (for server-initiated requests).
-    pending: PendingMap,
-    /// Next server request ID.
-    next_id: Arc<AtomicI64>,
+    /// Shared request-response router.
+    router: RequestRouter,
 }
 
 impl MpscServerTransport {
     fn new(
         client_rx: mpsc::UnboundedReceiver<ChannelMessage>,
         server_tx: mpsc::UnboundedSender<ChannelMessage>,
-        pending: PendingMap,
-        next_id: Arc<AtomicI64>,
+        router: RequestRouter,
     ) -> Self {
-        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let pending_clone = pending.clone();
-
-        // Background pump
-        tokio::spawn(async move {
-            pump_incoming(client_rx, pending_clone, incoming_tx).await;
-        });
+        let incoming_rx = spawn_pump(client_rx, router.clone());
 
         Self {
             server_tx,
             incoming_rx: tokio::sync::Mutex::new(incoming_rx),
-            pending,
-            next_id,
+            router,
         }
     }
 }
@@ -203,32 +202,31 @@ impl MpscServerTransport {
 #[async_trait]
 impl AcpTransport for MpscServerTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let id = RequestId::Number(id_num);
-        let (response_tx, response_rx) = oneshot::channel();
+        let pending = self.router.register()?;
+        let id = RequestId::Number(pending.id());
 
-        self.pending.lock().await.insert(id_num, response_tx);
-
-        self.server_tx
-            .send(ChannelMessage::Request {
-                id: id.clone(),
+        send_or_close(
+            &self.server_tx,
+            &self.router,
+            ChannelMessage::Request {
+                id,
                 method: method.to_string(),
                 params,
-            })
-            .map_err(|_| AcpError::new(-32603, "Transport closed"))?;
+            },
+        )?;
 
-        response_rx
-            .await
-            .map_err(|_| AcpError::new(-32603, "Request cancelled"))?
+        pending.wait().await
     }
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {
-        self.server_tx
-            .send(ChannelMessage::Notification {
+        send_or_close(
+            &self.server_tx,
+            &self.router,
+            ChannelMessage::Notification {
                 method: method.to_string(),
                 params,
-            })
-            .map_err(|_| AcpError::new(-32603, "Transport closed"))
+            },
+        )
     }
 
     async fn recv(&self) -> Option<IncomingMessage> {
@@ -240,9 +238,11 @@ impl AcpTransport for MpscServerTransport {
         id: RequestId,
         result: Result<Value, AcpError>,
     ) -> Result<(), AcpError> {
-        self.server_tx
-            .send(ChannelMessage::Response { id, result })
-            .map_err(|_| AcpError::new(-32603, "Transport closed"))
+        send_or_close(
+            &self.server_tx,
+            &self.router,
+            ChannelMessage::Response { id, result },
+        )
     }
 }
 
@@ -260,81 +260,15 @@ pub fn mpsc_transport_pair() -> (MpscClientTransport, MpscServerTransport) {
     let (client_tx, client_rx) = mpsc::unbounded_channel();
     let (server_tx, server_rx) = mpsc::unbounded_channel();
 
-    let pending = Arc::new(Mutex::new(HashMap::new()));
-    let next_id = Arc::new(AtomicI64::new(1));
+    let client_router = RequestRouter::new();
+    let server_router = client_router.clone();
 
-    let client = MpscClientTransport::new(client_tx, server_rx, pending.clone(), next_id.clone());
-    let server = MpscServerTransport::new(client_rx, server_tx, pending, next_id);
+    let client = MpscClientTransport::new(client_tx, server_rx, client_router);
+    let server = MpscServerTransport::new(client_rx, server_tx, server_router);
 
     (client, server)
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn test_request_response() {
-        let (client, server) = mpsc_transport_pair();
-
-        // Server side: echo back the params
-        let server_handle = tokio::spawn(async move {
-            if let Some(IncomingMessage::Request {
-                id,
-                method: _,
-                params,
-            }) = server.recv().await
-            {
-                let _ = server.send_response(id, Ok(params)).await;
-            }
-        });
-
-        // Client sends a request
-        let result = client
-            .send_request("test/echo", json!({"hello": "world"}))
-            .await
-            .unwrap();
-        assert_eq!(result, json!({"hello": "world"}));
-
-        server_handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_notification() {
-        let (client, server) = mpsc_transport_pair();
-
-        client
-            .send_notification("test/notify", json!({"msg": "ping"}))
-            .await
-            .unwrap();
-
-        // Server receives it
-        if let Some(IncomingMessage::Notification { method, params }) = server.recv().await {
-            assert_eq!(method, "test/notify");
-            assert_eq!(params, json!({"msg": "ping"}));
-        } else {
-            panic!("expected notification");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_bidirectional_server_notification_to_client() {
-        let (client, server) = mpsc_transport_pair();
-
-        // Server sends a notification to client
-        server
-            .send_notification("test/hello", json!({"msg": "from_server"}))
-            .await
-            .unwrap();
-
-        // Client receives it
-        if let Some(IncomingMessage::Notification { method, params }) = client.recv().await {
-            assert_eq!(method, "test/hello");
-            assert_eq!(params, json!({"msg": "from_server"}));
-        } else {
-            panic!("expected notification from server");
-        }
-    }
-}
+#[path = "mpsc_test.rs"]
+mod tests;

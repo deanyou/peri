@@ -1,3 +1,4 @@
+pub(crate) mod draft;
 pub mod edit;
 pub mod folder;
 pub mod glob;
@@ -5,7 +6,9 @@ pub mod grep;
 pub(crate) mod grep_args;
 pub(crate) mod grep_format;
 pub mod read;
+pub(crate) mod transaction;
 pub mod write;
+pub mod write_sandbox;
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +18,7 @@ pub use glob::GlobFilesTool;
 pub use grep::GrepTool;
 pub use read::ReadFileTool;
 pub use write::WriteFileTool;
+pub use write_sandbox::WriteSandboxTool;
 
 /// 统一路径解析：相对路径基于 cwd，绝对路径直接使用。
 ///
@@ -44,10 +48,30 @@ pub async fn parse_json_input(input: &str) -> serde_json::Value {
     serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()))
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::*;
-    include!("mod_test.rs");
+/// 递归扫描时跳过的目录名
+pub(crate) fn should_skip_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "node_modules"
+            | ".git"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".turbo"
+            | "coverage"
+            | ".nyc_output"
+            | "temp"
+            | ".cache"
+            | "vendor"
+            | "venv"
+            | "__pycache__"
+            | "target"
+            | "out"
+            | ".output"
+            | "worktrees"
+    )
 }
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;

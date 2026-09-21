@@ -253,6 +253,19 @@ function Main {
     # Offer to clean up old versions
     Clean-OldVersions -InstallDir $InstallDir -CurrentVersion $VersionTag
 
+    # --- Workflow dependency check ---
+    Write-Host ""
+    step "Checking workflow runner..."
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if ($nodeCmd) {
+        info "node found - bundled workflow runner is ready"
+    } else {
+        Write-Host ""
+        warn "node not found. Install Node.js for workflow and PTC support:"
+        Write-Host "    https://nodejs.org/"
+        Write-Host ""
+    }
+
     Write-Host ""
     info "Installation complete! Version: $VersionTag"
     Write-Host ""

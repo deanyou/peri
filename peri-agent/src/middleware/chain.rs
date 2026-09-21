@@ -1,19 +1,20 @@
+use crate::middleware::capabilities as hook_state;
 use crate::{
-    agent::{
-        react::{AgentOutput, Reasoning, ToolCall, ToolResult},
-        state::State,
-    },
+    agent::react::{AgentOutput, Reasoning, ToolCall, ToolResult},
     error::AgentResult,
-    middleware::r#trait::Middleware,
+    middleware::{prompt_sections::PromptSection, r#trait::Middleware},
     tools::BaseTool,
 };
 
 /// 中间件链 - 按顺序执行所有中间件
-pub struct MiddlewareChain<S: State> {
-    middlewares: Vec<Box<dyn Middleware<S>>>,
+///
+/// 所有 `run_*` 方法按生命周期接收对应的窄能力接口，MiddlewareChain 不泛型，
+/// v2 stages 可以直接持有 `MiddlewareChain` 而无需泛型参数。
+pub struct MiddlewareChain {
+    middlewares: Vec<Box<dyn Middleware>>,
 }
 
-impl<S: State> MiddlewareChain<S> {
+impl MiddlewareChain {
     pub fn new() -> Self {
         Self {
             middlewares: Vec::new(),
@@ -21,7 +22,7 @@ impl<S: State> MiddlewareChain<S> {
     }
 
     /// 添加中间件（追加到链尾）
-    pub fn add(&mut self, middleware: Box<dyn Middleware<S>>) {
+    pub fn add(&mut self, middleware: Box<dyn Middleware>) {
         self.middlewares.push(middleware);
     }
 
@@ -47,10 +48,53 @@ impl<S: State> MiddlewareChain<S> {
             .collect()
     }
 
-    /// 顺序执行 before_agent 钩子
-    pub async fn run_before_agent(&self, state: &mut S) -> AgentResult<()> {
+    /// 装配期段落收集（设计 §3.1.1 拆分持有契约 2）：收集链上全部 middleware
+    /// 持有的系统提示词段落。
+    ///
+    /// 语义边界（设计 §3.5）：middleware 仅作内容载体——收集结果由渲染面
+    /// （`PromptTemplate`）按"位置属性 + 段内序号"排序装配，**不依赖
+    /// middleware 链序**（blueprint 会变，链序不可作顺序契约）；本方法不是
+    /// `prompt_contribution`（`before_agent` 后按模型请求读取）的收集通道。
+    ///
+    /// 契约 3（gate 原子迁移）：收集到的段落即持有者已装配（gate 开启）；
+    /// 契约 4（运行时缺失防御）：middleware 未提供段落（默认空）不 fail。
+    pub fn collect_prompt_sections(&self) -> Vec<PromptSection> {
+        self.middlewares
+            .iter()
+            .flat_map(|m| m.prompt_sections())
+            .collect()
+    }
+
+    /// 首批按中间件顺序执行初始化与输入准备，后续初始化可见前面的附件转换。
+    pub async fn run_before_agent(
+        &self,
+        state: &mut dyn hook_state::BeforeAgentState,
+    ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.before_agent(state).await?;
+            middleware.before_input(state).await?;
+        }
+        Ok(())
+    }
+
+    /// 后续输入批次仅执行输入准备，不重复 Agent 初始化。
+    pub async fn run_before_input(
+        &self,
+        state: &mut dyn hook_state::BeforeInputState,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.before_input(state).await?;
+        }
+        Ok(())
+    }
+
+    /// 顺序执行 Reason 工具目录刷新钩子。
+    pub async fn run_before_reason_catalog(
+        &self,
+        state: &mut dyn hook_state::CatalogState,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.before_reason_catalog(state).await?;
         }
         Ok(())
     }
@@ -58,7 +102,7 @@ impl<S: State> MiddlewareChain<S> {
     /// 顺序执行 before_tool 钩子（每个中间件可修改 tool_call）
     pub async fn run_before_tool(
         &self,
-        state: &mut S,
+        state: &mut dyn hook_state::BeforeToolState,
         tool_call: ToolCall,
     ) -> AgentResult<ToolCall> {
         let mut current = tool_call;
@@ -78,7 +122,7 @@ impl<S: State> MiddlewareChain<S> {
     /// 链式处理中断，后续中间件不再执行，其余位置填充相同错误。
     pub async fn run_before_tools_batch(
         &self,
-        state: &mut S,
+        state: &mut dyn hook_state::BeforeToolState,
         calls: Vec<ToolCall>,
     ) -> Vec<AgentResult<ToolCall>> {
         let mut results: Vec<AgentResult<ToolCall>> = calls.into_iter().map(Ok).collect();
@@ -111,7 +155,7 @@ impl<S: State> MiddlewareChain<S> {
     /// 顺序执行 after_tool 钩子
     pub async fn run_after_tool(
         &self,
-        state: &mut S,
+        state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         result: &ToolResult,
     ) -> AgentResult<()> {
@@ -121,11 +165,29 @@ impl<S: State> MiddlewareChain<S> {
         Ok(())
     }
 
+    /// 顺序执行 after_tools_batch 钩子
+    ///
+    /// 在一批并行工具调用全部完成并写入 state 后触发。
+    /// 每个中间件按注册顺序依次执行，遇错即停。
+    pub async fn run_after_tools_batch(
+        &self,
+        state: &mut dyn hook_state::StateView,
+        results: &[(ToolCall, ToolResult)],
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.after_tools_batch(state, results).await?;
+        }
+        Ok(())
+    }
+
     /// 顺序执行 before_model 钩子
     ///
     /// 在每个 ReAct step 的 LLM 调用前执行。
     /// 遇错即停——后续中间件不执行，错误向上传播。
-    pub async fn run_before_model(&self, state: &mut S) -> AgentResult<()> {
+    pub async fn run_before_model(
+        &self,
+        state: &mut dyn hook_state::BeforeModelState,
+    ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.before_model(state).await?;
         }
@@ -137,7 +199,11 @@ impl<S: State> MiddlewareChain<S> {
     /// 在 LLM 调用返回后、工具分发或最终答案处理前执行。
     /// 传入完整的 `Reasoning`（思考文本、工具调用、最终答案）供中间件检查。
     /// 遇错即停。
-    pub async fn run_after_model(&self, state: &mut S, reasoning: &Reasoning) -> AgentResult<()> {
+    pub async fn run_after_model(
+        &self,
+        state: &mut dyn hook_state::StateView,
+        reasoning: &Reasoning,
+    ) -> AgentResult<()> {
         for middleware in &self.middlewares {
             middleware.after_model(state, reasoning).await?;
         }
@@ -147,7 +213,7 @@ impl<S: State> MiddlewareChain<S> {
     /// 顺序执行 after_agent 钩子（每个中间件可修改 output）
     pub async fn run_after_agent(
         &self,
-        state: &mut S,
+        state: &mut dyn hook_state::AfterAgentState,
         output: AgentOutput,
     ) -> AgentResult<AgentOutput> {
         let mut current = output;
@@ -160,7 +226,7 @@ impl<S: State> MiddlewareChain<S> {
     /// 顺序执行 on_error 钩子
     pub async fn run_on_error(
         &self,
-        state: &mut S,
+        state: &mut dyn hook_state::StateView,
         error: &crate::error::AgentError,
     ) -> AgentResult<()> {
         for middleware in &self.middlewares {
@@ -168,26 +234,174 @@ impl<S: State> MiddlewareChain<S> {
         }
         Ok(())
     }
+
+    // ── Session 生命周期 ──
+
+    /// 顺序执行 on_session_start 钩子
+    pub async fn run_on_session_start(
+        &self,
+        state: &mut dyn hook_state::StateView,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.on_session_start(state).await?;
+        }
+        Ok(())
+    }
+
+    /// 顺序执行 on_session_end 钩子
+    pub async fn run_on_session_end(
+        &self,
+        state: &mut dyn hook_state::StateView,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.on_session_end(state).await?;
+        }
+        Ok(())
+    }
+
+    // ── 用户输入 ──
+
+    /// 顺序执行 on_user_prompt 钩子
+    pub async fn run_on_user_prompt(
+        &self,
+        state: &mut dyn hook_state::StateView,
+        prompt: &str,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.on_user_prompt(state, prompt).await?;
+        }
+        Ok(())
+    }
+
+    /// 顺序收集 first_turn_reminder 钩子的非空贡献（首轮用户 turn 一次性通知）。
+    ///
+    /// 顺序执行所有中间件；任一返回 Err 即中断（与其余 run_* 一致）。
+    /// 返回按链序收集的非空文本列表（`None`/空串跳过）。
+    pub async fn run_first_turn_reminders(
+        &self,
+        state: &mut dyn hook_state::QueueState,
+    ) -> AgentResult<Vec<String>> {
+        let mut out = Vec::new();
+        for middleware in &self.middlewares {
+            if let Some(text) = middleware.first_turn_reminder(state).await? {
+                if !text.trim().is_empty() {
+                    out.push(text);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    // ── Compact ──
+
+    /// 顺序执行 before_compact 钩子
+    pub async fn run_before_compact(
+        &self,
+        state: &mut dyn hook_state::StateView,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.before_compact(state).await?;
+        }
+        Ok(())
+    }
+
+    /// 顺序执行 after_compact 钩子
+    pub async fn run_after_compact(
+        &self,
+        state: &mut dyn hook_state::StateView,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.after_compact(state).await?;
+        }
+        Ok(())
+    }
+
+    // ── 权限审批 ──
+
+    /// 顺序执行 on_permission_request 钩子（观测层）
+    pub async fn run_on_permission_request(
+        &self,
+        state: &mut dyn hook_state::StateView,
+        request: &crate::hitl::BatchItem,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.on_permission_request(state, request).await?;
+        }
+        Ok(())
+    }
+
+    // ── SubAgent 生命周期 ──
+
+    /// 顺序执行 on_subagent_start 钩子（观测层）
+    pub async fn run_on_subagent_start(
+        &self,
+        state: &mut dyn hook_state::StateView,
+        agent_id: &str,
+        name: &str,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.on_subagent_start(state, agent_id, name).await?;
+        }
+        Ok(())
+    }
+
+    /// 顺序执行 on_subagent_stop 钩子（观测层）
+    pub async fn run_on_subagent_stop(
+        &self,
+        state: &mut dyn hook_state::StateView,
+        agent_id: &str,
+        reason: &str,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.on_subagent_stop(state, agent_id, reason).await?;
+        }
+        Ok(())
+    }
+
+    // ── Turn 结束 ──
+
+    /// 顺序执行 on_turn_end 钩子
+    pub async fn run_on_turn_end(&self, state: &mut dyn hook_state::StateView) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.on_turn_end(state).await?;
+        }
+        Ok(())
+    }
+
+    // ── 通知 ──
+
+    /// 顺序执行 on_notification 钩子
+    pub async fn run_on_notification(
+        &self,
+        state: &mut dyn hook_state::StateView,
+        message: &str,
+    ) -> AgentResult<()> {
+        for middleware in &self.middlewares {
+            middleware.on_notification(state, message).await?;
+        }
+        Ok(())
+    }
+
+    // ── 声明式 Prompt 贡献 ──
+
+    /// 收集所有中间件当前的 prompt_contribution，顺序拼接为单个 String。
+    ///
+    /// 主 Agent bridge 在 `before_agent` 后构造每个 `ModelRequest` 时调用一次；
+    /// 只有返回 `Some` 的中间件会被包含，各段之间直接拼接（调用方负责分隔符）。
+    pub fn collect_prompt_contributions(&self) -> String {
+        self.middlewares
+            .iter()
+            .filter_map(|m| m.prompt_contribution())
+            .collect()
+    }
 }
 
-impl<S: State> Default for MiddlewareChain<S> {
+impl Default for MiddlewareChain {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
-
-    use super::*;
-    use crate::{
-        agent::state::AgentState,
-        error::{AgentError, AgentResult},
-        messages::{BaseMessage, ContentBlock, MessageId},
-        middleware::r#trait::{Middleware, NoopMiddleware},
-    };
-    include!("chain_test.rs");
-}
+#[path = "chain_test.rs"]
+mod tests;

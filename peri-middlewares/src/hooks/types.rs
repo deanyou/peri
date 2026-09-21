@@ -1,160 +1,9 @@
-use std::{collections::HashMap, path::PathBuf};
-
 use serde::{Deserialize, Serialize};
 
-/// 生命周期事件
-///
-/// 对齐 Claude Code hooks.json 中的 key 名（PascalCase）。
-/// `Unknown` 变体用于兼容 settings.local.json 中尚未实现的事件。
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub enum HookEvent {
-    PreToolUse,
-    PostToolUse,
-    PostToolUseFailure,
-    PermissionRequest,
-    UserPromptSubmit,
-    SessionStart,
-    SessionEnd,
-    Stop,
-    StopFailure,
-    SubagentStart,
-    SubagentStop,
-    PreCompact,
-    PostCompact,
-    /// Agent 等待用户输入时触发（PermissionRequest / Stop 后）
-    Notification,
-    /// settings.local.json 中尚未实现的事件（如 Setup 等）
-    Unknown(String),
-}
-
-impl Serialize for HookEvent {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            HookEvent::PreToolUse => serializer.serialize_str("PreToolUse"),
-            HookEvent::PostToolUse => serializer.serialize_str("PostToolUse"),
-            HookEvent::PostToolUseFailure => serializer.serialize_str("PostToolUseFailure"),
-            HookEvent::PermissionRequest => serializer.serialize_str("PermissionRequest"),
-            HookEvent::UserPromptSubmit => serializer.serialize_str("UserPromptSubmit"),
-            HookEvent::SessionStart => serializer.serialize_str("SessionStart"),
-            HookEvent::SessionEnd => serializer.serialize_str("SessionEnd"),
-            HookEvent::Stop => serializer.serialize_str("Stop"),
-            HookEvent::StopFailure => serializer.serialize_str("StopFailure"),
-            HookEvent::SubagentStart => serializer.serialize_str("SubagentStart"),
-            HookEvent::SubagentStop => serializer.serialize_str("SubagentStop"),
-            HookEvent::PreCompact => serializer.serialize_str("PreCompact"),
-            HookEvent::PostCompact => serializer.serialize_str("PostCompact"),
-            HookEvent::Notification => serializer.serialize_str("Notification"),
-            HookEvent::Unknown(s) => serializer.serialize_str(s),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for HookEvent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Ok(match s.as_str() {
-            "PreToolUse" => HookEvent::PreToolUse,
-            "PostToolUse" => HookEvent::PostToolUse,
-            "PostToolUseFailure" => HookEvent::PostToolUseFailure,
-            "PermissionRequest" => HookEvent::PermissionRequest,
-            "UserPromptSubmit" => HookEvent::UserPromptSubmit,
-            "SessionStart" => HookEvent::SessionStart,
-            "SessionEnd" => HookEvent::SessionEnd,
-            "Stop" => HookEvent::Stop,
-            "StopFailure" => HookEvent::StopFailure,
-            "SubagentStart" => HookEvent::SubagentStart,
-            "SubagentStop" => HookEvent::SubagentStop,
-            "PreCompact" => HookEvent::PreCompact,
-            "PostCompact" => HookEvent::PostCompact,
-            "Notification" => HookEvent::Notification,
-            other => HookEvent::Unknown(other.to_string()),
-        })
-    }
-}
-
-/// 4 种 hook 执行类型，对齐 Claude Code schemas/hooks.ts
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum HookType {
-    /// Shell 命令执行 (bash/powershell)
-    Command {
-        command: String,
-        #[serde(default)]
-        shell: Option<String>,
-        #[serde(default)]
-        timeout: Option<u64>,
-        #[serde(default)]
-        status_message: Option<String>,
-        #[serde(default)]
-        once: bool,
-        #[serde(rename = "async", default)]
-        async_run: bool,
-        #[serde(rename = "asyncRewake", default)]
-        async_rewake: bool,
-        /// 粗粒度匹配器（字符串/正则），见"matcher vs if"章节
-        #[serde(default)]
-        matcher: Option<String>,
-        /// 细粒度条件匹配（permission rule 语法），见"matcher vs if"章节
-        #[serde(rename = "if", default)]
-        condition: Option<String>,
-    },
-    /// LLM 提示词评估
-    Prompt {
-        prompt: String,
-        #[serde(default)]
-        timeout: Option<u64>,
-        #[serde(default)]
-        model: Option<String>,
-        #[serde(default)]
-        status_message: Option<String>,
-        #[serde(default)]
-        once: bool,
-        #[serde(default)]
-        matcher: Option<String>,
-        #[serde(rename = "if", default)]
-        condition: Option<String>,
-    },
-    /// HTTP POST
-    Http {
-        url: String,
-        #[serde(default)]
-        timeout: Option<u64>,
-        #[serde(default)]
-        headers: HashMap<String, String>,
-        #[serde(default)]
-        allowed_env_vars: Vec<String>,
-        #[serde(default)]
-        status_message: Option<String>,
-        #[serde(default)]
-        once: bool,
-        #[serde(default)]
-        matcher: Option<String>,
-        #[serde(rename = "if", default)]
-        condition: Option<String>,
-    },
-    /// 子 Agent 执行（完整 agent 循环，最多 50 轮）
-    Agent {
-        prompt: String,
-        #[serde(default)]
-        timeout: Option<u64>,
-        #[serde(default)]
-        model: Option<String>,
-        #[serde(default)]
-        status_message: Option<String>,
-        #[serde(default)]
-        once: bool,
-        #[serde(default)]
-        matcher: Option<String>,
-        #[serde(rename = "if", default)]
-        condition: Option<String>,
-    },
-}
+// 3.0 批 2 波 1：协议类型归契约层（定义见 `peri_acp_types::hooks`）。
+// `HookEvent` / `HookType` / `HookMatchRule` / `HooksConfig` / `RegisteredHook`
+// 自本文件迁出；本模块保留 re-export 保兼容。
+pub use peri_acp_types::hooks::{HookEvent, HookMatchRule, HookType, HooksConfig, RegisteredHook};
 
 /// Hook 执行输入——通过 stdin JSON 传递给 command hook，或作为 HTTP body
 ///
@@ -216,6 +65,12 @@ pub struct HookInput {
     /// 压缩前的消息数量
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_count: Option<usize>,
+
+    // === 通用扩展字段（P1-5 新增）===
+    /// 事件特定数据，避免 struct 字段膨胀。
+    /// 不同事件通过此字段携带额外上下文（如 CwdChanged 的 old_cwd/new_cwd）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_data: Option<serde_json::Value>,
 }
 
 /// Hook 执行结果——对齐 Claude Code src/types/hooks.ts syncHookResponseSchema
@@ -325,91 +180,6 @@ pub enum HookAction {
     InitialUserMessage { message: String },
 }
 
-/// hooks.json 中单个 hook 规则组
-///
-/// 对齐 Claude Code hooks schema：
-/// - matcher: 粗粒度匹配器（工具名/正则），在进程启动前过滤
-/// - hooks: 该规则组下的所有 hook 定义
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HookMatchRule {
-    /// 粗粒度匹配器（见"matcher vs if"章节）
-    #[serde(default)]
-    pub matcher: Option<String>,
-    pub hooks: Vec<HookType>,
-}
-
-/// 插件的完整 hooks 配置
-pub type HooksConfig = HashMap<HookEvent, Vec<HookMatchRule>>;
-
-/// 已注册到 HookMiddleware 的 hook（带插件上下文）
-#[derive(Debug, Clone)]
-pub struct RegisteredHook {
-    pub hook: HookType,
-    pub event: HookEvent,
-    /// 粗粒度匹配器（来自 HookMatchRule.matcher 或 HookType 内 matcher 字段）
-    pub matcher: Option<String>,
-    pub plugin_name: String,
-    pub plugin_id: String,
-    pub plugin_root: PathBuf,
-    pub plugin_data_dir: PathBuf,
-    /// 插件选项（userConfig 值，用于 CLAUDE_PLUGIN_OPTION_* 环境变量）
-    pub plugin_options: HashMap<String, serde_json::Value>,
-}
-
-// === HookType getter 辅助方法 ===
-
-impl HookType {
-    /// 返回各变体的 matcher 字段
-    pub fn get_matcher(&self) -> Option<&String> {
-        match self {
-            HookType::Command { matcher, .. } => matcher.as_ref(),
-            HookType::Prompt { matcher, .. } => matcher.as_ref(),
-            HookType::Http { matcher, .. } => matcher.as_ref(),
-            HookType::Agent { matcher, .. } => matcher.as_ref(),
-        }
-    }
-
-    /// 返回各变体的 condition 字段
-    pub fn get_condition(&self) -> Option<&String> {
-        match self {
-            HookType::Command { condition, .. } => condition.as_ref(),
-            HookType::Prompt { condition, .. } => condition.as_ref(),
-            HookType::Http { condition, .. } => condition.as_ref(),
-            HookType::Agent { condition, .. } => condition.as_ref(),
-        }
-    }
-
-    /// 返回 once 标志，Command 有 once 字段，其他类型默认 false
-    pub fn is_once(&self) -> bool {
-        match self {
-            HookType::Command { once, .. } => *once,
-            HookType::Prompt { once, .. } => *once,
-            HookType::Http { once, .. } => *once,
-            HookType::Agent { once, .. } => *once,
-        }
-    }
-
-    /// 返回 async 标志，仅 Command 有 async_run 字段，其他类型默认 false
-    pub fn is_async(&self) -> bool {
-        match self {
-            HookType::Command { async_run, .. } => *async_run,
-            HookType::Prompt { .. } => false,
-            HookType::Http { .. } => false,
-            HookType::Agent { .. } => false,
-        }
-    }
-
-    /// 返回 statusMessage 字段——hook 执行期间展示给用户的状态提示
-    pub fn get_status_message(&self) -> Option<&String> {
-        match self {
-            HookType::Command { status_message, .. } => status_message.as_ref(),
-            HookType::Prompt { status_message, .. } => status_message.as_ref(),
-            HookType::Http { status_message, .. } => status_message.as_ref(),
-            HookType::Agent { status_message, .. } => status_message.as_ref(),
-        }
-    }
-}
-
 // === HookInput 构造函数（按事件类型）===
 
 impl HookInput {
@@ -438,6 +208,7 @@ impl HookInput {
             subagent_name: None,
             subagent_result: None,
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -468,6 +239,7 @@ impl HookInput {
             subagent_name: None,
             subagent_result: None,
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -504,6 +276,7 @@ impl HookInput {
             subagent_name: None,
             subagent_result: None,
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -531,6 +304,7 @@ impl HookInput {
             subagent_name: None,
             subagent_result: None,
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -558,6 +332,7 @@ impl HookInput {
             subagent_name: Some(subagent_name.to_string()),
             subagent_result: None,
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -586,6 +361,7 @@ impl HookInput {
             subagent_name: Some(subagent_name.to_string()),
             subagent_result: Some(result.to_string()),
             message_count: None,
+            additional_data: None,
         }
     }
 
@@ -614,6 +390,7 @@ impl HookInput {
             subagent_name: None,
             subagent_result: None,
             message_count: Some(message_count),
+            additional_data: None,
         }
     }
 }

@@ -4,27 +4,20 @@
 //! Background pump task dispatches Response messages to the pending request map,
 //! forwards Requests/Notifications to the incoming channel.
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicI64, Ordering},
-        Arc,
-    },
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
-    sync::{mpsc, oneshot, Mutex},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
+    sync::{mpsc, Mutex},
 };
 
 use super::{
+    router::{transport_closed_error, RequestRouter},
     types::{AcpError, IncomingMessage, RequestId},
     AcpTransport,
 };
-
-type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, AcpError>>>>>;
 
 /// JSON-RPC 2.0 envelope for (de)serialization over stdio.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -42,6 +35,10 @@ struct JsonRpcEnvelope {
     error: Option<AcpError>,
 }
 
+/// legacy `{"type":"cancel"}` 行拦截回调（批 3 §7 #10 移植；pump 逐行精确
+/// trim 匹配后调用，host 侧实现遍历全部 session 的 cancel_token）。
+pub type CancelHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Stdio-based ACP transport.
 ///
 /// Communicates with an external client (IDE) over stdin/stdout using
@@ -50,9 +47,13 @@ struct JsonRpcEnvelope {
 /// requests/notifications to the `recv()` channel.
 pub struct StdioTransport {
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<IncomingMessage>>,
-    pending: PendingMap,
-    next_id: Arc<AtomicI64>,
-    writer: Arc<Mutex<BufWriter<tokio::io::Stdout>>>,
+    router: RequestRouter,
+    writer: Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
+    /// legacy `{"type":"cancel"}` 逐行拦截回调（全 session 兜底中断，移植自
+    /// `host/stdio/transport.rs::cancel_debug_hook`，批 3 §7 #10）。pump 读到
+    /// 原始行为该 JSON（精确 trim 匹配）时调用之；消费后不产生 IncomingMessage。
+    /// `None` = 不拦截（type:cancel 行按非 JSON 行静默跳过，pump 解析不中断）。
+    cancel_hook: Arc<std::sync::Mutex<Option<CancelHook>>>,
 }
 
 impl Default for StdioTransport {
@@ -64,24 +65,136 @@ impl Default for StdioTransport {
 impl StdioTransport {
     /// Create a new stdio transport. Must be called within a tokio runtime.
     pub fn new() -> Self {
+        Self::from_reader_writer(tokio::io::stdin(), tokio::io::stdout())
+    }
+
+    /// 注入 legacy `{"type":"cancel"}` 拦截回调（构造后可调用；pump 在遇到
+    /// type:cancel 行时经由共享槽位读取，构造完成后写入的 hook 同样生效）。
+    ///
+    /// 语义（批 3 §7 #10，与标准 `session/cancel` 并存）：type:cancel 是无
+    /// sessionId 的全 session 兜底中断——host 侧回调负责遍历全部 SessionState
+    /// 对所有 `cancel_token.cancel()`。标准 `session/cancel`（按 sessionId +
+    /// writer lease + continuation 武装）行为不受影响。
+    pub fn with_cancel_hook(self, hook: Option<CancelHook>) -> Self {
+        *self.cancel_hook.lock().unwrap() = hook;
+        self
+    }
+
+    /// Create a transport reading from `reader` and writing to `writer`.
+    ///
+    /// `new()`/`Default` 行为不变（进程 stdin/stdout）；本构造器仅注入
+    /// reader/writer 以便集成测试驱动（可测性重构，批 0）。pump 语义与
+    /// `new()` 完全一致：逐行解析 stdin、响应按 id 分派到 router、其余消息
+    /// 转发到 `recv()` 通道；reader EOF 后 pump 退出（通道关闭 → `recv()`
+    /// 返回 `None`）。
+    pub fn from_reader_writer<R, W>(reader: R, writer: W) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::from_reader_writer_with_cancel_hook(reader, writer, None)
+    }
+
+    /// 同 [`from_reader_writer`]，另注入 legacy `{"type":"cancel"}` 拦截回调
+    /// （等价构造期注入；`with_cancel_hook` 亦可事后设置）。
+    pub fn from_reader_writer_with_cancel_hook<R, W>(
+        reader: R,
+        writer: W,
+        cancel_hook: Option<CancelHook>,
+    ) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let pending_clone = pending.clone();
+        let router = RequestRouter::new();
+        let pump_router = router.clone();
+        let writer: Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>> =
+            Arc::new(Mutex::new(BufWriter::new(Box::new(writer))));
+        let pump_writer = Arc::clone(&writer);
+        let cancel_hook = Arc::new(std::sync::Mutex::new(cancel_hook));
+        let pump_cancel_hook = Arc::clone(&cancel_hook);
 
         // Background pump: read stdin → dispatch responses / forward messages
         tokio::spawn(async move {
-            let stdin = BufReader::new(tokio::io::stdin());
-            let mut lines = stdin.lines();
+            let mut lines = BufReader::new(reader).lines();
 
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                let next_line = tokio::select! {
+                    result = lines.next_line() => Some(result),
+                    () = pump_router.wait_closed() => None,
+                };
+                let Some(next_line) = next_line else {
+                    break;
+                };
+                let line = match next_line {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(%error, "Stdio transport: stdin read failed");
+                        break;
+                    }
+                };
                 if line.is_empty() {
                     continue;
                 }
 
-                let mut envelope: JsonRpcEnvelope = match serde_json::from_str(&line) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to parse JSON-RPC from stdin");
+                // legacy `{"type":"cancel"}` 兜底中断（非 JSON-RPC 行）：
+                // 在 JSON parse 失败分支之前拦截——精确 trim 匹配（与迁移前
+                // `host/stdio/transport.rs::cancel_debug_hook` 一致）。hook
+                // 消费该行后不产生 IncomingMessage；未注入 hook 时该行静默
+                // 跳过（不误报 invalid JSON），其余非法行仍走 error 日志跳过。
+                if line.trim() == r#"{"type":"cancel"}"# {
+                    let hook = { pump_cancel_hook.lock().unwrap().clone() };
+                    if let Some(hook) = hook {
+                        let raw = line.clone();
+                        hook(&raw);
+                    } else {
+                        tracing::debug!("type:cancel line ignored (no cancel hook installed)");
+                    }
+                    continue;
+                }
+
+                let raw: Value = match serde_json::from_str(&line) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "Stdio transport: malformed JSON-RPC input");
+                        if send_protocol_error(
+                            &pump_writer,
+                            &pump_router,
+                            Value::Null,
+                            -32700,
+                            "Parse error",
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let invalid_id = raw
+                    .get("id")
+                    .filter(|id| is_domain_id(id))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let mut envelope: JsonRpcEnvelope = match serde_json::from_value(raw) {
+                    Ok(envelope) => envelope,
+                    Err(error) => {
+                        tracing::warn!(%error, "Stdio transport: invalid JSON-RPC envelope");
+                        if send_protocol_error(
+                            &pump_writer,
+                            &pump_router,
+                            invalid_id,
+                            -32600,
+                            "Invalid Request",
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -90,46 +203,111 @@ impl StdioTransport {
                 let result_val = envelope.result.take();
                 let error_val = envelope.error.take();
 
-                match (envelope.id, has_method) {
+                if envelope.jsonrpc != "2.0"
+                    || (has_method && (result_val.is_some() || error_val.is_some()))
+                    || (!has_method && result_val.is_some() == error_val.is_some())
+                {
+                    let id = envelope
+                        .id
+                        .as_ref()
+                        .filter(|id| is_domain_id(id))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    if send_protocol_error(
+                        &pump_writer,
+                        &pump_router,
+                        id,
+                        -32600,
+                        "Invalid Request",
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                // JSON-RPC 2.0 §2.2：Request 的 id 成员存在但为 null 时视为
+                // 通知（客户端无兴趣于对应响应，等同「无 id」）——进入
+                // `(None, true)` 通知分支，而非压 0 成请求（决策点 7 收口）。
+                let id = match envelope.id {
+                    Some(Value::Null) if has_method => None,
+                    id => id,
+                };
+
+                match (id, has_method) {
                     // Response to a server-initiated request (has id, no method)
                     (Some(id), false) => {
-                        if let Some(num_id) = id.as_i64() {
-                            if let Some(tx) = pending_clone.lock().await.remove(&num_id) {
-                                let result = if let Some(error) = error_val {
-                                    Err(error)
-                                } else {
-                                    Ok(result_val.unwrap_or(Value::Null))
-                                };
-                                let _ = tx.send(result);
-                                continue;
-                            }
+                        if !is_domain_id(&id) {
+                            // 域外 id（小数/u64 溢出 i64/null/bool 等）→ 协议
+                            // 违规：拒绝该行（warn + 丢弃，pump 不中断；与非法
+                            // JSON 行处理语义一致）。不压 0 转发——压 0 会把合法
+                            // id 0 与域外 id 混淆，router 配对/宿主
+                            // `send_response(0, ...)` 将响错对象（决策点 7）。
+                            tracing::warn!(
+                                id = %id,
+                                "Ignoring JSON-RPC response with out-of-domain id"
+                            );
+                            continue;
                         }
-                        // Unmatched response — forward to recv()
                         let req_id = value_to_request_id(&id);
                         let result = if let Some(error) = error_val {
                             Err(error)
                         } else {
                             Ok(result_val.unwrap_or(Value::Null))
                         };
-                        let _ = incoming_tx.send(IncomingMessage::Response { id: req_id, result });
+                        let msg = IncomingMessage::Response { id: req_id, result };
+                        if !pump_router.dispatch(&msg) && incoming_tx.send(msg).is_err() {
+                            break;
+                        }
                     }
                     // Request (has id + method)
                     (Some(id), true) => {
+                        if !is_domain_id(&id) {
+                            tracing::warn!(
+                                id = %id,
+                                "Rejecting JSON-RPC request with out-of-domain id"
+                            );
+                            if send_protocol_error(
+                                &pump_writer,
+                                &pump_router,
+                                Value::Null,
+                                -32600,
+                                "Invalid Request",
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
                         let method = envelope.method.unwrap();
                         let req_id = value_to_request_id(&id);
-                        let _ = incoming_tx.send(IncomingMessage::Request {
-                            id: req_id,
-                            method,
-                            params: envelope.params.unwrap_or(Value::Null),
-                        });
+                        if incoming_tx
+                            .send(IncomingMessage::Request {
+                                id: req_id,
+                                method,
+                                params: envelope.params.unwrap_or(Value::Null),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                     // Notification (no id, has method)
                     (None, true) => {
                         let method = envelope.method.unwrap();
-                        let _ = incoming_tx.send(IncomingMessage::Notification {
-                            method,
-                            params: envelope.params.unwrap_or(Value::Null),
-                        });
+                        if incoming_tx
+                            .send(IncomingMessage::Notification {
+                                method,
+                                params: envelope.params.unwrap_or(Value::Null),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                     _ => {
                         tracing::warn!("Unhandled JSON-RPC message structure, ignoring");
@@ -137,14 +315,15 @@ impl StdioTransport {
                 }
             }
 
-            tracing::info!("Stdio transport: stdin closed");
+            pump_router.close();
+            tracing::info!("Stdio transport closed");
         });
 
         Self {
             incoming_rx: tokio::sync::Mutex::new(incoming_rx),
-            pending,
-            next_id: Arc::new(AtomicI64::new(1)),
-            writer: Arc::new(Mutex::new(BufWriter::new(tokio::io::stdout()))),
+            router,
+            writer,
+            cancel_hook,
         }
     }
 }
@@ -152,24 +331,19 @@ impl StdioTransport {
 #[async_trait]
 impl AcpTransport for StdioTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (response_tx, response_rx) = oneshot::channel();
-
-        self.pending.lock().await.insert(id_num, response_tx);
+        let pending = self.router.register()?;
 
         let envelope = JsonRpcEnvelope {
             jsonrpc: "2.0".to_string(),
-            id: Some(Value::Number(id_num.into())),
+            id: Some(Value::Number(pending.id().into())),
             method: Some(method.to_string()),
             params: Some(params),
             result: None,
             error: None,
         };
-        write_envelope(&self.writer, &envelope).await?;
+        write_envelope(&self.writer, &self.router, &envelope).await?;
 
-        response_rx
-            .await
-            .map_err(|_| AcpError::new(-32603, "Request cancelled (client disconnected)"))?
+        pending.wait().await
     }
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), AcpError> {
@@ -181,7 +355,7 @@ impl AcpTransport for StdioTransport {
             result: None,
             error: None,
         };
-        write_envelope(&self.writer, &envelope).await
+        write_envelope(&self.writer, &self.router, &envelope).await
     }
 
     async fn recv(&self) -> Option<IncomingMessage> {
@@ -204,7 +378,7 @@ impl AcpTransport for StdioTransport {
                     result: Some(value),
                     error: None,
                 };
-                write_envelope(&self.writer, &envelope).await
+                write_envelope(&self.writer, &self.router, &envelope).await
             }
             Err(error) => {
                 let envelope = JsonRpcEnvelope {
@@ -215,7 +389,7 @@ impl AcpTransport for StdioTransport {
                     result: None,
                     error: Some(error),
                 };
-                write_envelope(&self.writer, &envelope).await
+                write_envelope(&self.writer, &self.router, &envelope).await
             }
         }
     }
@@ -223,26 +397,74 @@ impl AcpTransport for StdioTransport {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+async fn send_protocol_error(
+    writer: &Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
+    router: &RequestRouter,
+    id: Value,
+    code: i64,
+    message: &'static str,
+) -> Result<(), AcpError> {
+    let envelope = JsonRpcEnvelope {
+        jsonrpc: "2.0".to_string(),
+        id: Some(id),
+        method: None,
+        params: None,
+        result: None,
+        error: Some(AcpError::new(code, message)),
+    };
+    write_envelope(writer, router, &envelope).await
+}
+
 async fn write_envelope(
-    writer: &Arc<Mutex<BufWriter<tokio::io::Stdout>>>,
+    writer: &Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
+    router: &RequestRouter,
     envelope: &JsonRpcEnvelope,
 ) -> Result<(), AcpError> {
+    router.ensure_open()?;
     let mut line = serde_json::to_string(envelope)
         .map_err(|e| AcpError::new(-32603, format!("Serialize failed: {e}")))?;
     line.push('\n');
-    let mut guard = writer.lock().await;
-    guard
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|e| AcpError::new(-32603, format!("Write failed: {e}")))?;
-    guard
-        .flush()
-        .await
-        .map_err(|e| AcpError::new(-32603, format!("Flush failed: {e}")))?;
-    Ok(())
+    let writer_operation = async {
+        let mut guard = writer.lock().await;
+        guard
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| AcpError::new(-32603, format!("Write failed: {e}")))?;
+        guard
+            .flush()
+            .await
+            .map_err(|e| AcpError::new(-32603, format!("Flush failed: {e}")))?;
+        Ok(())
+    };
+
+    tokio::select! {
+        biased;
+        result = writer_operation => match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                router.close();
+                Err(error)
+            }
+        },
+        () = router.wait_closed() => Err(transport_closed_error()),
+    }
+}
+
+/// JSON-RPC 2.0 id 域校验（决策点 7 收口）：合法 id 仅 String 或整数
+/// Number（§2.2：Number 不应含小数，脚注 2）。`null` 由 pump 按通知语义
+/// 单独处理（§2.2：id 为 null 的 Request 视为通知）；布尔/小数/u64 溢出
+/// i64/数组等一律视为域外（协议违规 → pump 拒绝该消息，不压 0 转发）。
+fn is_domain_id(v: &Value) -> bool {
+    match v {
+        Value::String(_) => true,
+        Value::Number(n) => n.as_i64().is_some(),
+        _ => false,
+    }
 }
 
 fn value_to_request_id(v: &Value) -> RequestId {
+    // 调用方（pump）已做 `is_domain_id` 校验，此处仅处理域内值；压 0 分支
+    // 为防御性兜底（正常不可达）。
     match v {
         Value::String(s) => RequestId::String(s.clone()),
         Value::Number(n) => RequestId::Number(n.as_i64().unwrap_or(0)),
@@ -258,42 +480,5 @@ fn request_id_to_value(id: &RequestId) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_envelope_roundtrip_response() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#;
-        let envelope: JsonRpcEnvelope = serde_json::from_str(json).unwrap();
-        assert_eq!(envelope.jsonrpc, "2.0");
-        assert_eq!(envelope.id, Some(Value::Number(1.into())));
-        assert!(envelope.result.is_some());
-        assert!(envelope.error.is_none());
-        let back = serde_json::to_string(&envelope).unwrap();
-        assert!(back.contains("\"result\""));
-    }
-
-    #[test]
-    fn test_envelope_roundtrip_request() {
-        let json = r#"{"jsonrpc":"2.0","id":42,"method":"session/prompt","params":{"msg":"hi"}}"#;
-        let envelope: JsonRpcEnvelope = serde_json::from_str(json).unwrap();
-        assert_eq!(envelope.method.as_deref(), Some("session/prompt"));
-    }
-
-    #[test]
-    fn test_envelope_roundtrip_notification() {
-        let json = r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"session_id":"s1"}}"#;
-        let envelope: JsonRpcEnvelope = serde_json::from_str(json).unwrap();
-        assert!(envelope.id.is_none());
-        assert_eq!(envelope.method.as_deref(), Some("session/cancel"));
-    }
-
-    #[test]
-    fn test_request_id_conversion() {
-        let v = Value::Number(42.into());
-        let id = value_to_request_id(&v);
-        assert_eq!(id, RequestId::Number(42));
-        let back = request_id_to_value(&id);
-        assert_eq!(back, v);
-    }
-}
+#[path = "stdio_test.rs"]
+mod tests;

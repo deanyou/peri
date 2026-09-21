@@ -1,66 +1,31 @@
-//! CommandRegistry 和 ClearCommand 单元测试。
+//! 命令模块测试：register_builtins 集成（注册表语义本体在契约层
+//! `command_registry_test.rs`，本文件不再重复 Vec 时代的前缀匹配 / list 用例）
+//! + ClearCommand 行为测试。
 
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use peri_agent::agent::events::AgentEvent as ExecutorEvent;
-use peri_agent::messages::BaseMessage;
+use peri_acp_types::command::ArgsSchema;
+use peri_acp_types::event::ExecutorEvent;
+use peri_acp_types::messages::BaseMessage;
 
 use super::clear::ClearCommand;
-use super::{AgentCommand, CommandContext, CommandKind, CommandRegistry, CommandResult};
+use super::{
+    register_builtins, AgentPassthrough, CommandContext, CommandHandler, CommandOutcome,
+    CommandRegistry, CommandResult, FeedbackChannel, FeedbackLevel,
+};
 use crate::session::executor::PromptStopReason;
 
-// ── Mock ──────────────────────────────────────────────────────────────────
-
-/// Mock AgentCommand，用于测试 CommandRegistry。
-struct MockCommand {
-    name: &'static str,
-    aliases: Vec<&'static str>,
-    description: &'static str,
-    kind: CommandKind,
-}
-
-impl MockCommand {
-    fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            aliases: vec![],
-            description: "mock command",
-            kind: CommandKind::Immediate,
-        }
-    }
-
-    fn with_aliases(mut self, aliases: Vec<&'static str>) -> Self {
-        self.aliases = aliases;
-        self
+/// 执行并解包：clear 恒 Done，其他变体 panic（与旧 AgentCommand 转发
+/// unreachable! 同语义；Phase 5 Step 6 旧契约删除后直接经新契约执行）。
+async fn execute_clear(cmd: &ClearCommand, ctx: CommandContext) -> CommandResult {
+    match CommandHandler::execute(cmd, ctx).await {
+        CommandOutcome::Done(r) => r,
+        _ => panic!("clear 应恒 Done"),
     }
 }
 
-#[async_trait]
-impl AgentCommand for MockCommand {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    fn aliases(&self) -> Vec<&str> {
-        self.aliases.clone()
-    }
-
-    fn description(&self) -> &str {
-        self.description
-    }
-
-    fn kind(&self) -> CommandKind {
-        self.kind
-    }
-
-    async fn execute(&self, _ctx: CommandContext) -> CommandResult {
-        CommandResult {
-            messages: vec![],
-            stop_reason: PromptStopReason::EndTurn,
-        }
-    }
-}
+// ── Mock EventSink ─────────────────────────────────────────────────────────
 
 /// Mock EventSink，记录所有推送的事件。
 struct MockEventSink {
@@ -95,166 +60,101 @@ impl crate::session::event_sink::EventSink for MockEventSink {
             .push((session_id.to_string(), json));
     }
 
-    async fn push_done(&self, _session_id: &str) {
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
         *self.push_done_count.lock().unwrap() += 1;
     }
 }
 
 /// 构造最小 CommandContext。
 fn make_command_context(sink: Arc<dyn crate::session::event_sink::EventSink>) -> CommandContext {
-    CommandContext {
-        session_id: "test-session".to_string(),
-        history: vec![],
-        cwd: "/tmp".to_string(),
-        peri_config: Arc::new(Default::default()),
-        compact_model: None,
-        event_sink: sink,
-        args: String::new(),
-        cancel_token: peri_agent::agent::AgentCancellationToken::new(),
-        thread_store: None,
-        thread_id: None,
-        bg_event_sender: None,
-        bg_registry: None,
+    // Phase 2 拆层：deps 私有化后构造面封闭，core 5 字段经 new() 就位；
+    // 旧字段默认值与原字面量一致（compact_config: Default / 其余 None）。
+    CommandContext::new(
+        "test-session".to_string(),
+        vec![],
+        "/tmp".to_string(),
+        sink,
+        tokio_util::sync::CancellationToken::new(),
+        peri_acp_types::command::DependencyBag::new(),
+    )
+}
+
+// ── AgentPassthrough 测试 ─────────────────────────────────────────────────
+
+/// [回归测试] AgentPassthrough 把用户消息原文（含 `/skill-name` token）整段
+/// Inject 回 agent 管线——SkillPreload 中间件自动检测分支依赖原文，命令不被吞。
+///
+/// 历史背景：Phase 5 Step 6 拦截层删除 `kind != Immediate` fall-through 守卫后，
+/// skill 条目经 AgentPassthrough 执行，占位实现返回 `Inject(String::new())`
+/// 空串，`/skill-name ...` 整体替换为空文本，skill 预加载失效（2026-08-16）。
+#[tokio::test]
+async fn test_agent_passthrough_injects_original_text() {
+    // Arrange
+    let sink = Arc::new(MockEventSink::new());
+    let mut ctx = make_command_context(sink.clone());
+    ctx.raw_text = "/diagnose 帮我调试一下".to_string();
+    ctx.args = "帮我调试一下".to_string();
+    let cmd = AgentPassthrough;
+
+    // Act
+    let outcome = CommandHandler::execute(&cmd, ctx).await;
+
+    // Assert：原文整段回传（含 `/skill-name` token），供 SkillPreload 自动检测
+    match outcome {
+        CommandOutcome::Inject(text) => assert_eq!(
+            text, "/diagnose 帮我调试一下",
+            "原文必须整段回传（含 /skill-name token）"
+        ),
+        CommandOutcome::Done(_) | CommandOutcome::Delegate(_) => {
+            panic!("AgentPassthrough 应恒 Inject，实际返回非 Inject 变体")
+        }
     }
 }
 
-// ── CommandRegistry 测试 ──────────────────────────────────────────────────
+// ── register_builtins 集成测试 ────────────────────────────────────────────
 
+/// 内置命令注册：裸名 / alias / 全名三种输入均命中同一条目；
+/// 严格精确匹配（设计 §55：`/rew` 不解析为 `/rewind`）。
 #[test]
-fn test_registry_find_by_exact_name() {
-    // Arrange: 注册两个命令
-    let mut reg = CommandRegistry::new();
-    reg.register(Box::new(MockCommand::new("alpha")));
-    reg.register(Box::new(MockCommand::new("beta")));
+fn test_register_builtins_resolves_builtin_commands() {
+    let reg = CommandRegistry::new();
+    register_builtins(&reg);
 
-    // Act & Assert
-    let (cmd, args) = reg.find("/alpha").unwrap();
-    assert_eq!(cmd.name(), "alpha");
-    assert_eq!(args, "");
+    // 裸名（第一等级域条目登记裸名，alias_index）
+    let resolved = reg.resolve("/compact").expect("裸名 compact 应命中");
+    assert_eq!(resolved.entry.fullname, "core:compact");
+    assert_eq!(resolved.args, "");
 
-    let (cmd, args) = reg.find("/beta").unwrap();
-    assert_eq!(cmd.name(), "beta");
-    assert_eq!(args, "");
-}
+    // alias（命令实现声明，单一事实源）
+    let resolved = reg.resolve("/compress").expect("alias compress 应命中");
+    assert_eq!(resolved.entry.fullname, "core:compact");
 
-#[test]
-fn test_registry_find_by_alias() {
-    // Arrange: 注册带别名的命令
-    let mut reg = CommandRegistry::new();
-    reg.register(Box::new(
-        MockCommand::new("compact").with_aliases(vec!["compress", "zip"]),
-    ));
+    // 全名（entries 直接键）
+    let resolved = reg.resolve("/core:compact").expect("全名应命中");
+    assert_eq!(resolved.entry.fullname, "core:compact");
 
-    // Act & Assert
-    let (cmd, args) = reg.find("/compress").unwrap();
-    assert_eq!(cmd.name(), "compact");
-    assert_eq!(args, "");
+    // 带参数：词法切分由注册表 resolve 统一完成（不变式 3）
+    let resolved = reg
+        .resolve("/compact  hello ")
+        .expect("compact 带参数应命中");
+    assert_eq!(resolved.entry.fullname, "core:compact");
+    assert_eq!(resolved.args, "hello");
 
-    let (cmd, args) = reg.find("/zip").unwrap();
-    assert_eq!(cmd.name(), "compact");
-    assert_eq!(args, "");
-}
+    // 前缀不再匹配（设计 §55 裁决：模糊只留 UI 搜索层）
+    assert!(reg.resolve("/rew").is_none());
 
-#[test]
-fn test_registry_find_with_args() {
-    // Arrange
-    let mut reg = CommandRegistry::new();
-    reg.register(Box::new(MockCommand::new("skill")));
-
-    // Act
-    let (cmd, args) = reg.find("/skill tdd").unwrap();
-
-    // Assert
-    assert_eq!(cmd.name(), "skill");
-    assert_eq!(args, "tdd");
-}
-
-#[test]
-fn test_registry_find_with_multiple_args() {
-    // Arrange
-    let mut reg = CommandRegistry::new();
-    reg.register(Box::new(MockCommand::new("skill")));
-
-    // Act
-    let (cmd, args) = reg.find("/skill tdd --force").unwrap();
-
-    // Assert
-    assert_eq!(cmd.name(), "skill");
-    assert_eq!(args, "tdd --force");
-}
-
-#[test]
-fn test_registry_find_returns_none_for_unknown() {
-    // Arrange
-    let mut reg = CommandRegistry::new();
-    reg.register(Box::new(MockCommand::new("compact")));
-
-    // Act & Assert
-    assert!(reg.find("/unknown").is_none());
-}
-
-#[test]
-fn test_registry_find_returns_none_for_empty_string() {
-    // Arrange
-    let mut reg = CommandRegistry::new();
-    reg.register(Box::new(MockCommand::new("compact")));
-
-    // Act & Assert
-    assert!(reg.find("").is_none());
-}
-
-#[test]
-fn test_registry_find_returns_none_for_double_slash() {
-    // Arrange
-    let mut reg = CommandRegistry::new();
-    reg.register(Box::new(MockCommand::new("compact")));
-
-    // Act & Assert
-    assert!(reg.find("//").is_none());
-}
-
-#[test]
-fn test_registry_find_returns_none_for_slash_only() {
-    // Arrange
-    let mut reg = CommandRegistry::new();
-    reg.register(Box::new(MockCommand::new("compact")));
-
-    // Act & Assert: 单个 `/` → trim 后为空字符串
-    assert!(reg.find("/").is_none());
-}
-
-#[test]
-fn test_registry_list_returns_all_commands() {
-    // Arrange: 注册 3 个命令
-    let mut reg = CommandRegistry::new();
-    reg.register(Box::new(MockCommand::new("alpha").with_aliases(vec!["a"])));
-    reg.register(Box::new(MockCommand::new("beta")));
-    reg.register(Box::new(
-        MockCommand::new("gamma").with_aliases(vec!["g1", "g2"]),
-    ));
-
-    // Act
-    let list = reg.list();
-
-    // Assert: 返回所有命令元组
-    assert_eq!(list.len(), 3);
-    assert_eq!(list[0].0, "alpha");
-    assert_eq!(list[0].2, vec!["a"]);
-    assert_eq!(list[1].0, "beta");
-    assert_eq!(list[1].2, Vec::<&str>::new());
-    assert_eq!(list[2].0, "gamma");
-    assert_eq!(list[2].2, vec!["g1", "g2"]);
-}
-
-#[test]
-fn test_default_registry_contains_compact_and_clear() {
-    // Act
-    let reg = CommandRegistry::default();
-
-    // Assert: 默认注册表包含 compact 和 clear
-    let names: Vec<&str> = reg.list().iter().map(|(n, _, _)| *n).collect();
-    assert!(names.contains(&"compact"), "默认注册表应包含 compact");
-    assert!(names.contains(&"clear"), "默认注册表应包含 clear");
+    // 其余内置 + loop 占位（P1-7：投影条目不缺失）
+    let clear_entry = reg.resolve("/clear").unwrap().entry;
+    assert_eq!(clear_entry.fullname, "core:clear");
+    // Phase 5 Step 3：clear 无参命令，注册条目挂 ArgsSchema::default()（投影可渲染）
+    assert_eq!(clear_entry.args_schema, Some(ArgsSchema::default()));
+    assert_eq!(reg.resolve("/cls").unwrap().entry.fullname, "core:clear");
+    assert_eq!(
+        reg.resolve("/rewind").unwrap().entry.fullname,
+        "core:rewind"
+    );
+    assert_eq!(reg.resolve("/loop").unwrap().entry.fullname, "core:loop");
+    assert_eq!(reg.snapshot().len(), 4, "内置命令共 4 条（含 loop 占位）");
 }
 
 // ── ClearCommand 测试 ─────────────────────────────────────────────────────
@@ -267,7 +167,7 @@ async fn test_clear_command_returns_empty_messages() {
     let cmd = ClearCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_clear(&cmd, ctx).await;
 
     // Assert: 返回空消息列表
     assert_eq!(result.messages.len(), 0);
@@ -281,62 +181,76 @@ async fn test_clear_command_returns_end_turn() {
     let cmd = ClearCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_clear(&cmd, ctx).await;
 
     // Assert
     assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
 }
 
 #[tokio::test]
-async fn test_clear_command_sends_event() {
+async fn test_clear_command_no_longer_emits_compact_completed() {
     // Arrange
     let sink = Arc::new(MockEventSink::new());
     let ctx = make_command_context(sink.clone());
     let cmd = ClearCommand;
 
     // Act
-    cmd.execute(ctx).await;
+    execute_clear(&cmd, ctx).await;
 
-    // Assert: 应该推送了 CompactCompleted 事件（空 messages）
+    // Assert: Phase 5 Step 3 迁移后 clear 不再发射 20 字段占位 CompactCompleted
+    // （占位事件已删除，通知文案移交 CommandFeedback），命令内零事件代码。
     let events = sink.events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].0, "test-session");
-    // CompactCompleted 的 JSON 应包含 "compact_completed"（serde 序列化为 snake_case）
     assert!(
-        events[0].1.contains("compact_completed"),
-        "事件应包含 compact_completed，实际: {}",
-        events[0].1
+        events.is_empty(),
+        "clear 不应产生任何事件（占位 CompactCompleted 已删除），实际: {:?}",
+        events
     );
-    // messages 应为空数组
-    assert!(
-        events[0].1.contains("\"messages\":[]"),
-        "compact_completed.messages 应为空数组，实际: {}",
-        events[0].1
-    );
+}
+
+/// Phase 5 Step 3：新契约路径（CommandHandler 主实现）——Done(空 messages +
+/// EndTurn + feedback(Info, "对话已清空", UiOnly))。
+#[tokio::test]
+async fn test_clear_command_handler_feedback() {
+    // Arrange
+    let sink = Arc::new(MockEventSink::new());
+    let ctx = make_command_context(sink.clone());
+    let cmd = ClearCommand;
+
+    // Act: 直接经新契约执行（与 LegacyAdapter 转发路径同源）
+    let outcome = CommandHandler::execute(&cmd, ctx).await;
+
+    // Assert
+    let CommandOutcome::Done(result) = outcome else {
+        panic!("clear 恒 Done");
+    };
+    assert_eq!(result.messages.len(), 0, "清空后会话为空");
+    assert_eq!(result.stop_reason, PromptStopReason::EndTurn);
+    let feedback = result.feedback.expect("clear 应携带反馈");
+    assert_eq!(feedback.level, FeedbackLevel::Info);
+    assert_eq!(feedback.message, "对话已清空");
+    assert_eq!(feedback.channel, FeedbackChannel::UiOnly, "UiOnly 不进会话");
+    // 命令自身不发射事件（编排层 emit_command_feedback 统一发射）
+    assert!(sink.events().is_empty());
 }
 
 #[tokio::test]
 async fn test_clear_command_ignores_existing_history() {
     // Arrange: 带有历史消息的上下文
     let sink = Arc::new(MockEventSink::new());
-    let ctx = CommandContext {
-        session_id: "test-session".to_string(),
-        history: vec![BaseMessage::human("你好"), BaseMessage::ai("世界")],
-        cwd: "/tmp".to_string(),
-        peri_config: Arc::new(Default::default()),
-        compact_model: None,
-        event_sink: sink.clone(),
-        args: String::new(),
-        cancel_token: peri_agent::agent::AgentCancellationToken::new(),
-        thread_store: None,
-        thread_id: None,
-        bg_event_sender: None,
-        bg_registry: None,
-    };
+    // Phase 2 拆层：deps 私有化后构造面封闭，core 5 字段经 new() 就位；
+    // 旧字段默认值与原字面量一致（compact_config: Default / 其余 None）。
+    let ctx = CommandContext::new(
+        "test-session".to_string(),
+        vec![BaseMessage::human("你好"), BaseMessage::ai("世界")],
+        "/tmp".to_string(),
+        sink.clone(),
+        tokio_util::sync::CancellationToken::new(),
+        peri_acp_types::command::DependencyBag::new(),
+    );
     let cmd = ClearCommand;
 
     // Act
-    let result = cmd.execute(ctx).await;
+    let result = execute_clear(&cmd, ctx).await;
 
     // Assert: 无论历史如何，返回空消息
     assert_eq!(result.messages.len(), 0);
@@ -345,16 +259,15 @@ async fn test_clear_command_ignores_existing_history() {
 
 #[test]
 fn test_clear_command_name_and_aliases() {
-    // Arrange
-    let cmd = ClearCommand;
-
-    // Assert
-    assert_eq!(cmd.name(), "clear");
-    let aliases = cmd.aliases();
-    assert!(aliases.contains(&"cls"), "应包含 cls 别名");
-    assert!(aliases.contains(&"reset"), "应包含 reset 别名");
-    assert_eq!(cmd.kind(), CommandKind::Immediate);
-    assert!(!cmd.description().is_empty());
+    // Phase 5 Step 6：旧 AgentCommand trait 已删，元数据取命令关联常量
+    //（注册条目挂载的单一事实源）。
+    assert_eq!(ClearCommand::NAME, "clear");
+    assert!(ClearCommand::ALIASES.contains(&"cls"), "应包含 cls 别名");
+    assert!(
+        ClearCommand::ALIASES.contains(&"reset"),
+        "应包含 reset 别名"
+    );
+    assert!(!ClearCommand::DESCRIPTION.is_empty());
 }
 
 // ── push_done 验证测试 ──────────────────────────────────────────────────────
@@ -375,7 +288,7 @@ async fn test_clear_command_does_not_call_push_done_itself() {
     let ctx = make_command_context(sink.clone());
     let cmd = ClearCommand;
 
-    cmd.execute(ctx).await;
+    execute_clear(&cmd, ctx).await;
 
     // ClearCommand 自身不调用 push_done
     let count = sink.push_done_count();
@@ -383,4 +296,52 @@ async fn test_clear_command_does_not_call_push_done_itself() {
         count, 0,
         "ClearCommand 自身不应调用 push_done，由 executor 负责"
     );
+}
+
+/// /loop resolve 命中注册表条目。
+#[test]
+fn test_loop_resolve_hits_registry_entry() {
+    let reg = CommandRegistry::new();
+    register_builtins(&reg);
+
+    let resolved = reg.resolve("/loop").expect("/loop 应命中 core:loop");
+    assert_eq!(resolved.entry.fullname, "core:loop");
+    assert_eq!(resolved.entry.description, "Control agent iteration loop");
+    assert!(
+        Arc::strong_count(&resolved.entry.handler) >= 1,
+        "占位 handler 必须挂载，保证路由确定性执行"
+    );
+    // 注册表共 5 条（compact / bg / clear / rewind / loop），snapshot 断言在
+    // test_register_builtins_resolves_builtin_commands 中保持。
+}
+
+/// loop 有参数时注入统一 agent turn；缺参数时返回用法错误。
+#[tokio::test]
+async fn test_loop_injects_prompt_and_rejects_empty_args() {
+    let sink = Arc::new(MockEventSink::new());
+    let reg = CommandRegistry::new();
+    register_builtins(&reg);
+
+    let mut ctx = make_command_context(sink.clone());
+    ctx.args = "检查状态".to_string();
+    let resolved = reg
+        .resolve("/loop 检查状态")
+        .expect("/loop 应命中 core:loop");
+    let outcome = CommandHandler::execute(resolved.entry.handler.as_ref(), ctx).await;
+    assert!(matches!(outcome, CommandOutcome::Inject(text) if text.contains("检查状态")));
+
+    let resolved = reg.resolve("/loop").expect("/loop 应命中 core:loop");
+    let outcome = CommandHandler::execute(
+        resolved.entry.handler.as_ref(),
+        make_command_context(sink.clone()),
+    )
+    .await;
+    let CommandOutcome::Done(result) = outcome else {
+        panic!("空 /loop 应返回用法错误");
+    };
+    let feedback = result.feedback.expect("空 /loop 应携带反馈");
+    assert_eq!(feedback.level, FeedbackLevel::Error);
+    assert!(feedback.message.contains("/loop <prompt>"));
+    assert_eq!(feedback.channel, FeedbackChannel::UiOnly);
+    assert!(sink.events().is_empty());
 }

@@ -8,8 +8,9 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use parking_lot::RwLock;
-use peri_agent::goal::{GoalStatus, GoalStore, ThreadGoal};
+use peri_acp_types::goal::{GoalStatus, GoalStore, ThreadGoal};
 
 /// Goal 快照（只读视图，供 middleware / TUI 读取）
 #[derive(Debug, Clone, Default)]
@@ -20,6 +21,8 @@ pub struct GoalSnapshot {
     pub token_budget: Option<u64>,
     pub tokens_used: u64,
     pub time_used_seconds: u64,
+    pub continuation_count: u64,
+    pub blocked_reason: Option<String>,
     /// set_goal / edit 后置 true，middleware 注入后清零
     pub objective_just_updated: bool,
 }
@@ -80,7 +83,7 @@ impl GoalState {
         &self,
         objective: String,
         token_budget: Option<u64>,
-    ) -> Result<(), peri_agent::goal::GoalStoreError> {
+    ) -> Result<(), peri_acp_types::goal::GoalStoreError> {
         let new_goal = ThreadGoal::new(objective, token_budget);
         let (thread_id, store) = {
             let mut guard = self.inner.write();
@@ -98,7 +101,7 @@ impl GoalState {
     }
 
     /// clear：清空 goal
-    pub async fn clear(&self) -> Result<(), peri_agent::goal::GoalStoreError> {
+    pub async fn clear(&self) -> Result<(), peri_acp_types::goal::GoalStoreError> {
         let (thread_id, store) = {
             let mut guard = self.inner.write();
             guard.goal = None;
@@ -173,6 +176,8 @@ impl GoalState {
                 token_budget: g.token_budget,
                 tokens_used: g.accounting.tokens_used,
                 time_used_seconds: g.accounting.time_used_seconds,
+                continuation_count: g.accounting.continuation_count,
+                blocked_reason: g.blocked_reason.clone(),
                 objective_just_updated: guard.objective_just_updated,
             },
             None => GoalSnapshot {
@@ -236,20 +241,82 @@ impl GoalState {
     }
 }
 
-impl peri_agent::goal::GoalStateView for GoalState {
-    fn snapshot(&self) -> peri_agent::goal::GoalViewSnapshot {
+impl peri_acp_types::goal::GoalStateView for GoalState {
+    fn snapshot(&self) -> peri_acp_types::goal::GoalViewSnapshot {
         let snap = self.snapshot();
-        peri_agent::goal::GoalViewSnapshot {
+        peri_acp_types::goal::GoalViewSnapshot {
             objective: snap.objective,
             status: snap.status,
             token_budget: snap.token_budget,
             tokens_used: snap.tokens_used,
+            time_used_seconds: snap.time_used_seconds,
+            continuation_count: snap.continuation_count,
+            blocked_reason: snap.blocked_reason,
             objective_just_updated: snap.objective_just_updated,
         }
     }
 
     fn consume_objective_updated(&self) -> bool {
         self.consume_objective_updated()
+    }
+}
+
+#[async_trait]
+impl peri_acp_types::goal::GoalController for GoalState {
+    async fn create_goal(&self, objective: String) -> Result<(), String> {
+        // 原子化：检查 + 插入在同一写锁内，消除 TOCTOU 竞态窗口
+        let new_goal = ThreadGoal::new(objective, None);
+        let (thread_id, store) = {
+            let mut guard = self.inner.write();
+            if guard.goal.is_some() {
+                return Err("goal 已存在，请先 clear 后重建".to_string());
+            }
+            guard.goal = Some(new_goal.clone());
+            guard.objective_just_updated = true;
+            (guard.thread_id.clone(), guard.store.clone())
+        };
+        // best-effort store 写入（短锁已释放）
+        if let Err(e) = store.save(&thread_id, new_goal).await {
+            tracing::warn!(error = %e, "GoalState: store save 失败，退化为纯内存模式");
+            return Err(e.to_string());
+        }
+        Ok(())
+    }
+
+    async fn complete_goal(&self) -> Result<(), String> {
+        self.set_status(GoalStatus::Complete).await
+    }
+
+    async fn block_goal(&self, reason: String) -> Result<(), String> {
+        self.set_status_with_reason(GoalStatus::Blocked, reason)
+            .await
+    }
+
+    async fn clear_goal(&self) -> Result<(), String> {
+        self.clear().await.map_err(|e| e.to_string())
+    }
+
+    async fn increment_continuation(&self) -> Result<(), String> {
+        let (thread_id, store, goal_clone) = {
+            let mut guard = self.inner.write();
+            let goal = guard
+                .goal
+                .as_mut()
+                .ok_or_else(|| "无 goal，无法记录主动接续".to_string())?;
+            goal.accounting.continuation_count =
+                goal.accounting.continuation_count.saturating_add(1);
+            goal.updated_at = chrono::Utc::now();
+            let goal_clone = goal.clone();
+            (guard.thread_id.clone(), guard.store.clone(), goal_clone)
+        };
+        if let Err(e) = store.save(&thread_id, goal_clone).await {
+            tracing::warn!(error = %e, "GoalState: continuation store save 失败，保留内存计数");
+        }
+        Ok(())
+    }
+
+    fn snapshot(&self) -> peri_acp_types::goal::GoalViewSnapshot {
+        peri_acp_types::goal::GoalStateView::snapshot(self)
     }
 }
 

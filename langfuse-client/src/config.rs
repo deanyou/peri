@@ -6,6 +6,16 @@ pub struct ClientConfig {
     pub public_key: String,
     pub secret_key: String,
     pub base_url: String,
+    /// Turn 级采样率 0.0~1.0，默认 1.0（全报）
+    pub trace_sampling: f64,
+    /// 错误 turn 强制发 ErrorSpan 挂同 turn
+    pub error_span_always: bool,
+    /// Batcher 单批次最大事件数
+    pub batch_max_events: usize,
+    /// Batcher flush 间隔秒数
+    pub batch_flush_interval_secs: u64,
+    /// Batcher 背压策略
+    pub batch_backpressure: BackpressurePolicy,
 }
 
 impl ClientConfig {
@@ -23,6 +33,11 @@ impl ClientConfig {
             public_key,
             secret_key,
             base_url,
+            trace_sampling: 1.0,
+            error_span_always: true,
+            batch_max_events: 50,
+            batch_flush_interval_secs: 10,
+            batch_backpressure: BackpressurePolicy::default(),
         })
     }
 }
@@ -35,14 +50,20 @@ pub enum BackpressurePolicy {
     DropNew,
     /// 队列满时阻塞等待
     Block,
+    /// 队列满时替换最旧的待发送事件；已准入 flush 及其前缀不可驱逐。
+    /// 无可驱逐事件时返回 QueueFull，在途 HTTP 批次不受影响。
+    DropOldest,
 }
 
 /// Batcher 批量聚合配置
 #[derive(Debug, Clone)]
 pub struct BatcherConfig {
+    /// 命令队列容量及单批上限，必须为 1..=tokio::sync::Semaphore::MAX_PERMITS。
     pub max_events: usize,
+    /// 自动发送间隔，必须非零。
     pub flush_interval: Duration,
     pub backpressure: BackpressurePolicy,
+    /// 兼容保留，不参与执行；实际重试次数由 LangfuseClient 构造参数独占。
     pub max_retries: usize,
 }
 
@@ -57,10 +78,32 @@ impl Default for BatcherConfig {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
+impl BatcherConfig {
+    pub(crate) fn validate(&self) -> Result<(), crate::LangfuseError> {
+        if self.max_events == 0 || self.max_events > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(crate::LangfuseError::Config(
+                "batch max_events is outside the supported nonzero capacity range".into(),
+            ));
+        }
+        if self.flush_interval.is_zero() {
+            return Err(crate::LangfuseError::Config(
+                "batch flush_interval must be nonzero".into(),
+            ));
+        }
+        Ok(())
+    }
 
-    use super::*;
-    include!("config_test.rs");
+    /// 从 ClientConfig 构造 Batcher 配置
+    pub fn from_client(client: &ClientConfig) -> Self {
+        Self {
+            max_events: client.batch_max_events,
+            flush_interval: Duration::from_secs(client.batch_flush_interval_secs),
+            backpressure: client.batch_backpressure,
+            max_retries: 3,
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "config_test.rs"]
+mod tests;

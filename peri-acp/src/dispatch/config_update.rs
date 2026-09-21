@@ -4,8 +4,8 @@
 //! `ConfigOptionUpdate` values from the same trio of `(PeriConfig, LlmProvider, PermissionMode)`.
 //! This module centralises that construction to avoid duplication.
 
-use agent_client_protocol::schema::{ConfigOptionUpdate, SessionConfigOption};
-use peri_middlewares::prelude::PermissionMode;
+use agent_client_protocol::schema::v1::{ConfigOptionUpdate, SessionConfigOption};
+use peri_acp_types::permission::PermissionMode;
 
 use crate::provider::{LlmProvider, PeriConfig};
 use crate::session::state_builders::build_config_options;

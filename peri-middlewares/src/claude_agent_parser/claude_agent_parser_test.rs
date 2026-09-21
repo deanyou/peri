@@ -152,14 +152,159 @@ prompt"#;
     assert_eq!(agent.tools(), vec!["Read", "Glob"]);
 }
 
+/// [回归测试] 显式 `tools: []` 必须保留为零工具声明，不能与省略字段混同。
+///
+/// 历史背景：空数组被解析为空 Vec，工具过滤器把它当成“未配置工具”并继承父工具，
+/// 导致声明为无工具的 advisor 实际获得 Read、Bash 等工具。
 #[test]
-fn test_tools_value_empty_string() {
+fn test_tools_value_explicit_empty_array_preserves_zero_tools_intent() {
+    let content = r#"---
+name: advisor
+description: no tools
+tools: []
+---
+prompt"#;
+
+    let agent = parse_agent_file(content).unwrap();
+
+    assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
+}
+
+#[test]
+fn test_tools_value_empty_string_preserves_zero_tools_intent() {
     let content = r#"---
 name: test
 description: test
 tools: ""
 ---
 prompt"#;
+
     let agent = parse_agent_file(content).unwrap();
-    assert!(agent.tools().is_empty());
+
+    assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
+}
+
+/// [回归测试] 显式 `tools: null` 不能与缺失字段混同并继承父工具。
+#[test]
+fn test_tools_value_null_preserves_zero_tools_intent() {
+    let content = r#"---
+name: test
+description: test
+tools: null
+---
+prompt"#;
+
+    let agent = parse_agent_file(content).unwrap();
+
+    assert_eq!(agent.frontmatter.tools, ToolsValue::NoTools);
+}
+
+/// [回归测试] `tools` 字段存在但类型无效时不得回退为继承父工具。
+///
+/// 历史背景：安全敏感 agent 配置误写为对象会被静默解析成 Empty，因而获得全部父工具。
+#[test]
+fn test_tools_value_invalid_type_rejects_agent_file() {
+    let content = r#"---
+name: advisor
+description: no tools
+tools: {}
+---
+prompt"#;
+
+    assert!(parse_agent_file(content).is_none());
+}
+
+/// [回归测试] `tools` 数组不能静默丢弃非字符串元素。
+#[test]
+fn test_tools_value_array_with_non_string_rejects_agent_file() {
+    let content = r#"---
+name: advisor
+description: no tools
+tools: [Read, 42]
+---
+prompt"#;
+
+    assert!(parse_agent_file(content).is_none());
+}
+
+/// [回归测试] allowedWriteDirs roundtrip——plan agent 声明沙箱目录
+#[test]
+fn test_parse_allowed_write_dirs() {
+    let content = r#"---
+name: planner
+description: A planner agent
+allowedWriteDirs:
+  - ".peri/plans/"
+  - ".peri/output/"
+---
+prompt"#;
+    let agent = parse_agent_file(content).unwrap();
+    assert_eq!(
+        agent.frontmatter.allowed_write_dirs,
+        vec![".peri/plans/", ".peri/output/"]
+    );
+}
+
+/// [回归测试] allowedWriteDirs 缺失时默认为空
+#[test]
+fn test_parse_allowed_write_dirs_missing_defaults_empty() {
+    let content = r#"---
+name: basic
+description: test
+---
+prompt"#;
+    let agent = parse_agent_file(content).unwrap();
+    assert!(agent.frontmatter.allowed_write_dirs.is_empty());
+}
+
+// ─── prompt_mode tests ───────────────────────────────────────────────────
+
+/// 验证 prompt_mode 字段缺失时默认值为 None（下游视为 extend 行为）
+#[test]
+fn test_prompt_mode_extend_default() {
+    let content = r#"---
+name: basic
+description: test
+---
+prompt"#;
+    let agent = parse_agent_file(content).unwrap();
+    assert_eq!(
+        agent.frontmatter.prompt_mode, None,
+        "prompt_mode 缺失时应默认为 None（extend 行为）"
+    );
+}
+
+/// 验证 prompt_mode: full 时正确解析
+#[test]
+fn test_prompt_mode_full() {
+    let content = r#"---
+name: full-mode
+description: A full mode agent
+promptMode: full
+---
+prompt"#;
+    let agent = parse_agent_file(content).unwrap();
+    assert_eq!(
+        agent.frontmatter.prompt_mode,
+        Some("full".to_string()),
+        "prompt_mode: full 应正确解析为 Some(\"full\")"
+    );
+}
+
+/// 验证未知 prompt_mode 值不 panic，保持原始值以允许下游 fallback
+#[test]
+fn test_prompt_mode_unknown_fallback() {
+    let content = r#"---
+name: weird-agent
+description: test
+promptMode: some-weird-value
+---
+prompt"#;
+    // 解析不应 panic
+    let agent = parse_agent_file(content).unwrap();
+    assert_eq!(
+        agent.frontmatter.prompt_mode,
+        Some("some-weird-value".to_string()),
+        "未知 prompt_mode 值应保留原始值，下游 with_overrides() 会 fallback 到 extend"
+    );
 }

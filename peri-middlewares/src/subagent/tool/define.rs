@@ -2,76 +2,30 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use peri_acp_types::identity::AgentId;
+use peri_agent::session::subagent::SubagentHost;
 use peri_agent::{
-    agent::{
-        events::{AgentEvent, AgentEventHandler},
-        react::{AgentInput, ReactLLM},
-        AgentCancellationToken,
-    },
+    agent::{events::AgentEventHandler, react::ReactLLM},
     messages::BaseMessage,
-    thread::ThreadStore,
     tools::BaseTool,
 };
+use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::{
-    build_agent::CancelPolicy, fire_subagent_lifecycle_hooks_static, format_subagent_result,
-};
+use super::invocation::InvocationArgs;
 use crate::tool_search::core_tools::TOOL_AGENT;
-use crate::{
-    agent_define::{AgentDefineMiddleware, AgentOverrides},
-    claude_agent_parser::{parse_agent_file, ClaudeAgent, ToolsValue},
-    hooks::types::{HookEvent, RegisteredHook},
-    subagent::{background::BackgroundTaskRegistry, built_in_agents::get_built_in_agent},
-};
-
-/// RAII guard that calls deregister on drop (panic-safe cleanup).
-pub(crate) struct DeregisterGuard {
-    pub(crate) thread_id: String,
-    pub(crate) deregister: Option<Arc<dyn Fn(&str) + Send + Sync>>,
-}
-
-impl Drop for DeregisterGuard {
-    fn drop(&mut self) {
-        if let Some(ref deregister) = self.deregister {
-            deregister(&self.thread_id);
-        }
-    }
-}
+use crate::{agent_define::AgentOverrides, hooks::types::RegisteredHook, mcp::McpAgentRegistry};
 
 /// SubAgentTool - implements the `Agent` tool, allowing LLM to delegate sub-tasks to specialized sub-agents
-const AGENT_DESCRIPTION: &str = r#"Launch a sub-agent with an independent context to handle a specialized sub-task. The sub-agent executes based on the configuration defined in .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md.
+const AGENT_DESCRIPTION: &str = include_str!("descriptions/agent.md");
 
-Fork mode (fork: true):
-- Inherits the parent agent's full conversation history, system prompt, and tool set
-- The prompt is treated as a directive within the existing context, not a standalone briefing
-- Do NOT re-explain background that is already in the conversation history
-- Use for tasks that require context from the ongoing conversation (e.g., continuing a multi-file refactor)
-- The forked agent follows a structured output format: Scope, Result, Key files, Files changed
-
-Usage:
-- Provide a clear, self-contained task description via the prompt parameter. The sub-agent has no access to the parent conversation history
-- **subagent_type is REQUIRED** unless fork=true. Specify an agent ID matching an existing agent definition file. Do NOT omit this parameter unless you intend to fork the current agent
-- The sub-agent inherits the parent's tool set by default, excluding Agent itself (to prevent recursion)
-- Agent definitions may restrict available tools via the tools and disallowedTools fields in frontmatter
-- The sub-agent executes in isolated state — it cannot access the parent's message history or intermediate results
-
-When to use:
-- For tasks that benefit from independent context isolation (e.g., code review while working on a different feature)
-- For tasks requiring specialized persona or behavior defined in agent configuration files
-- For parallelizable sub-tasks that do not depend on each other's results
-- When you need to break a complex task into smaller, independently executable pieces
-
-Return format:
-- If the sub-agent made tool calls, the result includes a summary of tools used followed by the final response
-- If no tool calls were made, only the final response text is returned
-
-Background execution (run_in_background: true):
-- The sub-agent runs asynchronously in the background while the main agent continues
-- Maximum 3 concurrent background tasks
-- The main agent will be notified when the background task completes via a system message
-- Use for long-running tasks that don't block the main workflow (e.g., code review, batch operations)
-- Background tasks share the same working directory as the main agent"#;
-
+/// SubAgentTool（L3 瘦身）：只声明工具与发起意图，不持有创建实现。
+///
+/// 创建（建 thread / 建 session / 运行 / 收尾）统一经
+/// [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)（peri-agent `SessionFactory` 统一入口）。父侧运行时通道
+/// （thread_store / task_manager / bg 事件 / register / deregister / frozen
+/// 回退值）聚合在 [`SubagentHost`]；生产路径经 `parent_session` 的 host 读取
+/// （builder 在主 session 创建后注入），测试/遗留路径经 `with_*` 直接注入
+/// tool 的 host 回退。
 pub struct SubAgentTool {
     /// Parent agent tool set (Arc shared, read-only)
     pub(crate) parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
@@ -91,190 +45,55 @@ pub struct SubAgentTool {
     pub(crate) cancel: Option<AgentCancellationToken>,
     /// Shared reference to parent agent message snapshot (used by Fork path)
     pub(crate) parent_messages: Option<Arc<RwLock<Vec<BaseMessage>>>>,
-    /// 后台任务注册中心（run_in_background 模式使用）
-    pub(crate) background_registry: Option<Arc<BackgroundTaskRegistry>>,
-    /// 子 agent 生命周期 hook（SubagentStart/SubagentStop）
+    /// 子 agent 生命周期 hook（SubagentStart/SubagentStop；构造 lifecycle 闭包用）
     pub(crate) registered_hooks: Arc<Vec<RegisteredHook>>,
     /// Per-child event handler factory
     #[allow(clippy::type_complexity)]
     pub(crate) child_handler_factory:
         Option<Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>>,
-    /// 后台任务完成事件的独立发送通道（不随 executor 生命周期销毁）
-    pub(crate) bg_event_sender:
-        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>>,
-    /// Thread persistence store for child threads
-    pub(crate) thread_store: Option<Arc<dyn ThreadStore>>,
-    /// Parent thread ID for child thread hierarchy
-    pub(crate) parent_thread_id: Option<String>,
-    /// Register callback: (thread_id, cancel_token, cancel_policy_str) → inserts into active_agents map
-    #[allow(clippy::type_complexity)]
-    pub(crate) register_runtime:
-        Option<Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>>,
-    /// Deregister callback: removes from active_agents map by thread_id
-    pub(crate) deregister_runtime: Option<Arc<dyn Fn(&str) + Send + Sync>>,
-}
-
-impl SubAgentTool {
-    #[allow(clippy::type_complexity)]
-    pub fn new(
-        parent_tools: Arc<Vec<Arc<dyn BaseTool>>>,
-        event_handler: Option<Arc<dyn AgentEventHandler>>,
-        llm_factory: Arc<dyn Fn(Option<&str>) -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
-        parent_cwd: String,
-    ) -> Self {
-        Self {
-            parent_tools,
-            event_handler,
-            llm_factory,
-            parent_cwd,
-            system_builder: None,
-            cancel: None,
-            parent_messages: None,
-            background_registry: None,
-            registered_hooks: Arc::new(Vec::new()),
-            child_handler_factory: None,
-            bg_event_sender: None,
-            thread_store: None,
-            parent_thread_id: None,
-            register_runtime: None,
-            deregister_runtime: None,
-        }
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn with_system_builder(
-        mut self,
-        builder: Arc<dyn Fn(Option<&AgentOverrides>, &str) -> String + Send + Sync>,
-    ) -> Self {
-        self.system_builder = Some(builder);
-        self
-    }
-
-    pub fn with_cancel(mut self, cancel: AgentCancellationToken) -> Self {
-        self.cancel = Some(cancel);
-        self
-    }
-
-    pub fn with_parent_messages(mut self, messages: Arc<RwLock<Vec<BaseMessage>>>) -> Self {
-        self.parent_messages = Some(messages);
-        self
-    }
-
-    pub fn with_background_registry(mut self, registry: Arc<BackgroundTaskRegistry>) -> Self {
-        self.background_registry = Some(registry);
-        self
-    }
-
-    pub fn with_registered_hooks(mut self, hooks: Vec<RegisteredHook>) -> Self {
-        self.registered_hooks = Arc::new(hooks);
-        self
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn with_child_handler_factory(
-        mut self,
-        factory: Arc<dyn Fn(String) -> Arc<dyn AgentEventHandler> + Send + Sync>,
-    ) -> Self {
-        self.child_handler_factory = Some(factory);
-        self
-    }
-
-    pub fn with_bg_event_sender(
-        mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>,
-    ) -> Self {
-        self.bg_event_sender = Some(sender);
-        self
-    }
-
-    pub fn with_thread_store(mut self, store: Arc<dyn ThreadStore>) -> Self {
-        self.thread_store = Some(store);
-        self
-    }
-
-    pub fn with_parent_thread_id(mut self, id: String) -> Self {
-        self.parent_thread_id = Some(id);
-        self
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn with_register_runtime(
-        mut self,
-        cb: Arc<dyn Fn(String, AgentCancellationToken, String) + Send + Sync>,
-    ) -> Self {
-        self.register_runtime = Some(cb);
-        self
-    }
-
-    pub fn with_deregister_runtime(mut self, cb: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
-        self.deregister_runtime = Some(cb);
-        self
-    }
-
-    pub(crate) fn load_agent_def(&self, agent_id: &str, cwd: &str) -> Result<ClaudeAgent, String> {
-        let agent_path = AgentDefineMiddleware::candidate_paths(cwd, agent_id)
-            .into_iter()
-            .find(|p| p.is_file());
-
-        if let Some(path) = agent_path {
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| format!("Error: failed to read agent definition file: {}", e))?;
-            return parse_agent_file(&content).ok_or_else(|| {
-                format!(
-                    "Error: failed to parse agent definition file '{}'",
-                    path.display()
-                )
-            });
-        }
-
-        let built_in = get_built_in_agent(agent_id)
-            .ok_or_else(|| format!("Error: cannot find agent definition '{}'. Check .claude/agents/ directory or use a built-in agent (explore, plan, general-purpose, verification)", agent_id))?;
-        parse_agent_file(built_in.content).ok_or_else(|| {
-            format!(
-                "Error: failed to parse built-in agent definition '{}'",
-                agent_id
-            )
-        })
-    }
-
-    pub(crate) fn overrides_from_agent_def(
-        system_prompt: &str,
-        tone: &Option<String>,
-        proactiveness: &Option<String>,
-    ) -> Option<AgentOverrides> {
-        crate::subagent::fork::overrides_from_agent_def(system_prompt, tone, proactiveness)
-    }
-
-    pub(crate) async fn fire_subagent_lifecycle_hook(
-        &self,
-        event: HookEvent,
-        cwd: &str,
-        subagent_name: &str,
-        result: Option<&str>,
-    ) {
-        fire_subagent_lifecycle_hooks_static(
-            &self.registered_hooks,
-            event,
-            cwd,
-            subagent_name,
-            result,
-        )
-        .await;
-    }
-
-    pub(crate) fn filter_tools(
-        &self,
-        allowed: &ToolsValue,
-        disallowed: &ToolsValue,
-    ) -> Vec<Box<dyn BaseTool>> {
-        crate::subagent::fork::filter_tools(&self.parent_tools, allowed, disallowed)
-    }
+    /// 父 agent 的 v2 事件侧 AgentId（共享 cell，由 peri-acp builder 在
+    /// 主 v2 session 创建后注入；None = 未注入/测试路径 → 不 emit v2 Start/Stop）。
+    pub(crate) parent_agent_id: Arc<RwLock<Option<AgentId>>>,
+    /// 父 v2 session（L3）：builder 在主 session 创建后注入；运行时通道经
+    /// `parent_session.subagent_host()` 读取。
+    pub(crate) parent_session: Arc<RwLock<Option<Arc<peri_agent::session::Session>>>>,
+    /// 运行时通道回退值（测试/遗留路径经 with_* 注入；生产路径为默认空，
+    /// 由 parent_session 的 host 覆盖）
+    pub(crate) host: SubagentHost,
+    /// 已启用插件提供的 agent definition 目录。
+    pub(crate) plugin_agent_dirs: Arc<Vec<std::path::PathBuf>>,
+    /// 会话级 MCP Agent registry。远端定义只在显式选择后读取和批准。
+    pub(crate) mcp_agent_registry: Option<Arc<McpAgentRegistry>>,
+    /// 用户交互 broker，用于远端 Agent 内容绑定批准。
+    pub(crate) broker: Option<Arc<dyn peri_agent::interaction::UserInteractionBroker>>,
+    /// 子链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
+    pub(crate) chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler>,
 }
 
 #[async_trait]
 impl BaseTool for SubAgentTool {
     fn name(&self) -> &str {
         TOOL_AGENT
+    }
+
+    fn is_direct(&self) -> bool {
+        true
+    }
+
+    /// 提示词层声明分组（design v2 §2.5.1）：交互类工具归入 `interaction`。
+    fn namespace(&self) -> Option<&str> {
+        Some("interaction")
+    }
+
+    /// 提示词层声明模板（design v2 §2.5.3）：委派独立子任务/专业工作。
+    ///
+    /// title 不覆盖——走 `BaseTool::tool_description` 默认路径由 name 推导。
+    /// 05_using_tools.md 手写条目在渐进迁移完成前保留（守护测试防逐字重复）。
+    fn prompt_declaration(&self) -> Option<String> {
+        Some(
+            "Hand off independent or specialized tasks → `{{name}}` ({{title}}). Agent types and usage live in the SubAgent docs."
+                .to_string(),
+        )
     }
 
     fn description(&self) -> &str {
@@ -284,11 +103,17 @@ impl BaseTool for SubAgentTool {
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "required": ["prompt"],
+            // resume_thread_id 存在时 prompt 可缺省（隐式继续），故 required 恒空；
+            // 非 resume 路径缺 prompt 仍由 invoke 运行时校验兜底（语义不变）
+            "required": [],
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "The task description to delegate to the sub-agent. Must be clear and self-contained, as the sub-agent has no access to the parent conversation history. Include all necessary context"
+                    "description": "Task instructions for a new or resumed sub-agent. With resume_thread_id targeting an active background sub-agent, this is a required non-empty supplemental message, queued as Info without interrupting or restarting it. For new sub-agents, include all necessary context"
+                },
+                "resume_thread_id": {
+                    "type": "string",
+                    "description": "目标 subagent 的 child_thread_id（UUID）；不填即新建。active 后台执行：将非空 prompt 作为 Info 入队并立即返回 action: send / status: queued，不中断、不恢复、不触发额外推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续，run_in_background 决定恢复模式。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
                 },
                 "description": {
                     "type": "string",
@@ -296,7 +121,11 @@ impl BaseTool for SubAgentTool {
                 },
                 "subagent_type": {
                     "type": "string",
-                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). Must exactly match an agent definition file at .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md. REQUIRED unless fork=true. When not provided and fork is not set, the call will fail with an error"
+                    "description": "The agent ID from the available agents list (e.g., 'code-reviewer', 'explorer'). Must exactly match an agent definition file at .claude/agents/{subagent_type}.md or .claude/agents/{subagent_type}/agent.md. REQUIRED for NEW sub-agents unless fork=true (when not provided and fork is not set, the call will fail). Ignored when resume_thread_id is provided (resume takes priority over subagent_type / fork)"
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model tier override, only applies to NEW defined-type sub-agents (subagent_type path): overrides the `model` declared in the agent definition frontmatter; when omitted, the definition's model is used. Available tiers: 'inherit' (use the parent agent's model), 'haiku' (fastest/cheapest, best for quick lookups), 'sonnet' (balanced default), 'opus' (strongest reasoning), 'fable' (flagship tier). Within the defined-type path, unknown values are rejected with an error — never silently ignored. Ignored (not validated) when fork=true (forks always inherit the parent model) and when resume_thread_id is provided (resume keeps the original execution context)"
                 },
                 "name": {
                     "type": "string",
@@ -316,62 +145,103 @@ impl BaseTool for SubAgentTool {
                 },
                 "fork": {
                     "type": "boolean",
-                    "description": "Set to true to fork the current agent with full conversation context. The forked agent inherits all messages, tools, and system prompt from the parent. Use when the task requires context from the ongoing conversation"
+                    "description": "Set to true to fork the current agent with full conversation context. The forked agent inherits all messages, tools, and system prompt from the parent. Use when the task requires context from the ongoing conversation. Mutually exclusive with subagent_type: when fork=true, do NOT provide subagent_type (new sub-agents and forks are alternative modes)"
                 }
             }
         })
     }
 
+    fn aliases(&self) -> &[&str] {
+        &["task"]
+    }
+
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     async fn invoke(
         &self,
         input: serde_json::Value,
+        _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => return Err("Error: missing required parameter prompt".into()),
-        };
-        let subagent_type = input
-            .get("subagent_type")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let _description = input.get("description").and_then(|v| v.as_str());
-        let _name = input.get("name").and_then(|v| v.as_str());
-        let _isolation = input.get("isolation").and_then(|v| v.as_str());
-        let run_in_background = input
-            .get("run_in_background")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let cwd = input
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&self.parent_cwd)
-            .to_string();
-        let is_fork = input.get("fork").and_then(|v| v.as_bool()).unwrap_or(false)
-            || subagent_type.as_deref() == Some("fork");
+        let InvocationArgs {
+            resume_thread_id,
+            prompt,
+            subagent_type,
+            model,
+            run_in_background,
+            cwd,
+            is_fork,
+        } = InvocationArgs::parse(&input, &self.parent_cwd);
 
-        if run_in_background && self.background_registry.is_some() {
+        // host 提前获取（resume 校验需要 thread_store；R-M2 分支优先级）
+        let host = self.host();
+
+        // ── resume 分支（优先于 bg / fork / agent-def，R-M2）──
+        // 容错语义：resume_thread_id 为有效 UUID 时直接进入恢复分支，subagent_type /
+        // fork 字段被忽略（LLM 常按 schema 惯性同时携带，报错会让恢复被拦两次而放弃；
+        // 宽容处理使恢复总是可成功，多余字段无副作用）。非 UUID 占位符已在解析时
+        // 过滤（见上），不会劫持新建路径。
+        // invoke_resume 先尝试当前会话的 live Info 投递；只有恢复路径才需要磁盘。
+        if let Some(thread_id) = resume_thread_id.as_ref() {
             return self
-                .invoke_background(prompt, subagent_type, cwd, is_fork)
+                .invoke_resume(thread_id.clone(), prompt, cwd, run_in_background)
+                .await;
+        }
+
+        // 非 resume 路径：prompt 必填（required:[] 后由运行时校验兜底）
+        let Some(prompt) = prompt else {
+            return Err("Error: missing required parameter prompt".into());
+        };
+
+        let current_messages = self.current_messages(_ctx.messages);
+
+        let is_mcp_agent = subagent_type
+            .as_deref()
+            .is_some_and(|id| id.starts_with("mcp__"));
+        if is_mcp_agent && run_in_background {
+            return Err("Error: MCP Agents currently support synchronous activation only".into());
+        }
+
+        // 后台路径需要 task_manager（L3：经 parent_session 的 host 或 tool host 回退）。
+        // resume_thread_id.is_none() 为双保险（R-M2）：resume 分支已先返回，此处不可能
+        // 再有 resume 调用——防止未来分支重排时 resume 被 bg 分支静默吞掉。
+        if resume_thread_id.is_none() && run_in_background && host.task_manager.is_some() {
+            return self
+                .invoke_background(
+                    prompt,
+                    subagent_type,
+                    cwd,
+                    is_fork,
+                    current_messages,
+                    model.as_deref(),
+                )
                 .await;
         }
 
         if is_fork {
-            return self.invoke_fork(&prompt, &cwd).await;
+            return self.invoke_fork(&prompt, &cwd, current_messages).await;
         }
 
         let agent_id = match &subagent_type {
             Some(id) => id.clone(),
             None => {
-                return Err(
-                    "Error: please provide subagent_type parameter to specify the agent type, or use fork: true for fork mode"
-                        .into(),
-                )
+                let error = "Error: please provide subagent_type parameter to specify the agent type, or use fork: true for fork mode";
+                return Err(self.agent_error_with_suggestions(error, None, &cwd).into());
             }
         };
 
-        let agent_def = match self.load_agent_def(&agent_id, &cwd) {
-            Ok(a) => a,
-            Err(e) => return Err(e.into()),
+        let agent_def = if is_mcp_agent {
+            self.load_and_approve_mcp_agent(&agent_id).await?
+        } else {
+            match self.load_agent_def(&agent_id, &cwd) {
+                Ok(agent) => agent,
+                Err(error) => {
+                    return Err(self
+                        .agent_error_with_suggestions(&error, Some(&agent_id), &cwd)
+                        .into());
+                }
+            }
         };
 
         let build_result = self
@@ -379,115 +249,72 @@ impl BaseTool for SubAgentTool {
                 &agent_def,
                 &agent_id,
                 &cwd,
-                CancelPolicy::Cascade,
+                peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
                 false,
                 true,
+                model.as_deref(),
             )
             .await?;
 
-        let agent_builder = build_result.builder;
-        let mut state = build_result.state;
-        let child_thread_id = build_result.child_thread_id;
-        let instance_id = child_thread_id.clone();
-        let child_cancel = build_result.cancel_token.unwrap_or_default();
+        let llm = build_result.llm;
 
-        // Register AgentRuntime: only when thread_store is present (non-legacy path)
-        // Panic-safe: DeregisterGuard ensures deregister runs on drop (panic or early return)
-        //
-        // child_cancel is linked to parent via child_token(): parent cancel → child_cancel fires.
-        // The same child_cancel is passed to execute(), so cascade cancel works correctly.
-        let _deregister_guard = if self.thread_store.is_some() {
-            if let Some(ref register) = self.register_runtime {
-                register(
-                    child_thread_id.clone(),
-                    child_cancel.clone(),
-                    "cascade".to_string(),
-                );
-            }
-            DeregisterGuard {
-                thread_id: child_thread_id.clone(),
-                deregister: self.deregister_runtime.clone(),
-            }
-        } else {
-            DeregisterGuard {
-                thread_id: child_thread_id.clone(),
-                deregister: None,
-            }
-        };
-
-        tracing::info!(
-            "[DEADLOCK] SubAgentTool: START child execute, agent_id={}, prompt_len={}",
-            agent_id,
-            prompt.len()
-        );
-        let exec_start = std::time::Instant::now();
-        let exec_result = agent_builder
-            .execute(AgentInput::text(prompt), &mut state, Some(child_cancel))
-            .await;
-        tracing::info!(
-            "[DEADLOCK] SubAgentTool: END child execute ({:.1?}), agent_id={}, is_ok={}",
-            exec_start.elapsed(),
-            agent_id,
-            exec_result.is_ok()
+        let config = self.spawn_config_base(
+            agent_id.clone(),
+            prompt.clone(),
+            Vec::new(),
+            peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
+            build_result.max_iterations,
+            None, // agent 定义路径不包装 fork directive
+            peri_agent::session::subagent::SubagentRunMode::Sync,
+            llm,
+            build_result
+                .tools
+                .into_iter()
+                .map(|t| Arc::from(t) as Arc<dyn BaseTool>)
+                .collect(),
+            build_result.tool_filter,
+            build_result.system_prompt,
+            build_result.skill_names,
+            cwd,
         );
 
-        let (output_summary, stopped_is_error) = match &exec_result {
-            Ok(output) => (output.text.chars().take(500).collect::<String>(), false),
-            Err(e) => (
-                format!("Error: {}", e)
-                    .chars()
-                    .take(500)
-                    .collect::<String>(),
-                true,
-            ),
-        };
-        if let Some(ref handler) = self.event_handler {
-            handler.on_event(AgentEvent::SubagentStopped {
-                agent_name: agent_id.clone(),
-                result: output_summary.clone(),
-                is_error: stopped_is_error,
-                instance_id: instance_id.clone(),
-            });
+        let spawned = self.spawn(config).await?;
+
+        // Interrupted 语义与迁移前一致；文本携带 child_thread_id——主 agent 凭此
+        // 找回执行现场（thread_store 为 None 的测试路径同样带 id：spawned.child_thread_id 恒可用）
+        if spawned.interrupted {
+            return Ok(format!(
+                "child_thread_id: {}\nSub-agent execution was interrupted, resume with Agent(resume_thread_id: {})",
+                spawned.child_thread_id, spawned.child_thread_id
+            ));
         }
-        self.fire_subagent_lifecycle_hook(
-            crate::hooks::types::HookEvent::SubagentStop,
-            &cwd,
-            &agent_id,
-            Some(&output_summary),
-        )
-        .await;
 
-        match exec_result {
-            Ok(output) => {
-                if let Some(ref store) = self.thread_store {
-                    let _ = store.update_thread_status(&child_thread_id, "done").await;
-                }
-                let result_text = format_subagent_result(&output);
-                if self.thread_store.is_some() {
-                    Ok(format!(
-                        "child_thread_id: {}
+        if host.thread_store.is_some() {
+            Ok(format!(
+                "child_thread_id: {}
 {}",
-                        child_thread_id, result_text
-                    ))
-                } else {
-                    Ok(result_text)
-                }
-            }
-            Err(peri_agent::error::AgentError::Interrupted) => {
-                if let Some(ref store) = self.thread_store {
-                    let _ = store
-                        .update_thread_status(&child_thread_id, "cancelled")
-                        .await;
-                }
-                Ok("Sub-agent execution was interrupted".to_string())
-            }
-            Err(e) => {
-                if let Some(ref store) = self.thread_store {
-                    let _ = store.update_thread_status(&child_thread_id, "error").await;
-                }
-                let msg = format!("Sub-agent execution failed: {}", e);
-                Err(msg.into())
-            }
+                spawned.child_thread_id,
+                format_subagent_result(&peri_agent::agent::react::AgentOutput {
+                    text: extract_last_ai_text(&spawned.session),
+                    steps: 0,
+                    tool_calls: Vec::new(),
+                    stop_reason: None,
+                    block_continue: None,
+                })
+            ))
+        } else {
+            Ok(format_subagent_result(
+                &peri_agent::agent::react::AgentOutput {
+                    text: extract_last_ai_text(&spawned.session),
+                    steps: 0,
+                    tool_calls: Vec::new(),
+                    stop_reason: None,
+                    block_continue: None,
+                },
+            ))
         }
     }
 }
+
+/// 复用 peri-agent 的 subagent 结果格式与文本提取
+use peri_agent::session::subagent::{extract_last_ai_text, format_subagent_result};

@@ -1,0 +1,676 @@
+//! ACP Host 装配——TUI / print / stdio 三路径共用的 host 装配函数。
+//!
+//! 3.0 目标（`docs/top-level.md` §7/§8）：ACP Host = 部署单元，由 cli/TUI 作为
+//! 部署装配点启动；客户端只经 ACP 拿数据。本模块收拢三处此前各自复制的主机
+//! 装配（`launch.rs` 内嵌 server 装配、`cli_print.rs` 业务装配、stdio init），
+//! 避免装配逻辑漂移。中间件链序事实源仍为 Agent 层 session 工厂
+//! （ARC-MIDDLEWARE-001）：本模块只组装 hook 组（顺序与迁移前一致），
+//! 不参与链序蓝本。
+
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+use peri_acp_types::command::command_route::RouteEntry;
+use peri_acp_types::cron::CronSchedulerPort;
+use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
+use peri_acp_types::mcp::McpSubscriptionPort;
+use peri_acp_types::permission::SharedPermissionMode;
+use peri_acp_types::plugin::{PluginLoadResult, PluginManagerPort};
+use peri_acp_types::ports::{McpPoolPort, SkillsPort, ToolSearchPort};
+use peri_acp_types::skills::SkillRoot;
+use peri_acp_types::store::ThreadStore;
+
+use crate::provider::{LlmProvider, PeriConfig};
+use crate::session::SessionManager;
+
+use super::task_scope::{HostTaskKind, HostTaskOwner, HostTaskOwnerKind};
+use super::AcpServerConfig;
+
+/// host 装配输入：调用方（cli/TUI/print/stdio）持有的轻量输入。
+///
+/// M-TUI 收口（`spec/issues/2026-08-05-3.0-m-tui-acp-client-path.md`）：
+/// middlewares 具体实现（CronScheduler / McpClientPool / ToolSearchIndex /
+/// SkillsProvider / PluginManager / SettingsHooksLoader /
+/// WorkflowAgentMiddlewareFactory / 插件聚合数据）全部由本装配面内部构造
+/// ——「ACP Host = 部署单元」，TUI/print/stdio 只提供协议面输入
+/// （provider / config / permission / thread_store / cwd），不再直接触碰
+/// 业务 crate（§0 依赖方向，`docs/top-level.md` §7/§8）。
+#[derive(Clone)]
+pub(crate) struct WorkspaceAssembly {
+    pub(crate) startup_cwd: String,
+    pub(crate) bare: bool,
+    pub(crate) mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+}
+
+/// Discover frozen inputs for the saved workspace without starting MCP, hooks or tasks.
+/// Plugin discovery follows normal session assembly (including its manifest cache repair).
+pub(crate) fn build_legacy_frozen_data(
+    host: &AcpServerConfig,
+    cwd: &str,
+) -> anyhow::Result<crate::session::executor::FrozenSessionData> {
+    let Some(source) = host.workspace_assembly.as_ref() else {
+        return Ok(host.session_manager.build_frozen_data(
+            cwd,
+            &host.plugin_skill_roots,
+            &host.plugin_agent_dirs,
+        ));
+    };
+    let config = if std::fs::canonicalize(&source.startup_cwd).ok().as_deref()
+        == Some(std::path::Path::new(cwd))
+    {
+        host.peri_config.read().clone()
+    } else {
+        crate::provider::ConfigSource::load_at(
+            std::path::Path::new(cwd),
+            host.config_source.global_path().to_owned(),
+        )?
+        .loaded_merged()
+    };
+    let plugins = if source.bare {
+        None
+    } else {
+        let claude_dir = dirs_next::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".claude");
+        Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
+            &claude_dir,
+            Some(std::path::Path::new(cwd)),
+        ))
+    };
+    Ok(host.session_manager.build_frozen_data_with_config(
+        &config,
+        cwd,
+        plugins
+            .as_ref()
+            .map(|plugins| plugins.all_skill_roots.as_slice())
+            .unwrap_or_default(),
+        plugins
+            .as_ref()
+            .map(|plugins| plugins.all_agent_dirs.as_slice())
+            .unwrap_or_default(),
+    ))
+}
+
+/// Bind session execution identity before static discovery or dynamic load can use the pool.
+/// A host-only pool stays unbound; its dynamic connector must reject implicit execution.
+fn pending_mcp_pool(
+    spawner: peri_middlewares::mcp::McpTaskSpawner,
+    profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+    session_cwd: Option<&std::path::Path>,
+) -> Arc<peri_middlewares::mcp::McpClientPool> {
+    let pool = Arc::new(
+        peri_middlewares::mcp::McpClientPool::new_pending_with_spawner_and_profile(
+            spawner, profile,
+        ),
+    );
+    if let Some(cwd) = session_cwd {
+        if let Err(error) = pool.bind_execution_cwd(cwd) {
+            // The pool records initialization failure and remains unusable for
+            // implicit subprocess launches. Never fall back to the host's cwd.
+            tracing::error!(%error, cwd = %cwd.display(), "MCP session execution directory binding failed");
+        }
+    }
+    pool
+}
+
+pub struct HostAssemblyInput {
+    pub provider: LlmProvider,
+    pub peri_config: Arc<RwLock<PeriConfig>>,
+    /// 配置源（读写路径决策的唯一事实源：TUI/print/stdio 共享，启动早期
+    /// 经 [`crate::provider::ConfigSource::load`] 构建一次）。
+    pub config_source: Arc<crate::provider::ConfigSource>,
+    pub permission_mode: Arc<SharedPermissionMode>,
+    pub thread_store: Arc<dyn ThreadStore>,
+    /// 工作目录（用于加载 project/local settings hooks）
+    pub cwd: String,
+    /// 跳过 settings hooks / LSP / 插件（print --bare 语义）
+    pub bare: bool,
+    /// 驱动 cron tick（TUI=true，复刻迁移前 TUI 每秒 tick 行为；print/stdio
+    /// 保持现状无 tick——行为零变化，L2 遗留登记 M-TUI issue）。
+    pub drive_cron_tick: bool,
+}
+
+/// Construct terminal hook execution; the session environment owns admission and joining.
+pub(super) fn build_session_end_task(
+    hooks: Vec<RegisteredHook>,
+    cwd: String,
+    session_id: String,
+    model: String,
+    tasks: Arc<dyn peri_acp_types::tasks::TaskManager>,
+) -> peri_acp_types::tasks::OwnedTaskFuture {
+    Box::pin(async move {
+        peri_middlewares::hooks::fire_standalone_lifecycle_hooks_owned(
+            &hooks,
+            peri_acp_types::hooks::HookEvent::SessionEnd,
+            &cwd,
+            &session_id,
+            "",
+            &model,
+            None,
+            Some("session_close"),
+            Some(tasks),
+        )
+        .await;
+    })
+}
+
+/// 组装 settings hook 组（plugin → global → project → local，顺序即迁移前
+/// TUI/print/stdio 三处一致的既有顺序，ARC-MIDDLEWARE-001 不重排）。
+///
+/// `skip_settings_hooks`：bare 模式跳过 global/project/local（与 print 既有语义
+/// 一致）；plugin hooks 为空时不产生空组。三级 settings hooks 经
+/// [`SettingsHooksPort`] 注入（装配点构造，磁盘加载留在实现方）。
+pub fn assemble_hook_groups(
+    plugin_hooks: &[RegisteredHook],
+    settings_hooks: &dyn SettingsHooksPort,
+    cwd: &str,
+    skip_settings_hooks: bool,
+) -> Vec<Vec<RegisteredHook>> {
+    let mut hook_groups: Vec<Vec<RegisteredHook>> = Vec::new();
+    if !plugin_hooks.is_empty() {
+        hook_groups.push(plugin_hooks.to_vec());
+    }
+    if skip_settings_hooks {
+        return hook_groups;
+    }
+    let global_hooks = settings_hooks.global();
+    if !global_hooks.is_empty() {
+        hook_groups.push(global_hooks);
+    }
+    let project_hooks = settings_hooks.project(cwd);
+    if !project_hooks.is_empty() {
+        hook_groups.push(project_hooks);
+    }
+    let local_hooks = settings_hooks.local(cwd);
+    if !local_hooks.is_empty() {
+        hook_groups.push(local_hooks);
+    }
+    hook_groups
+}
+
+/// 构造共享 SessionManager（支撑 cascade cancel 子 agent 与 goal_state）。
+///
+/// 装配细节与迁移前 `launch.rs` / `cli_print.rs` / stdio init 三处一致：
+/// peri_config 冻结快照 + cron scheduler（可选）注入。
+#[allow(clippy::too_many_arguments)] // 装配注入面：端口/工厂逐项注入，L5 装配迁出后可分组
+pub fn build_session_manager(
+    thread_store: Arc<dyn ThreadStore>,
+    provider: LlmProvider,
+    peri_config: &Arc<RwLock<PeriConfig>>,
+    permission_mode: Arc<SharedPermissionMode>,
+    cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,
+    mcp_subscription: Option<Arc<dyn McpSubscriptionPort>>,
+    dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
+    skills: Arc<dyn SkillsPort>,
+    plugin_command_entries: Vec<RouteEntry>,
+    plugin_skill_roots: Vec<SkillRoot>,
+) -> SessionManager {
+    let peri_config_snapshot = Arc::new(peri_config.read().clone());
+    SessionManager::new(
+        thread_store,
+        provider,
+        peri_config_snapshot,
+        permission_mode,
+        None,
+        cron_scheduler,
+        mcp_subscription,
+        dynamic_mcp,
+        // 装配注入面：per-session 后台任务管理器（Agent 层实现，per-session
+        // 聚合：registry + bg shell 执行），由本装配点构造后注入（全路径引用）；
+        // ACP 协议面只持有契约 `peri_acp_types::tasks::TaskManager`。
+        Some(Arc::new(|| {
+            Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
+                as Arc<dyn peri_acp_types::tasks::TaskManager>
+        })),
+        skills,
+        plugin_command_entries,
+        plugin_skill_roots,
+    )
+}
+
+/// 组装完整的 ACP host 配置（TUI / print 路径入口）。
+///
+/// 自迁移前 `launch.rs` 的内嵌 server 装配原样搬移：hook 组加载、tool search
+/// index、shared tools、Langfuse（环境启用时创建）、SessionManager。
+///
+/// M-TUI 收口：middlewares 具体实现（cron / MCP 池 / 工具检索索引 / skills /
+/// plugin / settings hooks / workflow 装配端口）与插件聚合数据在本装配面
+/// 内部构造（`peri-middlewares` 引用豁免见 `scripts/import-exemptions.conf`
+/// 边 2 assemble 路径）；行为与迁移前三路径（launch / cli_print / stdio）
+/// 各自装配一致（cron tick 驱动、MCP 初始化、孤儿插件清理时机均复刻）。
+pub async fn assemble_server_config(input: HostAssemblyInput) -> AcpServerConfig {
+    assemble_server_config_with_mcp_profile(
+        input,
+        peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+        false,
+        None,
+    )
+    .await
+}
+
+/// stdio deployment variant. The assembly boundary derives the concrete MCP profile;
+/// TUI/MPSC always use [`assemble_server_config`].
+pub async fn assemble_server_config_with_mcp_apps(
+    input: HostAssemblyInput,
+    apps_enabled: bool,
+) -> AcpServerConfig {
+    assemble_server_config_with_mcp_profile(
+        input,
+        peri_middlewares::mcp::apps::deployment_profile(apps_enabled),
+        false,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn assemble_server_config_with_mcp_profile(
+    input: HostAssemblyInput,
+    mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile,
+    session_resources: bool,
+    activation: Option<tokio_util::sync::CancellationToken>,
+) -> AcpServerConfig {
+    let (host_task_owner, host_task_spawner) = HostTaskOwner::new();
+    let (mcp_task_owner, mcp_task_spawner) = peri_middlewares::mcp::McpTaskOwner::new();
+    let HostAssemblyInput {
+        provider,
+        peri_config,
+        config_source,
+        permission_mode,
+        thread_store,
+        cwd,
+        bare,
+        drive_cron_tick,
+    } = input;
+
+    let claude_dir = dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".claude");
+
+    // ── 插件聚合数据（bare 时跳过；迁移前 TUI launch / cli_print 各自构造）──
+    let plugin_data: Option<PluginLoadResult> = if bare || !session_resources {
+        None
+    } else {
+        Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
+            &claude_dir,
+            Some(std::path::Path::new(&cwd)),
+        ))
+    };
+
+    // ── cron 调度器（迁移前 TUI launch / cli_print 各自构造；tick 驱动仅
+    //    TUI 复刻——drive_cron_tick flag，L2 遗留登记 M-TUI issue）──
+    let cron_scheduler: Option<Arc<dyn CronSchedulerPort>> = {
+        let scheduler = Arc::new(parking_lot::Mutex::new(
+            peri_middlewares::cron::CronScheduler::new(tokio::sync::mpsc::unbounded_channel().0),
+        ));
+        if drive_cron_tick {
+            let tick_scheduler = scheduler.clone();
+            let shutdown = host_task_spawner.shutdown_token();
+            let _ = host_task_spawner.spawn(
+                HostTaskOwnerKind::Startup,
+                HostTaskKind::CronTick,
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                    loop {
+                        tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            _ = interval.tick() => tick_scheduler.lock().tick(),
+                        }
+                    }
+                },
+            );
+        }
+        Some(Arc::new(peri_middlewares::cron::CronSchedulerPortHandle(
+            scheduler,
+        )))
+    };
+
+    // ── MCP 连接池（bare 时跳过；后台初始化不阻塞，迁移前 cli_print 语义）──
+    // OAuth 授权事件通道：MCP 授权回调（AuthorizationNeeded/Completed/Failed）
+    // 经 tx 转发 AcpEvent，run_acp_server 侧消费者以 peri/agent_event 送达 TUI。
+    let (oauth_event_tx, oauth_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::event::oauth::HostOAuthEvent>();
+    let mcp_pool_concrete: Option<Arc<peri_middlewares::mcp::McpClientPool>> = if bare
+        || !session_resources
+    {
+        None
+    } else {
+        let pool = pending_mcp_pool(
+            mcp_task_spawner.clone(),
+            mcp_profile.clone(),
+            Some(std::path::Path::new(&cwd)),
+        );
+        let pool_clone = pool.clone();
+        let cwd_clone = cwd.clone();
+        let claude_home_clone = claude_dir.clone();
+        let (init_tx, _init_rx) =
+            tokio::sync::watch::channel(peri_middlewares::mcp::McpInitStatus::Pending);
+        // OAuth 事件回调：AuthorizationNeeded 时注册回传通道（TUI 经
+        // mcp/oauth_callback RPC 投递授权码）并转发 OauthNeeded；完成/失败
+        // 直接转发对应 AcpEvent。L5 装配面豁免全路径引用（import-exemptions
+        // ACP-biz-fullpath），不引入 use 语句。
+        type OAuthFlowEvent = peri_middlewares::mcp::oauth_flow::OAuthFlowEvent;
+        let oauth_event_callback: Option<
+            Box<dyn Fn(peri_middlewares::mcp::oauth_flow::OAuthFlowEvent) + Send + Sync>,
+        > = {
+            let cb_tx = oauth_event_tx.clone();
+            let cb_pool = Arc::downgrade(&pool);
+            Some(Box::new(move |event: OAuthFlowEvent| match event {
+                OAuthFlowEvent::DynamicAuthorizationNeeded {
+                    instance,
+                    flow_id,
+                    server_name,
+                    authorization_url,
+                    callback_tx,
+                } => {
+                    let Some(cb_pool) = cb_pool.upgrade() else {
+                        return;
+                    };
+                    if !cb_pool.register_dynamic_oauth_callback(
+                        instance.clone(),
+                        &flow_id,
+                        callback_tx,
+                    ) {
+                        return;
+                    }
+                    let _ = cb_tx.send(
+                        crate::event::oauth::HostOAuthEvent::DynamicAuthorizationNeeded {
+                            instance,
+                            flow_id,
+                            server_name,
+                            authorization_url,
+                        },
+                    );
+                }
+                OAuthFlowEvent::AuthorizationNeeded {
+                    flow_id,
+                    server_name,
+                    authorization_url,
+                    callback_tx,
+                } => {
+                    let Some(cb_pool) = cb_pool.upgrade() else {
+                        return;
+                    };
+                    if !cb_pool.register_oauth_callback(&server_name, &flow_id, callback_tx) {
+                        return;
+                    }
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::AuthorizationNeeded {
+                        flow_id,
+                        server_name,
+                        authorization_url,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationCompleted {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Completed {
+                        flow_id,
+                        server_name,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationFailed {
+                    flow_id,
+                    server_name,
+                    failure_kind,
+                    error,
+                } => {
+                    let failure_class = match failure_kind {
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::CallbackUnavailable => crate::event::oauth::OAuthFailureClass::CallbackUnavailable,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::CallbackTimeout => crate::event::oauth::OAuthFailureClass::CallbackTimeout,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::ProviderRejected => crate::event::oauth::OAuthFailureClass::ProviderRejected,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::ConnectionFailed => crate::event::oauth::OAuthFailureClass::ConnectionFailed,
+                        peri_middlewares::mcp::oauth_flow::OAuthFailureKind::Internal => crate::event::oauth::OAuthFailureClass::Internal,
+                    };
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Failed {
+                        flow_id,
+                        server_name,
+                        failure_class,
+                        legacy_error: error,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationCancelled {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Cancelled {
+                        flow_id,
+                        server_name,
+                    });
+                }
+                OAuthFlowEvent::AuthorizationRestored {
+                    flow_id,
+                    server_name,
+                } => {
+                    let _ = cb_tx.send(crate::event::oauth::HostOAuthEvent::Restored {
+                        flow_id,
+                        server_name,
+                    });
+                }
+            }))
+        };
+        let _ = pool.spawn_background(peri_middlewares::mcp::McpTaskKey::Initialize, async move {
+            if let Some(activation) = activation {
+                activation.cancelled().await;
+            }
+            peri_middlewares::mcp::McpClientPool::run_initialize(
+                pool_clone,
+                std::path::Path::new(&cwd_clone),
+                &claude_home_clone,
+                init_tx,
+                oauth_event_callback,
+                None,
+            )
+            .await;
+        });
+        Some(pool)
+    };
+    let dynamic_mcp_concrete = peri_middlewares::mcp::dynamic::DynamicMcpRegistry::new(
+        mcp_task_spawner.clone(),
+        Arc::new(
+            peri_middlewares::mcp::dynamic::ProductionDynamicMcpConnector::from_environment(
+                mcp_task_spawner.clone(),
+                mcp_pool_concrete.clone().unwrap_or_else(|| {
+                    pending_mcp_pool(
+                        mcp_task_spawner.clone(),
+                        mcp_profile.clone(),
+                        session_resources.then_some(std::path::Path::new(&cwd)),
+                    )
+                }),
+            ),
+        ),
+    );
+    let dynamic_mcp: Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort> =
+        dynamic_mcp_concrete;
+    // 订阅端口同源复用：同一 McpClientPool 同时承担 McpPoolPort（命令面）与
+    // McpSubscriptionPort（订阅通知 → 会话 inbox 唤醒）两个角色。
+    let mcp_pool: Option<Arc<dyn McpPoolPort>> =
+        mcp_pool_concrete.clone().map(|p| p as Arc<dyn McpPoolPort>);
+    let mcp_subscription: Option<Arc<dyn McpSubscriptionPort>> = mcp_pool_concrete
+        .clone()
+        .map(|p| p as Arc<dyn McpSubscriptionPort>);
+    let mcp_apps_relay: Option<Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>> =
+        if mcp_profile.apps_enabled() {
+            mcp_pool_concrete.clone().map(|pool| {
+                Arc::new(peri_middlewares::mcp::apps_relay::PoolMcpAppsRelay::new(
+                    pool,
+                )) as Arc<dyn peri_acp_types::mcp_apps::McpAppsRelayPort>
+            })
+        } else {
+            None
+        };
+
+    // ── 资源类/业务面端口默认实现（构造下沉：ACP Host = 部署单元）──
+    let tool_search_index: Arc<dyn ToolSearchPort> =
+        Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
+    let skills: Arc<dyn SkillsPort> = Arc::new(peri_middlewares::host_ports::SkillsProvider);
+    let plugin_manager: Arc<dyn PluginManagerPort> =
+        Arc::new(peri_middlewares::host_ports::PluginManager);
+    let settings_hooks: Arc<dyn SettingsHooksPort> =
+        Arc::new(peri_middlewares::host_ports::SettingsHooksLoader);
+    let workflow_middleware_factory =
+        peri_middlewares::assembly::default_workflow_middleware_factory();
+
+    // E2：启动时清理孤儿插件文件（迁移前 TUI launch 行为；bare 时跳过）
+    if !bare && !session_resources {
+        let claude_dir_clone = claude_dir.clone();
+        let _ = host_task_spawner.spawn(
+            HostTaskOwnerKind::Startup,
+            HostTaskKind::PluginCleanup,
+            async move {
+                if let Err(e) =
+                    peri_middlewares::plugin::cleanup_orphaned_plugins(&claude_dir_clone).await
+                {
+                    tracing::warn!(target: "peri", error = %e, "启动时清理孤儿插件文件失败");
+                } else {
+                    tracing::info!(target: "peri", "启动时清理孤儿插件文件完成");
+                }
+            },
+        );
+    }
+
+    let plugin_skill_roots = plugin_data
+        .as_ref()
+        .map(|pd| pd.all_skill_roots.clone())
+        .unwrap_or_default();
+    // Phase 6 B2：插件命令静态条目预转（全路径引用豁免见
+    // scripts/import-exemptions.conf 边 2 assemble 路径；bare 时为空）。
+    let plugin_command_entries = plugin_data
+        .as_ref()
+        .map(|pd| peri_middlewares::plugin::plugin_route_entries(&pd.all_commands))
+        .unwrap_or_default();
+    let plugin_agent_dirs = plugin_data
+        .as_ref()
+        .map(|pd| pd.all_agent_dirs.clone())
+        .unwrap_or_default();
+    // H5：全局 settings.json（config.lspServers）与插件 LSP 服务器合并
+    //（优先级对齐 MCP：global < plugin；无插件时全局配置单独生效）。
+    // 读取路径跟随宿主全局配置加载机制（config_path，支持测试重定向）。
+    let plugin_lsp_servers = peri_middlewares::assembly::load_merged_lsp_servers(
+        &crate::provider::config_path(),
+        plugin_data
+            .as_ref()
+            .map(|pd| pd.all_lsp_servers.clone())
+            .unwrap_or_default(),
+    );
+    let plugin_hooks = plugin_data
+        .as_ref()
+        .map(|pd| pd.all_hooks.clone())
+        .unwrap_or_default();
+    let plugin_loaded = plugin_data
+        .as_ref()
+        .map(|pd| pd.plugins.clone())
+        .unwrap_or_default();
+
+    let hook_groups = assemble_hook_groups(
+        &plugin_hooks,
+        settings_hooks.as_ref(),
+        &cwd,
+        bare || !session_resources,
+    );
+    let flat_hooks: Vec<RegisteredHook> = hook_groups.iter().flatten().cloned().collect();
+    tracing::info!(
+        groups = hook_groups.len(),
+        total_hooks = flat_hooks.len(),
+        "Hook groups assembled for ACP host"
+    );
+
+    let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::new()));
+
+    let session_manager = build_session_manager(
+        thread_store.clone(),
+        provider.clone(),
+        &peri_config,
+        permission_mode.clone(),
+        cron_scheduler.clone(),
+        mcp_subscription,
+        Some(Arc::clone(&dynamic_mcp)),
+        skills.clone(),
+        // Phase 6 B2/C1：插件静态条目 + 插件 skill roots 注入 session
+        // 管理器（会话创建时按 内置 → skills → 插件 顺序注册）。
+        plugin_command_entries.clone(),
+        plugin_skill_roots.clone(),
+    );
+
+    // Langfuse 观测（与迁移前 TUI/stdio/print 一致：环境启用时创建）
+    let (langfuse_session, langfuse_shutdown_owner) = if let Some(config) = (!session_resources)
+        .then(peri_controller::langfuse::LangfuseConfig::from_env)
+        .flatten()
+    {
+        tracing::info!("Langfuse tracing enabled (host mode)");
+        match peri_controller::langfuse::LangfuseSession::new_owned(config, "live".into()).await {
+            Some((session, owner)) => (Some(session), Some(owner)),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    AcpServerConfig {
+        workspace_assembly: (!session_resources).then(|| WorkspaceAssembly {
+            startup_cwd: cwd.clone(),
+            bare,
+            mcp_profile,
+        }),
+        host_task_owner: Some(host_task_owner),
+        host_task_spawner,
+        mcp_task_owner: Some(Box::new(mcp_task_owner)),
+        provider: Arc::new(RwLock::new(provider)),
+        peri_config,
+        permission_mode,
+        cron_scheduler,
+        mcp_pool,
+        mcp_apps_relay,
+        dynamic_mcp: Some(dynamic_mcp),
+        oauth_event_tx: Some(oauth_event_tx),
+        oauth_event_rx: Some(oauth_event_rx),
+        channel_state: None, // ServiceRegistry.channel_state 已删除
+        plugin_skill_roots,
+        plugin_command_entries,
+        plugin_agent_dirs,
+        plugin_hooks: flat_hooks,
+        // 仅插件 hooks（hooks 面板数据源；plugin/list 命令面返回，TUI 不再
+        // 直读 plugin_data）
+        plugin_hooks_only: plugin_hooks,
+        plugin_loaded,
+        hook_groups,
+        plugin_lsp_servers,
+        tool_search_index,
+        skills,
+        plugin_manager,
+        settings_hooks,
+        shared_tools,
+        workflow_middleware_factory,
+        thread_store: thread_store.clone(),
+        controller: Arc::new(peri_controller::Controller::new(thread_store.clone())),
+        langfuse_session,
+        langfuse_shutdown_owner,
+        // 默认 false（TUI/print 保留全部命令）；stdio 装配点（assemble_stdio_config）
+        // 显式置 true，过滤 rewind/clear。
+        stdio_command_filter: false,
+        config_source,
+        session_manager,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worktree_mcp_pool_is_bound_before_deferred_initialization() {
+        let target = tempfile::TempDir::new().unwrap();
+        let sibling = tempfile::TempDir::new().unwrap();
+        let (_owner, spawner) = peri_middlewares::mcp::McpTaskOwner::new();
+        let pool = pending_mcp_pool(
+            spawner,
+            peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+            Some(target.path()),
+        );
+        assert_eq!(pool.snapshot()["initPhase"], "pending");
+        assert!(pool.bind_execution_cwd(sibling.path()).is_err());
+        assert_eq!(
+            pool.bind_execution_cwd(target.path()).unwrap(),
+            target.path()
+        );
+    }
+}

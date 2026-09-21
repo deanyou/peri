@@ -1,112 +1,66 @@
 # peri-tui
 
-TUI 应用，纯 ACP client 前端。运行时仅通过 `peri-acp` 的 `MpscTransport`（in-memory channel pair）与 ACP Server 通信，不直接依赖 `peri-agent`/`peri-middlewares` 的运行时路径。
+## Scope
 
-## 依赖说明
+`peri-tui` 是基于 ratatui-kit 的终端客户端。用户交互主路径经 ACP transport；crate 当前仍直接依赖 `peri-agent`、`peri-middlewares` 等 crate 的类型、配置和桥接代码。TUI 不得直接驱动 agent loop，Agent 执行入口保持在 ACP 会话执行路径。
 
-`Cargo.toml` 保留 `peri-agent`/`peri-middlewares` 作为**类型依赖**（UI 渲染所需的 `BaseMessage`/`ContentBlock` 等类型），运行时通信仅通过 `peri-acp`。
+## 数据流/架构
 
-## 核心文件
-
-| 文件 | 职责 |
-|------|------|
-| `src/acp_client/client.rs` | ACP client 封装，`AcpNotification` 变体定义 |
-| `src/acp_server/requests.rs` | ACP 请求路由 |
-| `src/app/agent.rs` | `ExecutorEvent → AgentEvent` 映射（`map_executor_event`） |
-| `src/app/agent_ops/acp_bridge.rs` | `AcpNotification → AgentEvent` 桥接 |
-| `src/app/agent_ops/lifecycle.rs` | Agent 生命周期处理 |
-| `src/app/agent_submit.rs` | 用户输入提交入口 |
-| `src/app/agent_compact.rs` | Compact 事件处理：pipeline 清理 + UI 通知 |
-| `src/app/message_pipeline.rs` | `MessagePipeline`：规范状态维护 + `messages_to_view_models()` |
-| `src/ui/main_ui/mod.rs` | 主布局 |
-| `src/i18n/` | 国际化模块（`LcRegistry` + Fluent） |
-
-## ACP 数据流
-
-```
-TUI 输入 → AcpTuiClient.new_session() / .prompt()
-         → MpscClientTransport.send_request/notification()
-         → MpscServerTransport.recv() (ACP Server, tokio::spawn)
-         → ExecutorEvent → TransportEventSink.push_event()
-         → AcpTuiClient.pump_notifications() → AcpNotification::AgentEvent
-         → agent_ops::acp_bridge::handle_acp_notification()
-         → map_executor_event() → AgentEvent
-         → handle_agent_event() → UI 更新
+```text
+ACP notification → acp_notifier → acp_bridge / BridgeState
+                 → VIEW_MODELS + atoms → components
 ```
 
-**[TRAP]** TUI 层数据必须通过 ACP 协议到达 ACP 层，禁止直连。所有 TUI → ACP Server 的状态变更必须通过 `acp_client` 的协议方法。TUI 本地清空状态（如 `new_thread()`）不等于 ACP Server 端状态同步——必须同时通过 ACP 协议通知 Server 侧。（详见 spec/global/domains/agent.md#issue_2026-05-29-clear-keeps-acp-server-history）
+用户提交、取消、会话加载及交互响应经 ACP client/transport 发送；通知在 `kit/acp_notifier.rs` 解码并进入 bridge，`kit/acp_bridge.rs` 维护 `BridgeState` 并发布渲染状态。组件只订阅和渲染状态，不能在 render 中驱动 Agent。
 
-## 消息渲染
+## 任务路由
 
-所有消息更新通过统一 `RebuildAll` 路径触发（无增量更新）。`MessagePipeline` 维护规范状态，`build_tail_vms()` 构建尾部 VMs，`messages_to_view_models()` 是唯一转换入口。流式文本通过 16ms 间隔 + 自适应分块策略触发 RebuildAll。独立 `RenderThread` 处理渲染，通过 `RenderCache(RwLock)` 与 UI 线程同步。
+| 任务 | 首选位置 |
+| --- | --- |
+| 入口、任务启动、ACP client 生命周期 | `src/kit/entry.rs`、`src/acp_client/` |
+| ACP notification 解码与状态发布 | `src/kit/acp_notifier.rs`、`src/kit/acp_bridge.rs`、`src/kit/acp_events/` |
+| 全局状态与 ViewModel | `src/kit/atoms.rs`、`src/kit/acp_types.rs` |
+| 输入、提交、历史、@mention、slash | `src/kit/input_area.rs`、`src/kit/input_history.rs`、`src/kit/submit_consumer.rs` |
+| 消息渲染、滚动、选择 | `src/kit/message_area/`、`src/kit/markdown/`、`src/kit/text_selection.rs` |
+| 键盘、鼠标、焦点与事件优先级 | `src/kit/event_handlers.rs`、`src/kit/focus_router.rs` |
+| 面板、弹窗与确认交互 | `src/kit/panels/`、`src/kit/popups/`、`src/kit/panel_overlay.rs` |
+| 国际化与主题 | `src/i18n/`、`locales/`、`peri-theme` atoms |
+| 测试 | 与目标模块同目录的 `*_test.rs` 或 `#[cfg(test)]` 模块 |
 
-**[TRAP]** Ephemeral VM（SystemNote/CacheWarning）依赖锚点机制：`ephemeral_notes: Vec<(usize, MessageViewModel)>` 记录插入时的 `view_messages.len()` 作为位置索引（非 MessageId）。RebuildAll 时通过 `(anchor - prefix_len).min(tail_len) + prefix_len` 计算插入位置。`retain()` 路径通过 `anchor >= prefix_len` 过滤过期锚点。新增 ephemeral VM 类型必须同步更新过滤逻辑。（详见 spec/global/domains/message-pipeline.md#issue_2026-05-12-systemnote-position-drift-on-rebuild）
+输入历史持久化由 `src/kit/input_history.rs` 管理，路径为 `~/.peri/input-history.json`；不要另建平行存储。
 
-**[TRAP]** BaseMessage vs MessageViewModel 维度混淆：`completed_len_at_round_start` 是 BaseMessage 长度，`prefix_len` 是 VM 索引，两者非 1:1。`prefix_len` 必须用 `round_start_vm_idx`，`drain` 必须钳位。**禁止 Pipeline 内部返回 `RebuildAll`**——Pipeline 不拥有 `round_start_vm_idx`。（详见 spec/global/domains/message-pipeline.md#issue_2026-05-20-llm-error-message-area-clear-flicker）
+## 稳定不变量
 
-**[INFO]** `MessageViewModel` 已不再包含 `message_id` 字段。SubAgentGroup 使用 `instance_id: Option<String>` 标识。
+- ACP 是交互与 Agent 执行的边界；新增请求、通知或终止事件须覆盖 ACP 映射、bridge 和组件消费，终止事件必须离开 loading 状态。
+- `BridgeState` 是 ACP 事件到 `VIEW_MODELS` 与 atoms 的状态边界。切换会话或重置时，必须过滤陈旧 session 事件并清理旧会话状态。
+- 会话列表经 ACP 的 `peri.sessionWorkspaceV1` scope 查询：默认 Project、可切 Workspace / All；分页未结束时数量标明“已加载/还有更多”，向下键、PageDown 或 End 接近已加载末尾时追加下一页，重复按键合并同页请求。未绑定旧历史继续列出，`v` 通过只读 history RPC 预览且不切换执行会话；`-c` 精确选择启动工作区内当前相对目录，`-r` / 普通恢复先查询保存 binding 或旧会话保存的 cwd，再由 load 接纳旧根。查询或恢复失败不得通过 `ensure_session` 无声新建或把排队输入发给旧会话。执行所有权不可得不是失败：`session/load` 按只读准入进入（`_meta.peri.sessionWorkspaceV1.read_only` → `SESSION_READ_ONLY`，状态栏说明原因），dirty 只读准入同样走确认——接受取回所有权，取消只是保持只读，取回失败也保留首次只读准入（会话不因重试失败被丢弃）。`SESSION_READ_ONLY` 是交互投影：只有交互客户端写入，每次会话边界清空；宿主会在响应 `session/load` 前回放历史，因此每个可能被回放的 load（含 reset 后的重载与重取）之前都要有一次 `project_session_boundary`，否则两次回放叠加在同一个 `committed` 上、消息区整段重复。写入与执行仍由 host 的 `require_owner` 把关，客户端不复制该规则、不另设输入闸门。
+- `ACTIVE_EXECUTION_CWD` 仅在 session 初始化提交后发布，驱动路径展示、文件补全和本地导出；启动 cwd 独立保留给新会话。Hooks / Plugin / MCP 面板按 active session ID 查询实际环境，不能持续回写启动快照。
+- History 面板使用单行会话列表与固定详情/操作栏；按容器高度计算视口，列表和只读预览各持有独立滚动状态。刷新按 thread ID 保留选择，执行操作使用已选身份，删除确认固定待删 ID，不能用旧索引查新列表决定目标。
+- Config / Model / Login / Betas / Theme 的持久配置仍编辑宿主启动时选中的 `ConfigSource`，面板明确标识“宿主配置”和实际保存路径；权限切换（配置行、Shift+Tab、slash）及会话模型选择等运行请求继续按 session ID 路由。整份配置上送不带 session ID；切换会话不重定位宿主配置写入。同配置源会话刷新 provider 连接并失效模型缓存，保留各自的模型/profile 选择和 frozen 数据。
+- render body 不写 atom；render 内派生缓存使用既有无通知写入模式，副作用放在事件或 effect 边界。
+- `#[component]` 的 hooks 必须在所有条件分支、`match` 与提前返回前按稳定顺序调用。
+- 消息区、输入区、状态栏与后台任务栏的绘制区域由 `kit/layout.rs` 的 `CenterBandHook` 收进居中带（§3.1）。带内的换行宽度、命中列与光标列都以带内相对坐标为准，位置 tracker 必须注册在 band hook 之后，否则记录的是未收窄的整幅宽度。滚动条是窗口级 chrome（锚在终端最右列）：`ScrollbarHook` 必须在 band hook **之前**注册并在 `pre_component_draw` 捕获收窄前的矩形，渲染与命中测试共用该矩形。
+- 交互事件按 focus owner、语义命中区域、z-order 与 pointer capture 分发；弹窗/面板前景事件和遮罩必须先于背景处理，避免 click-through。
+- 用户可见文本使用 i18n；新增 key 同步更新 `locales/en/main.ftl` 和 `locales/zh-CN/main.ftl`。主题从 `peri-theme` atoms 获取，不硬编码颜色。
+- 文本编辑、截断与坐标按 Unicode 字符边界和终端显示宽度处理；不得用字节长度替代显示宽度。
+- TUI MCP panel 的 `ServiceRegistry` 持有唯一 non-Clone `McpTaskOwner`；初始化 必须经 pool 的 weak spawner 准入。teardown 顺序为 pool begin-close → owner abort/join → pool close，并检查 `McpPoolShutdownReport`；Incomplete 不得记录为已关闭（ARC-HOST-SHUTDOWN-001）。
 
-**[TRAP]** frozen_subagent_vms 按 agent_id + 位置匹配（先 instance_id 精确匹配，失败后按顺序 agent_id 匹配）。`begin_round()` 清空 `frozen_subagent_vms`，但 `done()` 不清空（允许 Done→下一轮之间消费）。`ephemeral_notes` 位于 `MessageState`，仅 compact 时显式清空，日常通过 RebuildAll 的 `anchor >= prefix_len` 过滤隐式失效。（详见 spec/global/domains/message-pipeline.md#issue_2026-05-16-frozen-subagent-vms-cross-round-accumulation-duplication）
+## 目标命令
 
-## 主布局
+从仓库根目录执行：
 
-单 Session 垂直切分（Sticky Header → Messages → Attachment Bar → Panel Area → Input → Status Bar → BG Agent Bar）。高度优先级：Status Bar 固定 3 行 → Input 动态（3~40% 屏幕）→ 面板（60-75% 屏幕）→ 其余分配给消息区。
+```bash
+cargo run -p peri-tui
+./dev.sh
+cargo build -p peri-tui
+cargo check -p peri-tui
+cargo test -p peri-tui --lib
+cargo test -p peri-tui --lib -- app::mcp_lifecycle_tests
+```
 
-### 界面组件
+## 按需引用 / Verify
 
-| 组件 | 文件 | 说明 |
-|------|------|------|
-| Welcome Card | `ui/welcome.rs` | 空消息时替代显示，ASCII Art + 功能要点 + 命令提示 |
-| Sticky Header | `ui/main_ui/sticky_header.rs` | 滚动时顶部固定显示最后 Human 消息摘要 |
-| Attachment Bar | `ui/main_ui/attachment.rs` | 图片附件标签列表，Input 正上方 |
-| Input Area | `edit_utils.rs` | `tui_textarea::TextArea` 封装，高度动态 |
-| Hints 浮层 | `ui/main_ui/popups/hints.rs` | `/` 前缀命令匹配，输入框上方 |
-| @提及弹窗 | `app/at_mention/mod.rs` | `@` 触发文件搜索，200ms 节流 |
-| BG Agent Bar | `ui/main_ui/bg_agent_bar.rs` | 后台 Agent 列表，8 色循环 |
-
-### 弹窗系统
-
-统一通过 `InteractionPrompt` 枚举互斥管理（3 种：Approval/Questions/Rewind）。OAuth 授权和 Setup Wizard 通过 `GlobalUiState` 独立管理，不在 InteractionPrompt 中。
-- **HITL 审批**（`popups/hitl.rs`）：批量工具调用逐个审批（`InteractionPrompt::Approval`）
-- **AskUser 问答**（`popups/ask_user.rs`）：Tab 栏切换 + 选项列表 + 自定义输入（`InteractionPrompt::Questions`）
-- **Rewind 确认**（`popups/rewind.rs`）：双击 Esc 触发，确认后回滚到指定消息（`InteractionPrompt::Rewind`）
-- **OAuth 授权**（`popups/oauth.rs`）：通过 `GlobalUiState.oauth_prompt` 独立管理
-- **Setup Wizard**（`popups/setup_wizard.rs`）：通过 `GlobalUiState.setup_wizard` 独立管理
-
-### 面板系统
-
-13 种 `PanelKind`（分 Session/Global 作用域）：ModelPanel、LoginPanel、ConfigPanel、AgentPanel、HooksPanel、ThreadBrowser（Session）；McpPanel、PluginPanel、CronPanel、TasksPanel、StatusPanel、MemoryPanel、BetasPanel（Global）。
-
-互斥组（`MutexGroup`）：Settings（Model/Login/Config）、Agent（Agent/Hooks）、Tools（MCP/Plugin/Cron/Tasks）、Info（Status/Memory/Betas）、Thread（ThreadBrowser 独占）。
-
-`PanelManager` + `PanelComponent` trait（`panel_manager.rs`/`panel_component.rs`），新增面板只需定义变体 + 实现 trait。面板内禁止渲染提示行，由 `status_bar_hints()` 统一描述。
-
-### Status Bar
-
-双行布局（`ui/main_ui/status_bar.rs`）：
-- **第一行**：权限模式 → 工作目录 → 模型名 → CPU% → MEM → 上下文使用率
-- **第二行**：左侧瞬时状态（复制提示/后台 agent/LLM 重试/MCP/LSP）→ 右侧快捷键 hints
-
-瞬时提示用 `Instant` + Duration 控制消失；颜色分级用 `theme::ERROR`/`WARNING`/`SAGE`；面板 hints 通过 `PanelComponent::status_bar_hints()` trait 注入。
-
-### 消息区
-
-Welcome Card 或消息列表 + 滚动条 + spinner。视口裁剪渲染（`viewport_clip`）。`MessageViewModel` 7 种变体：`UserBubble` / `AssistantBubble`（含 Text/Reasoning/ToolUse） / `ToolBlock` / `SystemNote` / `CacheWarning` / `ToolCallGroup` / `SubAgentGroup`。
-
-## i18n
-
-`LcRegistry` 存储在 `ServiceRegistry.lc` 中，翻译资源通过 `include!` 编译时嵌入 `locales/{lang}/main.ftl`。
-
-`Command trait` 的 `description()` 接收 `&LcRegistry` 参数并返回 `String`。`CommandRegistry::match_prefix()` 和 `list()` 均需 `&LcRegistry`。
-
-## 状态管理
-
-**`ServiceRegistry` 与 `GlobalUiState`**：`App` 状态拆分为 `ServiceRegistry`（跨会话共享：config/MCP/cron/provider）和 `GlobalUiState`（纯 UI 临时状态：高亮计时器/弹窗/鼠标检测）。面板 dispatch 宏（`with_global_panels!`/`with_session_panels!`）位于 `event/macros.rs`。
-
-**`CommandRegistry::dispatch` 借用限制 [TRAP]**：`&self` + `&mut App` 冲突，用 `std::mem::take` + put-back 解决。dispatch 期间不可改变 `app.session_mgr` 的 session 实例。
-
-## Compact 事件处理
-
-**[TRAP]** `handle_compact_completed` 必须三步清理：① `pipeline.clear()` ② `pipeline.restore_completed(messages)` ③ `RebuildAll { prefix_len: 0 }`。缺少任一步都会导致旧消息残留或 system 消息泄漏。禁止在 TUI 层触发 auto-compact——所有触发判断在 executor 内部。（详见 spec/global/domains/compact.md#issue_2026-05-20-compact-command-not-triggering）
-
-**[TRAP]** `restore_completed(messages)` 会把 system 消息放入 completed 列表。re_inject 产生的 System 消息不应渲染。`round_start_vm_idx` 和 `completed_len_at_round_start` 必须正确设置。（详见 spec/global/domains/message-pipeline.md#issue_2026-05-20-session-restore-renders-system-prompt）
+- 稳定 UI 规则：`../docs/standards/tui.md`。
+- 跨模块边界、事件与冻结数据：`../docs/standards/architecture-contracts.md`，重点遵守 `ARC-BOUNDARY-001` 与 `ARC-EVENT-001`。
+- 修改 ACP 数据流时，核对 `src/kit/acp_notifier.rs`、`src/kit/acp_bridge.rs` 和对应组件；修改用户界面文本时核对两份 FTL。
+- 完成后运行相关 `cargo test -p peri-tui --lib`，并运行 `git diff --check`。不得把密钥、token、密码或连接串写入界面、日志、错误或测试 fixture。

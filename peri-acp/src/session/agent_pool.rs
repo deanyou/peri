@@ -7,30 +7,21 @@
 //! ### Cached entries
 //! | Cache | Key | Entry | Lifetime |
 //! |-------|-----|-------|----------|
-//! | `cached_llm` | `"provider:model"` fingerprint | `compact_model` + `auto_classifier_model` | Validated per-prompt via `has_valid_cache()` |
-//! | `subagent_llm_cache` | `"provider:model"` fingerprint | `Arc<dyn BaseModel>` (shared `reqwest::Client`) | Held until `invalidate()` or session close |
+//! | `cached_llm` | provider configuration fingerprint | `auxiliary_model` + `auto_classifier_model` | Validated per-prompt via `has_valid_cache()` |
+//! | `subagent_llm_cache` | provider configuration fingerprint | `Arc<dyn Model>` (shared `reqwest::Client`) | Held until `invalidate()` or session close |
 
 use std::{collections::HashMap, sync::Arc};
 
-use peri_agent::llm::BaseModel;
-
 use crate::provider::LlmProvider;
+use crate::session::retry_events::RetryEventForwarder;
 
 /// Session-scoped cached LLM instances.
 ///
 /// Contains `reqwest::Client` with connection pool + TLS session cache.
 /// Reusing across prompts eliminates transient per-turn allocations.
-#[derive(Clone)]
-pub struct CachedLlmInstances {
-    /// compact_model LLM (used by CompactMiddleware for full compact).
-    /// Contains reqwest Client with connection pool.
-    pub compact_model: Arc<dyn BaseModel>,
-    /// auto_classifier LLM (used by HITL HumanInTheLoopMiddleware).
-    /// Contains a second reqwest Client.
-    pub auto_classifier_model: Arc<tokio::sync::Mutex<Box<dyn BaseModel>>>,
-    /// Provider fingerprint at time of creation (`"provider_name:model_name"`).
-    pub fingerprint: String,
-}
+///
+/// L5：类型契约化迁入 peri-agent（stage 装配消费），本处 re-export 保兼容。
+pub use peri_agent::session::exec::stage_builder::CachedLlmInstances;
 
 /// Session-scoped agent component pool.
 ///
@@ -41,10 +32,16 @@ pub struct AgentPool {
     cached_llm: Option<CachedLlmInstances>,
     /// Provider fingerprint for invalidation detection.
     fingerprint: String,
-    /// SubAgent LLM cache: keyed by `"provider_name:model_name"` fingerprint.
-    /// Each entry holds an `Arc<dyn BaseModel>` with a shared `reqwest::Client`.
+    /// SubAgent LLM cache: keyed by the full provider configuration fingerprint.
+    /// Each entry holds an `Arc<dyn Model>` with a shared `reqwest::Client`.
     /// Avoids creating a new HTTP client per SubAgent invocation.
-    pub(crate) subagent_llm_cache: HashMap<String, Arc<dyn BaseModel>>,
+    pub(crate) subagent_llm_cache: HashMap<String, Arc<dyn peri_model::Model>>,
+    /// Session 级 retry 事件转发器（值字段，非 Arc）。
+    ///
+    /// 池化模型（subagent_llm_cache / cached_llm）跨 turn 存活时烘焙本转发器
+    /// 的 observer；每 turn `build_agent` 覆盖式 `set` 当前 handler。
+    /// `invalidate()` 不重置——转发器与 provider 缓存无关，跨 turn 观测状态应保留。
+    pub(crate) retry_events: RetryEventForwarder,
 }
 
 impl Default for AgentPool {
@@ -59,6 +56,7 @@ impl AgentPool {
             cached_llm: None,
             fingerprint: String::new(),
             subagent_llm_cache: HashMap::new(),
+            retry_events: RetryEventForwarder::new(),
         }
     }
 
@@ -99,17 +97,17 @@ impl AgentPool {
     pub(crate) fn get_or_create_subagent_llm(
         pool: &Arc<parking_lot::Mutex<AgentPool>>,
         fingerprint: &str,
-        create: impl FnOnce() -> Box<dyn BaseModel>,
-    ) -> Arc<dyn BaseModel> {
+        create: impl FnOnce() -> Box<dyn peri_model::Model>,
+    ) -> Arc<dyn peri_model::Model> {
         // Fast path: query cache under lock
         {
             let guard = pool.lock();
             if let Some(cached) = guard.subagent_llm_cache.get(fingerprint) {
-                return Arc::clone(cached);
+                return cached.clone();
             }
         }
         // Slow path: create outside lock
-        let new_model: Arc<dyn BaseModel> = Arc::from(create());
+        let new_model: Arc<dyn peri_model::Model> = Arc::from(create());
         // Write back under lock (or_insert handles concurrent insert race)
         pool.lock()
             .subagent_llm_cache
@@ -119,8 +117,41 @@ impl AgentPool {
     }
 }
 
-fn fingerprint(provider: &LlmProvider) -> String {
-    format!("{}:{}", provider.display_name(), provider.model_name())
+pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
+    use sha2::{Digest, Sha256};
+    // Do not put credentials or endpoints in the cache key. A process-local salt
+    // also prevents these internal identities from becoming stable credential hashes.
+    static SALT: std::sync::OnceLock<uuid::Uuid> = std::sync::OnceLock::new();
+    let mut digest = Sha256::new();
+    digest.update(SALT.get_or_init(uuid::Uuid::new_v4).as_bytes());
+    let (api_key, base_url, max_tokens) = match provider {
+        LlmProvider::OpenAi {
+            api_key,
+            base_url,
+            max_tokens,
+            ..
+        } => (api_key, Some(base_url.as_str()), max_tokens),
+        LlmProvider::Anthropic {
+            api_key,
+            base_url,
+            max_tokens,
+            ..
+        } => (api_key, base_url.as_deref(), max_tokens),
+    };
+    // JSON tuple framing keeps arbitrary credential/URL strings unambiguous.
+    digest.update(
+        serde_json::to_vec(&(
+            provider.display_name(),
+            provider.model_name(),
+            provider.effort_key(),
+            api_key,
+            base_url,
+            max_tokens,
+            provider.context_1m(),
+        ))
+        .expect("provider cache identity contains only serializable primitives"),
+    );
+    format!("{:x}", digest.finalize())
 }
 
 #[cfg(test)]

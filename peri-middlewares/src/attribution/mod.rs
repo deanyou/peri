@@ -14,24 +14,26 @@
 mod model_email;
 mod state;
 
+use peri_agent::middleware::capabilities as hook_state;
 use std::{
     collections::HashMap,
+    process::Stdio,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
 pub use model_email::get_attribution_email;
 use peri_agent::{
-    agent::{
-        react::{ToolCall, ToolResult},
-        state::State,
-    },
+    agent::react::{ToolCall, ToolResult},
     error::AgentResult,
-    middleware::Middleware,
+    middleware::r#trait::Middleware,
 };
 pub use state::AttributionState;
 
 use crate::tool_search::core_tools::{TOOL_EDIT, TOOL_WRITE};
+
+const GIT_BRANCH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Git 留名中间件
 ///
@@ -41,13 +43,19 @@ use crate::tool_search::core_tools::{TOOL_EDIT, TOOL_WRITE};
 pub struct GitAttributionMiddleware {
     state: Arc<Mutex<AttributionState>>,
     pending_old_content: Arc<Mutex<HashMap<String, String>>>,
+    branch_baseline: Arc<Mutex<Option<String>>>,
+    /// Cached prompt contribution text.
+    attribution_text: String,
 }
 
 impl GitAttributionMiddleware {
     pub fn new(model_name: &str) -> Self {
+        let attribution_text = Self::attribution_text(model_name);
         Self {
             state: Arc::new(Mutex::new(AttributionState::new(model_name.to_string()))),
             pending_old_content: Arc::new(Mutex::new(HashMap::new())),
+            branch_baseline: Arc::new(Mutex::new(None)),
+            attribution_text,
         }
     }
 
@@ -65,15 +73,77 @@ impl GitAttributionMiddleware {
     pub fn reset(&self) {
         self.pending_old_content.lock().unwrap().clear();
     }
+
+    fn observe_branch(&self, current: String) -> Option<(String, String)> {
+        let mut baseline = self.branch_baseline.lock().unwrap();
+        match baseline.replace(current.clone()) {
+            Some(previous) if previous != current => Some((previous, current)),
+            _ => None,
+        }
+    }
+
+    fn spawn_branch_command(mut command: tokio::process::Command) -> Option<tokio::process::Child> {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .ok()
+    }
+
+    async fn current_branch_from_child(
+        child: tokio::process::Child,
+        timeout: Duration,
+    ) -> Option<String> {
+        let output = tokio::time::timeout(timeout, child.wait_with_output())
+            .await
+            .ok()?
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let branch = String::from_utf8(output.stdout).ok()?;
+        let branch = branch.trim();
+        (!branch.is_empty()).then(|| branch.to_string())
+    }
+
+    async fn current_branch_with_command(
+        command: tokio::process::Command,
+        timeout: Duration,
+    ) -> Option<String> {
+        let child = Self::spawn_branch_command(command)?;
+        Self::current_branch_from_child(child, timeout).await
+    }
+
+    async fn current_branch(cwd: &str) -> Option<String> {
+        let mut command = tokio::process::Command::new("git");
+        command
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(cwd);
+        Self::current_branch_with_command(command, GIT_BRANCH_TIMEOUT).await
+    }
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for GitAttributionMiddleware {
+impl Middleware for GitAttributionMiddleware {
     fn name(&self) -> &str {
         "GitAttributionMiddleware"
     }
 
-    async fn before_tool(&self, _state: &mut S, tool_call: &ToolCall) -> AgentResult<ToolCall> {
+    fn prompt_contribution(&self) -> Option<String> {
+        let text = format!(
+            "\n\n## Git Attribution\n\nWhen the user asks you to commit, append the following line to the commit message:\n\n```\n{}\n```\n\nThis tracks AI contributions for code you authored. Only include it when you are already creating a commit at the user's request.",
+            self.attribution_text
+        );
+        Some(text)
+    }
+
+    async fn before_tool(
+        &self,
+        _state: &mut dyn hook_state::BeforeToolState,
+        tool_call: &ToolCall,
+    ) -> AgentResult<ToolCall> {
         // 仅处理 Write 和 Edit
         if tool_call.name != TOOL_WRITE && tool_call.name != TOOL_EDIT {
             return Ok(tool_call.clone());
@@ -92,7 +162,7 @@ impl<S: State> Middleware<S> for GitAttributionMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut S,
+        _state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {
@@ -121,32 +191,22 @@ impl<S: State> Middleware<S> for GitAttributionMiddleware {
         Ok(())
     }
 
-    async fn before_agent(&self, _state: &mut S) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
+        if let Some(branch) = Self::current_branch(state.cwd()).await {
+            if let Some((previous_branch, current_branch)) = self.observe_branch(branch) {
+                tracing::info!(
+                    target: "git",
+                    previous_branch,
+                    current_branch,
+                    "Git branch changed during the session"
+                );
+            }
+        }
         // Attribution 指令已在 system prompt 中注入，无需再向消息历史写入。
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_git_attribution_reset_clears_pending() {
-        let mw = GitAttributionMiddleware::new("test-model");
-        // 插入一些待处理内容
-        mw.pending_old_content
-            .lock()
-            .unwrap()
-            .insert("file1.rs".to_string(), "old content".to_string());
-        mw.pending_old_content
-            .lock()
-            .unwrap()
-            .insert("file2.rs".to_string(), "more content".to_string());
-        assert_eq!(mw.pending_old_content.lock().unwrap().len(), 2);
-
-        // reset 后应清空
-        mw.reset();
-        assert!(mw.pending_old_content.lock().unwrap().is_empty());
-    }
-}
+#[path = "mod_test.rs"]
+mod tests;

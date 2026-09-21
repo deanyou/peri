@@ -1,16 +1,16 @@
+use peri_agent::middleware::capabilities as hook_state;
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::{
-    agent::{
-        react::{ToolCall, ToolResult},
-        state::State,
-    },
+    agent::react::{ToolCall, ToolResult},
     error::AgentResult,
-    middleware::Middleware,
+    middleware::r#trait::Middleware,
     tools::BaseTool,
 };
-use peri_lsp::{
+use peri_resources::lsp::uri::path_to_uri;
+use peri_resources::lsp::{
     config::{LspConfigFile, LspServerConfig},
     pool::LspServerPool,
 };
@@ -28,6 +28,12 @@ impl LspMiddleware {
         Self { pool }
     }
 
+    /// 复用既有 pool 构造（会话级共享：H1 下服务器进程/initialized/诊断状态
+    /// 跨 turn 存活；由装配面从 `LspPoolPort` downcast 还原后注入）。
+    pub fn from_pool(pool: Arc<LspServerPool>) -> Self {
+        Self { pool }
+    }
+
     pub fn from_configs(root_uri: String, configs: Vec<LspServerConfig>) -> Self {
         let config = LspConfigFile {
             lsp_servers: configs.into_iter().map(|c| (c.name.clone(), c)).collect(),
@@ -41,7 +47,7 @@ impl LspMiddleware {
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for LspMiddleware {
+impl Middleware for LspMiddleware {
     fn name(&self) -> &str {
         "LspMiddleware"
     }
@@ -55,7 +61,7 @@ impl<S: State> Middleware<S> for LspMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut S,
+        _state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         _result: &ToolResult,
     ) -> AgentResult<()> {
@@ -73,7 +79,7 @@ impl<S: State> Middleware<S> for LspMiddleware {
             _ => return Ok(()),
         };
 
-        let uri = format!("file://{}", file_path);
+        let uri = path_to_uri(Path::new(&file_path));
         let text = match tokio::fs::read_to_string(&file_path).await {
             Ok(t) => t,
             Err(e) => {
@@ -93,12 +99,5 @@ impl<S: State> Middleware<S> for LspMiddleware {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use peri_agent::agent::state::AgentState;
-    use peri_lsp::config::LspServerConfig;
-
-    use super::*;
-    include!("middleware_test.rs");
-}
+#[path = "middleware_test.rs"]
+mod tests;

@@ -1,13 +1,16 @@
 use std::{
     collections::HashMap,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tempfile::NamedTempFile;
 use tracing::debug;
 
 const TOKEN_FILE_VERSION: u32 = 1;
@@ -62,14 +65,42 @@ impl FileCredentialStore {
         &self.path
     }
 
+    fn ensure_parent_dir(&self) -> Result<(), AuthStoreError> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| AuthStoreError::WriteFailed {
+                path: parent.to_path_buf(),
+                detail: e.to_string(),
+            })?;
+        }
+        Ok(())
+    }
+
+    fn lock_file(&self) -> Result<std::fs::File, AuthStoreError> {
+        use fs2::FileExt;
+
+        self.ensure_parent_dir()?;
+        let lock_path = self.path.with_extension("lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| AuthStoreError::WriteFailed {
+                path: lock_path.clone(),
+                detail: e.to_string(),
+            })?;
+        file.lock_exclusive()
+            .map_err(|e| AuthStoreError::WriteFailed {
+                path: lock_path,
+                detail: e.to_string(),
+            })?;
+        Ok(file)
+    }
+
     fn ensure_file(&self) -> Result<(), AuthStoreError> {
+        self.ensure_parent_dir()?;
         if !self.path.exists() {
-            if let Some(parent) = self.path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| AuthStoreError::WriteFailed {
-                    path: parent.to_path_buf(),
-                    detail: e.to_string(),
-                })?;
-            }
             let initial_content = serde_json::to_string_pretty(&OAuthTokenFile {
                 version: TOKEN_FILE_VERSION,
                 tokens: HashMap::new(),
@@ -121,17 +152,45 @@ impl FileCredentialStore {
     }
 
     fn write_file(&self, file: &OAuthTokenFile) -> Result<(), AuthStoreError> {
-        self.ensure_file()?;
-        let content =
-            serde_json::to_string_pretty(file).map_err(|e| AuthStoreError::WriteFailed {
-                path: self.path.clone(),
-                detail: e.to_string(),
-            })?;
-        std::fs::write(&self.path, content).map_err(|e| AuthStoreError::WriteFailed {
+        self.ensure_parent_dir()?;
+        let content = serde_json::to_vec_pretty(file).map_err(|e| AuthStoreError::WriteFailed {
             path: self.path.clone(),
             detail: e.to_string(),
         })?;
-        debug!("Token 文件已写入: {}", self.path.display());
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let mut temp = NamedTempFile::new_in(parent).map_err(|e| AuthStoreError::WriteFailed {
+            path: parent.to_path_buf(),
+            detail: e.to_string(),
+        })?;
+        temp.write_all(&content)
+            .and_then(|_| temp.as_file().sync_all())
+            .map_err(|e| AuthStoreError::WriteFailed {
+                path: temp.path().to_path_buf(),
+                detail: e.to_string(),
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| AuthStoreError::WriteFailed {
+                    path: temp.path().to_path_buf(),
+                    detail: e.to_string(),
+                })?;
+        }
+        temp.persist(&self.path)
+            .map_err(|e| AuthStoreError::WriteFailed {
+                path: self.path.clone(),
+                detail: e.error.to_string(),
+            })?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|e| AuthStoreError::WriteFailed {
+                path: self.path.clone(),
+                detail: e.to_string(),
+            })?;
+        debug!(path = %self.path.display(), "Token 文件已原子写入");
         Ok(())
     }
 
@@ -139,7 +198,8 @@ impl FileCredentialStore {
         &self,
         server_name: &str,
     ) -> Result<Option<StoredCredentials>, AuthStoreError> {
-        let _lock = self.mutex.lock().await;
+        let _lock = self.mutex.lock();
+        let _file_lock = self.lock_file()?;
         let file = self.read_file()?;
         Ok(file.tokens.get(server_name).cloned())
     }
@@ -149,21 +209,28 @@ impl FileCredentialStore {
         server_name: &str,
         credentials: StoredCredentials,
     ) -> Result<(), AuthStoreError> {
-        let _lock = self.mutex.lock().await;
+        let _lock = self.mutex.lock();
+        let _file_lock = self.lock_file()?;
         let mut file = self.read_file()?;
         file.tokens.insert(server_name.to_string(), credentials);
         self.write_file(&file)
     }
 
     pub async fn clear_server(&self, server_name: &str) -> Result<(), AuthStoreError> {
-        let _lock = self.mutex.lock().await;
+        self.clear_server_blocking(server_name)
+    }
+
+    pub(crate) fn clear_server_blocking(&self, server_name: &str) -> Result<(), AuthStoreError> {
+        let _lock = self.mutex.lock();
+        let _file_lock = self.lock_file()?;
         let mut file = self.read_file()?;
         file.tokens.remove(server_name);
         self.write_file(&file)
     }
 
     pub async fn clear_all(&self) -> Result<(), AuthStoreError> {
-        let _lock = self.mutex.lock().await;
+        let _lock = self.mutex.lock();
+        let _file_lock = self.lock_file()?;
         self.write_file(&OAuthTokenFile {
             version: TOKEN_FILE_VERSION,
             tokens: HashMap::new(),
@@ -171,7 +238,8 @@ impl FileCredentialStore {
     }
 
     pub async fn list_servers(&self) -> Result<Vec<String>, AuthStoreError> {
-        let _lock = self.mutex.lock().await;
+        let _lock = self.mutex.lock();
+        let _file_lock = self.lock_file()?;
         Ok(self.read_file()?.tokens.keys().cloned().collect())
     }
 }
@@ -212,7 +280,5 @@ impl CredentialStore for PerServerCredentialStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("auth_store_test.rs");
-}
+#[path = "auth_store_test.rs"]
+mod tests;

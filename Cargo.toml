@@ -1,14 +1,20 @@
 [workspace]
 members = [
-    "peri-agent",
-    "peri-middlewares",
-    "peri-tui",
     "peri-acp",
+    "peri-acp-types",
+    "peri-agent",
+    "peri-controller",
+    "peri-middlewares",
+    "peri-model",
+    "peri-process",
+    "peri-resources",
+    "peri-runtime",
+    "peri-tui",
     "langfuse-client",
-    "peri-widgets",
     "peri-lsp",
-    "side-projects/git-graph",
-    "agm",
+    "peri-js-runtime",
+    "peri-web-pty",
+    "peri-workflow",
 ]
 resolver = "2"
 
@@ -61,13 +67,18 @@ tracing-subscriber = { version = "0.3", features = [
     "fmt",
     "json",
 ] }
+tracing-appender = "0.2"
 
 # --- Utilities ---
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
+# send_guard feature 已移除（批 4 依赖清理）：批 2 为 stdio typed handler 层
+# 的 `await_holding_lock` 规避引入，批 3 删除 adapter 后无任何代码使用
+# `MappedSendGuard`/`send_guard`（grep 全 workspace 无引用）；无跨 await 持锁
+# 告警（clippy -D warnings 验证）。
 parking_lot = "0.12"
 dirs-next = "2"
 url = "2"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
 sysinfo = "0.39"
 lsp-types = "0.97"
 lru = "0.18"
@@ -76,12 +87,22 @@ lru = "0.18"
 tempfile = "3"
 
 # --- Allocator ---
-mimalloc = "0.1"
-libmimalloc-sys = { version = "0.1", features = ["extended"] }
 tikv-jemallocator = "0.6"
 tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
 tikv-jemalloc-sys = "0.6"
 
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 semver = "1"
 sha2 = "0.10"
+
+# --- PTY server ---
+axum = { version = "0.8.9", features = ["ws"] }
+# 0.9.0：历史 pin（0.8.1）因 Windows ConPTY reader 短命令场景 bug 而设；
+# 2026-08-12 Batch 2b 解除 pin 升级后 Windows CI 上 3 个 pty_session 读取测试
+# 失败。排查确认 0.8.1/0.9.0 的 Windows 实现（conpty.rs）完全一致，失败与
+# 版本无关，实为 PowerShell 5.1 在 ConPTY 下的输出编码/交互行为问题——
+# 测试已改用 cmd.exe（纯字节流）规避，重新升级回 0.9.0 验证。
+# 详见 docs/review/2026-06-16-peri-web-pty-windows-conpty-bug.md
+portable-pty = "0.9"
+tokio-tungstenite = "0.30"
+serial_test = { version = "4.0.1", features = ["async"] }

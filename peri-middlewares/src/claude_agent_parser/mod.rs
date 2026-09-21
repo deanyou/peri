@@ -14,7 +14,7 @@
 //! You are a code reviewer...
 //! ```
 
-use serde::Deserialize;
+use serde::{de::Error, Deserialize};
 
 /// Claude Code Agent YAML frontmatter 定义
 #[derive(Debug, Clone, Deserialize)]
@@ -60,16 +60,30 @@ pub struct ClaudeAgentFrontmatter {
     /// 是否始终在后台运行
     #[serde(default)]
     pub background: bool,
+    /// prompt 模式："extend"（默认）或 "full"。
+    /// `full` 仅替换 persona/domain instructions 层，安全与授权、
+    /// 工程行为、能力契约与运行时边界层不会被移除。
+    #[serde(default)]
+    pub prompt_mode: Option<String>,
     /// Git worktree 隔离模式
     #[serde(default)]
     pub isolation: Option<String>,
+    /// 沙箱写目录白名单——声明后 subagent 可获得 WriteSandbox 工具，
+    /// 只能写入这些相对目录（基于 cwd），不能碰项目代码。
+    /// 不影响 can_mutate 推断（agent 仍视为 readonly）。
+    #[serde(default)]
+    pub allowed_write_dirs: Vec<String>,
 }
 
 /// 工具列表，可以是逗号分隔字符串或数组
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ToolsValue {
+    /// `tools` 字段缺失：继承父工具。
     #[default]
     Empty,
+    /// 显式 `tools: []`：不继承任何父工具。
+    NoTools,
+    /// 显式列出的工具。
     List(Vec<String>),
 }
 
@@ -87,17 +101,35 @@ impl<'de> Deserialize<'de> for ToolsValue {
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty())
                     .collect();
-                Ok(ToolsValue::List(tools))
+                if tools.is_empty() {
+                    Ok(ToolsValue::NoTools)
+                } else {
+                    Ok(ToolsValue::List(tools))
+                }
             }
             serde_yaml::Value::Sequence(arr) => {
-                let tools: Vec<String> = arr
+                let tools = arr
                     .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-                    .filter(|t| !t.is_empty())
-                    .collect();
-                Ok(ToolsValue::List(tools))
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(|tool| tool.trim().to_string())
+                            .ok_or_else(|| D::Error::custom("tools 数组只能包含字符串"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if tools.iter().any(|tool| tool.is_empty()) {
+                    return Err(D::Error::custom("tools 数组不能包含空工具名"));
+                }
+                if tools.is_empty() {
+                    Ok(ToolsValue::NoTools)
+                } else {
+                    Ok(ToolsValue::List(tools))
+                }
             }
-            _ => Ok(ToolsValue::Empty),
+            serde_yaml::Value::Null => Ok(ToolsValue::NoTools),
+            value => Err(D::Error::custom(format!(
+                "tools 必须是逗号分隔字符串或字符串数组，收到 {value:?}"
+            ))),
         }
     }
 }
@@ -105,7 +137,7 @@ impl<'de> Deserialize<'de> for ToolsValue {
 impl ToolsValue {
     pub fn to_vec(&self) -> Vec<String> {
         match self {
-            ToolsValue::Empty => Vec::new(),
+            ToolsValue::Empty | ToolsValue::NoTools => Vec::new(),
             ToolsValue::List(v) => v.clone(),
         }
     }

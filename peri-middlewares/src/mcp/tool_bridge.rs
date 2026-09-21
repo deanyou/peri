@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_agent::tools::BaseTool;
-use rmcp::model::{Content, Tool};
+use rmcp::model::{ContentBlock, Tool};
 use thiserror::Error;
 
 use super::client::{McpClientHandle, McpClientPool};
@@ -13,6 +13,8 @@ use crate::tools::output_persist::persist_truncated_output;
 pub enum ToolCallError {
     #[error("MCP 服务器 \"{server}\" 未连接 (状态: {status:?})")]
     NotConnected { server: String, status: String },
+    #[error("MCP server \"{server}\" is draining or closed")]
+    Unavailable { server: String },
     #[error("MCP 服务器 \"{server}\" 工具 \"{tool}\" 调用失败: {reason}")]
     CallFailed {
         server: String,
@@ -34,14 +36,18 @@ pub struct McpToolBridge {
     full_name: String,
     description: String,
     input_schema: serde_json::Value,
+    model_visible: bool,
+    server_generation: u64,
     client: Arc<McpClientHandle>,
+    binding_leases: Option<Arc<super::apps::McpAppBindingLeaseRegistry>>,
+    admission: Option<super::dynamic::admission::DynamicMcpAdmissionGate>,
 }
 
 const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const MAX_MCP_LINES: usize = 2000;
 
 /// Sanitize name components to match API tool name pattern: ^[a-zA-Z0-9_-]+$
-fn sanitize_name_component(name: &str) -> String {
+pub(crate) fn sanitize_name_component(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -53,14 +59,45 @@ fn sanitize_name_component(name: &str) -> String {
         .collect()
 }
 
+fn app_allowed_tools(
+    server_name: &str,
+    resource_uri: &str,
+    tools: &[Tool],
+    dispatcher: &dyn peri_acp_types::tools::EffectiveToolDispatcher,
+) -> std::collections::HashMap<String, String> {
+    let dispatcher_tools = dispatcher
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<std::collections::HashSet<_>>();
+    tools
+        .iter()
+        .filter(|tool| {
+            super::apps::tool_visibility(tool).app
+                && super::apps::tool_resource_uri(tool).as_deref() == Some(resource_uri)
+        })
+        .filter_map(|tool| {
+            let name = tool.name.to_string();
+            let effective = effective_mcp_tool_name(server_name, &name);
+            dispatcher_tools
+                .contains(&effective)
+                .then_some((name, effective))
+        })
+        .collect()
+}
+
+pub(crate) fn effective_mcp_tool_name(server_name: &str, tool_name: &str) -> String {
+    format!(
+        "mcp__{}__{}",
+        sanitize_name_component(server_name),
+        sanitize_name_component(tool_name)
+    )
+}
+
 impl McpToolBridge {
     pub fn new(server_name: &str, tool: &Tool, client: Arc<McpClientHandle>) -> Self {
         let tool_name = tool.name.to_string();
-        let full_name = format!(
-            "mcp__{}__{}",
-            sanitize_name_component(server_name),
-            sanitize_name_component(&tool_name)
-        );
+        let full_name = effective_mcp_tool_name(server_name, &tool_name);
         let description = format!(
             "[MCP:{}] {}",
             server_name,
@@ -74,9 +111,68 @@ impl McpToolBridge {
             full_name,
             description,
             input_schema,
+            model_visible: super::apps::tool_visibility(tool).model,
+            server_generation: 0,
             client,
+            binding_leases: None,
+            admission: None,
         }
     }
+
+    pub fn new_dynamic(
+        server_name: &str,
+        tool: &Tool,
+        client: Arc<McpClientHandle>,
+        admission: super::dynamic::admission::DynamicMcpAdmissionGate,
+    ) -> Result<Self, ToolCallError> {
+        let tool_name = tool.name.to_string();
+        if !valid_name_component(server_name) || !valid_name_component(&tool_name) {
+            return Err(ToolCallError::Unavailable {
+                server: server_name.to_string(),
+            });
+        }
+        let description = format!(
+            "[MCP:{}] {}",
+            server_name,
+            tool.description
+                .as_ref()
+                .map(|value| value.as_ref())
+                .unwrap_or("")
+        );
+        Ok(Self {
+            server_name: server_name.to_string(),
+            full_name: effective_mcp_tool_name(server_name, &tool_name),
+            tool_name,
+            description,
+            input_schema: serde_json::to_value(&*tool.input_schema)
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+            model_visible: super::apps::tool_visibility(tool).model,
+            server_generation: 0,
+            client,
+            binding_leases: None,
+            admission: Some(admission),
+        })
+    }
+
+    pub fn with_server_generation(mut self, generation: u64) -> Self {
+        self.server_generation = generation;
+        self
+    }
+
+    pub fn with_binding_leases(
+        mut self,
+        registry: Arc<super::apps::McpAppBindingLeaseRegistry>,
+    ) -> Self {
+        self.binding_leases = Some(registry);
+        self
+    }
+}
+
+fn valid_name_component(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[async_trait]
@@ -93,10 +189,31 @@ impl BaseTool for McpToolBridge {
         self.input_schema.clone()
     }
 
+    fn mcp_server_name(&self) -> Option<&str> {
+        Some(&self.server_name)
+    }
+
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    fn visible_to_model(&self) -> bool {
+        self.model_visible
+    }
+
     async fn invoke(
         &self,
         input: serde_json::Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let _permit = match &self.admission {
+            Some(gate) => Some(gate.try_acquire().map_err(|_| {
+                Box::new(ToolCallError::Unavailable {
+                    server: self.server_name.clone(),
+                }) as Box<dyn std::error::Error + Send + Sync>
+            })?),
+            None => None,
+        };
         // 1. 检查连接状态
         match &self.client.peer {
             Some(_) => {}
@@ -129,7 +246,7 @@ impl BaseTool for McpToolBridge {
                 reason: e.to_string(),
             })?;
 
-        // 4. 处理 is_error 标志
+        // 4. 处理 is_error 标志。失败的实例化调用不得签发 App lease。
         if result.is_error.unwrap_or(false) {
             let error_text = format_contents(&result.content);
             let lines: Vec<&str> = error_text.lines().collect();
@@ -150,6 +267,57 @@ impl BaseTool for McpToolBridge {
             }));
         }
 
+        if let (
+            Some(registry),
+            Some(dispatcher),
+            Some(session_id),
+            Some(turn_generation),
+            Some(invocation_id),
+        ) = (
+            self.binding_leases.as_ref(),
+            ctx.effective_tool_dispatcher.clone(),
+            ctx.session_id.clone(),
+            ctx.turn_generation.clone(),
+            ctx.invocation_id.clone(),
+        ) {
+            if invocation_id.starts_with("mcp-app:") {
+                if let Ok(raw_result) = serde_json::to_value(&result)
+                    .and_then(serde_json::from_value::<peri_acp_types::mcp_apps::RawCallToolResult>)
+                {
+                    registry.record_raw_result(
+                        &invocation_id,
+                        serde_json::to_value(raw_result).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            } else if let Some(resource_uri) = self
+                .client
+                .tools
+                .iter()
+                .find(|tool| tool.name.as_ref() == self.tool_name)
+                .filter(|tool| super::apps::tool_visibility(tool).app)
+                .and_then(super::apps::tool_resource_uri)
+            {
+                let allowed_tools = app_allowed_tools(
+                    &self.server_name,
+                    &resource_uri,
+                    &self.client.tools,
+                    dispatcher.as_ref(),
+                );
+                registry.issue(super::apps::McpAppBindingLease::new(
+                    session_id,
+                    turn_generation,
+                    self.server_name.clone(),
+                    self.server_generation,
+                    resource_uri,
+                    self.tool_name.clone(),
+                    invocation_id,
+                    allowed_tools,
+                    dispatcher,
+                    ctx.cancellation.clone(),
+                ));
+            }
+        }
+
         // 5. 格式化返回（截断超大输出）
         let formatted = format_contents(&result.content);
         let lines: Vec<&str> = formatted.lines().collect();
@@ -168,29 +336,31 @@ impl BaseTool for McpToolBridge {
 }
 
 /// 将 content 列表格式化为纯文本字符串
-fn format_contents(contents: &[Content]) -> String {
+fn format_contents(contents: &[ContentBlock]) -> String {
     let mut parts = Vec::new();
     for content in contents {
-        match &content.raw {
-            rmcp::model::RawContent::Text(text_content) => {
+        match content {
+            rmcp::model::ContentBlock::Text(text_content) => {
                 parts.push(text_content.text.clone());
             }
-            rmcp::model::RawContent::Image(image_content) => {
+            rmcp::model::ContentBlock::Image(image_content) => {
                 parts.push(format!("[image: {}]", image_content.mime_type));
             }
-            rmcp::model::RawContent::Resource(resource_content) => {
-                let uri = match &resource_content.resource {
+            rmcp::model::ContentBlock::Resource(embedded) => {
+                let uri = match &embedded.resource {
                     rmcp::model::ResourceContents::TextResourceContents { uri, .. } => uri.clone(),
                     rmcp::model::ResourceContents::BlobResourceContents { uri, .. } => uri.clone(),
+                    _ => "unknown".to_string(),
                 };
                 parts.push(format!("[resource: {}]", uri));
             }
-            rmcp::model::RawContent::Audio(audio_content) => {
+            rmcp::model::ContentBlock::Audio(audio_content) => {
                 parts.push(format!("[audio: {}]", audio_content.mime_type));
             }
-            rmcp::model::RawContent::ResourceLink(link) => {
+            rmcp::model::ContentBlock::ResourceLink(link) => {
                 parts.push(format!("[resource_link: {}]", link.uri));
             }
+            _ => {}
         }
     }
     parts.join("\n")
@@ -200,12 +370,13 @@ fn format_contents(contents: &[Content]) -> String {
 pub fn build_tool_bridges(pool: &McpClientPool) -> Vec<Box<dyn BaseTool>> {
     let mut bridges: Vec<Box<dyn BaseTool>> = Vec::new();
     for client in pool.get_all_clients() {
+        let generation = pool.handle_generation(&client);
         for tool in &client.tools {
-            bridges.push(Box::new(McpToolBridge::new(
-                &client.name,
-                tool,
-                Arc::clone(&client),
-            )));
+            bridges.push(Box::new(
+                McpToolBridge::new(&client.name, tool, Arc::clone(&client))
+                    .with_server_generation(generation)
+                    .with_binding_leases(Arc::clone(&pool.app_binding_leases)),
+            ));
         }
     }
     bridges

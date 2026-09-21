@@ -1,0 +1,313 @@
+//! ratatui-kit AgentPanel component.
+//!
+//! H1e（Iteration 14）：从 SERVICE_SNAPSHOT + PERI_CONFIG_HANDLE + VIEW_MODELS
+//! 派生当前 agent 会话的元信息（provider/model/permission_mode/cwd/subagent
+//! 数量）。SubAgent 列表从 VIEW_MODELS 中扫描 `TuiSubAgentGroup` 变体派生——
+//! 这是 v2 单路径架构下的权威数据源（子代理生命周期由 ACP 协议 + ViewCommit
+//! 替换语义维护）。
+//!
+//! 只读面板——切换 provider/model 在 Login/Model 面板，permission_mode 在
+//! Config 面板。
+
+use crate::app::panel_types::PanelKind;
+use crate::i18n;
+use crate::kit::atoms::{LANG_VERSION, PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT, VIEW_MODELS};
+use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::tui_render_unit::{TuiRenderUnit, TuiSubAgentGroup};
+use fluent_bundle::FluentValue;
+use peri_theme::atoms::THEME_ATOM;
+use ratatui_kit::{
+    crossterm::event::{Event, KeyCode, KeyEventKind},
+    prelude::*,
+    ratatui::{
+        layout::Constraint,
+        style::{Style, Stylize},
+        text::{Line, Span},
+        widgets::{Paragraph, Wrap},
+    },
+};
+
+#[component]
+pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let theme_def = hooks.use_atom(&THEME_ATOM);
+    let cursor = hooks.use_state(|| 0usize);
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    let sv = hooks.use_state(ScrollViewState::default);
+
+    let snap_store = hooks.use_atom(&SERVICE_SNAPSHOT);
+    let provider_name = snap_store.read().provider_name.clone();
+    let model_alias = snap_store.read().model_alias.clone();
+    let permission_mode = snap_store.read().permission_mode.clone();
+    let cwd = snap_store.read().cwd.clone();
+    let _ = snap_store;
+
+    // 从 VIEW_MODELS 派生 subagent 列表 + 当前 iteration 计数
+    let vm_store = hooks.use_atom(&VIEW_MODELS);
+    let total_messages = vm_store.read().items.len();
+    let subagents = collect_subagents(&vm_store.read());
+    let _ = vm_store;
+
+    let _lang_ver = hooks.use_atom(&LANG_VERSION);
+    let subagent_count = subagents.len();
+
+    // 候选行数（仅用于 cursor 边界）
+    let row_count = 8 + subagent_count.max(1);
+
+    hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
+            match key.code {
+                KeyCode::Esc => close_panel(),
+                KeyCode::Enter => close_panel(),
+                KeyCode::Up => {
+                    let mut c = cursor.write();
+                    *c = previous_selection(*c);
+                }
+                KeyCode::Down => {
+                    let mut c = cursor.write();
+                    if row_count > 0 {
+                        *c = next_selection(*c, row_count);
+                    }
+                }
+                _ => {}
+            }
+            EventResult::Consumed
+        }
+    });
+
+    // 从 PERI_CONFIG_HANDLE 派生 provider_id（active profile 携带）和 active alias
+    let (active_provider_id, active_alias) = PERI_CONFIG_HANDLE
+        .get()
+        .map(|h| {
+            let cfg = h.read();
+            (
+                cfg.config
+                    .profiles
+                    .get(&cfg.config.active_alias)
+                    .map(|p| p.provider.clone())
+                    .unwrap_or_default(),
+                cfg.config.active_alias.clone(),
+            )
+        })
+        .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+
+    let sel = *cursor.read();
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    // 头部
+    lines.push(Line::from(vec![Span::styled(
+        i18n::tr("agent-panel-title-session"),
+        Style::new()
+            .fg(theme_def.read().semantic.text.primary)
+            .bold(),
+    )]));
+    lines.push(Line::from(vec![Span::styled(
+        "  ----------------------",
+        Style::new().fg(theme_def.read().semantic.text.dim),
+    )]));
+    lines.push(Line::from(""));
+
+    // 元信息行
+    let meta_rows: Vec<(String, String)> = vec![
+        (
+            i18n::tr("agent-label-provider"),
+            format!("{} ({})", provider_name, active_provider_id),
+        ),
+        (
+            i18n::tr("agent-label-model"),
+            format!("{} (alias: {})", model_alias, active_alias),
+        ),
+        (i18n::tr("agent-label-permission-mode"), permission_mode),
+        (i18n::tr("agent-label-cwd"), cwd),
+        (
+            i18n::tr("agent-label-messages"),
+            format!("{total_messages}"),
+        ),
+        (
+            i18n::tr("agent-label-total-messages"),
+            format!("{total_messages}"),
+        ),
+    ];
+
+    for (i, (label, value)) in meta_rows.iter().enumerate() {
+        let is_selected = i == sel;
+        let cursor_mark = if is_selected { ">" } else { " " };
+        let label_style = if is_selected {
+            Style::new()
+                .fg(theme_def.read().component.panel.title)
+                .bold()
+        } else {
+            Style::new().fg(theme_def.read().semantic.text.muted)
+        };
+        let value_style = if is_selected {
+            Style::new()
+                .fg(theme_def.read().semantic.text.primary)
+                .bold()
+        } else {
+            Style::new().fg(theme_def.read().semantic.text.primary)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} ", cursor_mark),
+                Style::new().fg(theme_def.read().component.panel.title),
+            ),
+            Span::styled(format!("{:<18}", format!("{}:", label)), label_style),
+            Span::styled(value.chars().take(60).collect::<String>(), value_style),
+        ]));
+    }
+
+    // SubAgent 列表标题
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        i18n::tr_args(
+            "agent-subagents-count",
+            &[(
+                "count".to_string(),
+                FluentValue::from(subagent_count as i64),
+            )],
+        ),
+        Style::new()
+            .fg(theme_def.read().semantic.text.primary)
+            .bold(),
+    )]));
+
+    if subagents.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            i18n::tr("agent-no-subagents"),
+            Style::new()
+                .fg(theme_def.read().semantic.text.muted)
+                .italic(),
+        )]));
+    } else {
+        for (i, sa) in subagents.iter().enumerate() {
+            let row_idx = meta_rows.len() + 1 + i;
+            let is_selected = row_idx == sel;
+            let cursor_mark = if is_selected { ">" } else { " " };
+            let name_style = if is_selected {
+                Style::new()
+                    .fg(theme_def.read().component.panel.title)
+                    .bold()
+            } else {
+                Style::new().fg(theme_def.read().semantic.text.primary)
+            };
+            let status_marker = if sa.collapsed {
+                Span::styled(
+                    i18n::tr("agent-collapsed"),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
+                )
+            } else {
+                Span::styled(
+                    i18n::tr("agent-expanded"),
+                    Style::new().fg(theme_def.read().semantic.status.success),
+                )
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", cursor_mark),
+                    Style::new().fg(theme_def.read().component.panel.title),
+                ),
+                Span::styled(sa.agent_name.clone(), name_style),
+                Span::styled(
+                    format!("  [{}]", sa.agent_id),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
+                ),
+                status_marker,
+                Span::styled(
+                    i18n::tr_args(
+                        "agent-message-count",
+                        &[(
+                            "count".to_string(),
+                            FluentValue::from(sa.view_models.len() as i64),
+                        )],
+                    ),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
+                ),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(i18n::tr("panel-agent-nav-hint")).fg(theme_def.read().semantic.text.dim));
+
+    let area = hooks.use_previous_size();
+    let content_width = area.width.saturating_sub(PANEL_CONTENT_INSET).max(1);
+    let content_height = wrapped_content_height(&lines, content_width);
+    let content = Paragraph::new(ratatui::text::Text::from(lines)).wrap(Wrap { trim: false });
+
+    // 面板滚轮仲裁注册（每帧覆盖写入，area 用上一帧组件区域）
+    crate::kit::panel_scroll::register_panel_scroll(
+        PanelKind::Agent,
+        hooks.use_previous_size(),
+        sv,
+    );
+
+    panel_shell!(PanelKind::Agent, {
+        ScrollView(
+            scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+            state: Some(sv),
+            width: Constraint::Fill(1),
+            height: Constraint::Fill(1),
+        ) {
+            View(
+                width: Constraint::Fill(1),
+                height: Constraint::Length(content_height),
+            ) {
+                Text(text: content)
+            }
+        }
+    })
+}
+
+const PANEL_CONTENT_INSET: u16 = 2;
+
+/// Agent 面板内容区扣除左右边框/滚动条后的显示宽度。
+fn wrapped_content_height(lines: &[Line<'_>], width: u16) -> u16 {
+    Paragraph::new(ratatui::text::Text::from(lines.to_vec()))
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1))
+        .clamp(1, u16::MAX as usize) as u16
+}
+
+fn collect_subagents(snap: &crate::kit::atoms::ViewModelsSnapshot) -> Vec<TuiSubAgentGroup> {
+    let mut out: Vec<TuiSubAgentGroup> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for vm in snap.items.iter() {
+        scan_vm_for_subagents(vm, &mut out, &mut seen);
+    }
+    out
+}
+
+fn scan_vm_for_subagents(
+    vm: &TuiRenderUnit,
+    out: &mut Vec<TuiSubAgentGroup>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if let TuiRenderUnit::TuiSubAgentGroup(d) = vm {
+        if seen.insert(d.agent_id.clone()) {
+            out.push(d.clone());
+        }
+        // 递归扫描子 view_models（嵌套 TuiSubAgentGroup 罕见但支持）
+        for child in d.view_models.iter() {
+            scan_vm_for_subagents(child, out, seen);
+        }
+    } else if let TuiRenderUnit::TuiCollapsedGroup(g) = vm {
+        for child in g.view_models.iter() {
+            scan_vm_for_subagents(child, out, seen);
+        }
+    }
+}
+
+fn close_panel() {
+    // I19-A: 弹栈而非清空整个栈，避免同时打开多个不同组面板时关闭一个会全部关闭
+    crate::kit::panel_registry::close_active_panel();
+}
+
+#[cfg(test)]
+#[path = "agent_test.rs"]
+mod tests;

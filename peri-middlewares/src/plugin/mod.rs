@@ -16,12 +16,14 @@ pub use install_counts::{
     fetch_install_counts, format_install_count, is_install_counts_cache_valid, load_install_counts,
 };
 pub use installer::{
-    check_updates, cleanup_orphaned_plugins, install_plugin, uninstall_plugin, update_plugin,
+    check_updates, cleanup_orphaned_plugins, find_plugin_in_marketplaces, install_plugin,
+    remove_from_enabled_plugins, uninstall_plugin, update_enabled_plugins, update_plugin,
     InstallerError, PluginUpdateInfo,
 };
 pub use loader::{
-    load_enabled_plugins, load_enabled_plugins_aggregated, CommandEntry, CommandProvider,
-    CommandSource, LoadedPlugin, LoaderError, PluginCommandProvider, PluginLoadResult,
+    load_enabled_plugins, load_enabled_plugins_aggregated, plugin_route_entries, CommandEntry,
+    CommandProvider, CommandSource, LoadedPlugin, LoaderError, PluginCommandHandler,
+    PluginCommandProvider, PluginLoadResult,
 };
 pub use marketplace::{
     parse_marketplace_input, AvailablePlugin, MarketplaceEntry, MarketplaceError,
@@ -31,5 +33,5 @@ pub use middleware::PluginMiddleware;
 pub use types::{
     InstallScope, InstalledPlugin, InstalledPlugins, KnownMarketplace, MarketplaceManifest,
     MarketplacePlugin, MarketplaceSource, McpServerEntry, PluginAgent, PluginAuthor, PluginChannel,
-    PluginCommand, PluginCommandEntry, PluginLspServer, PluginManifest, PluginOption,
+    PluginCommand, PluginCommandEntry, PluginLspServer, PluginManifest, PluginOption, PluginOrigin,
 };

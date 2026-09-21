@@ -1,4 +1,11 @@
-use crate::llm::types::TokenUsage;
+use peri_model::TokenUsage;
+
+/// 标识一次可供自动 Compact 评估的上下文压力样本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PressureSampleKey {
+    usage_generation: u64,
+    tool_growth_generation: u64,
+}
 
 /// 会话级 token 用量追踪器
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -15,11 +22,25 @@ pub struct TokenTracker {
     pub last_usage: Option<TokenUsage>,
     /// 已完成的 LLM 调用次数
     pub llm_call_count: u32,
-    /// 最近一次 LLM 响应的 API request ID
-    pub last_request_id: Option<String>,
     /// 每次 LLM 请求的 token 用量历史（仅内存，不持久化）
     #[serde(skip)]
     pub request_history: Vec<RequestRecord>,
+    /// 自上次 LLM 调用以来累积的工具结果 token 估算（P0-5）
+    ///
+    /// 工具结果在两次 LLM 调用之间被静默注入，Tracker 通过 LLM usage 无法感知。
+    /// 此字段单独累积工具结果的字符级估算（chars / 4），用于上下文预算预警。
+    /// **不可污染 `last_usage`**（那是 LLM API 的精确值，混入估算会破坏显示精度）。
+    /// 每次 LLM `accumulate` 时清零（工具结果已被下一轮 input_tokens 包含）。
+    pub estimated_tool_tokens_since_last_llm: u64,
+    /// 最近一次有效 provider usage 的单调 generation。
+    #[serde(default)]
+    usage_generation: u64,
+    /// 实际新增工具输出的单调 generation。
+    #[serde(default)]
+    tool_growth_generation: u64,
+    /// 最近一次已消费的自动 Compact 压力样本。
+    #[serde(skip)]
+    consumed_pressure_sample: Option<PressureSampleKey>,
 }
 
 impl TokenTracker {
@@ -42,9 +63,27 @@ impl TokenTracker {
         // 防止异常 API 响应（input_tokens=0）覆盖正常的上下文估算
         if usage.input_tokens > 0 {
             self.last_usage = Some(usage.clone());
+            self.usage_generation = self.usage_generation.saturating_add(1);
+            // 只有新权威 input usage 已包含工具结果，才能清除本地预测。
+            self.estimated_tool_tokens_since_last_llm = 0;
         }
         self.llm_call_count += 1;
-        self.last_request_id = usage.request_id.clone();
+    }
+
+    /// 累积工具结果 token 估算（P0-5）。
+    ///
+    /// 在 `dispatch_tools` 写入 tool_result 后调用，用 `chars().count() / 4` 近似估算。
+    /// 不能与 LLM usage 混用——这是字符级估算，仅用于预算预警。
+    pub fn add_estimated_tool_tokens(&mut self, tool_output: &str) {
+        // 经验估算：英文 ~4 字符/token，CJK 略多但保守取 4
+        let estimated = (tool_output.chars().count() / 4) as u64;
+        if tool_output.is_empty() {
+            return;
+        }
+        self.tool_growth_generation = self.tool_growth_generation.saturating_add(1);
+        self.estimated_tool_tokens_since_last_llm = self
+            .estimated_tool_tokens_since_last_llm
+            .saturating_add(estimated);
     }
 
     pub fn estimated_context_tokens(&self) -> Option<u64> {
@@ -52,7 +91,10 @@ impl TokenTracker {
         // 即当前 prompt 的实际大小，直接反映上下文窗口占用。
         // 不加 output_tokens：output 会在下一轮 API 调用中包含进 input_tokens，
         // 相加会导致双重计算，使显示用量约为实际的 2 倍。
-        self.last_usage.as_ref().map(|u| u.input_tokens as u64)
+        // 加上 estimated_tool_tokens_since_last_llm：本轮已写入但尚未被 LLM 感知的工具结果（P0-5）
+        self.last_usage.as_ref().map(|u| {
+            (u.input_tokens as u64).saturating_add(self.estimated_tool_tokens_since_last_llm)
+        })
     }
 
     pub fn context_usage_percent(&self, context_window: u32) -> Option<f64> {
@@ -76,9 +118,33 @@ impl TokenTracker {
             .unwrap_or(0.0)
     }
 
-    /// 重置追踪器（compact 后调用）
+    pub(crate) fn pressure_sample_key(&self) -> Option<PressureSampleKey> {
+        self.last_usage.as_ref()?;
+        Some(PressureSampleKey {
+            usage_generation: self.usage_generation,
+            tool_growth_generation: self.tool_growth_generation,
+        })
+    }
+
+    pub(crate) fn consume_pressure_sample(&mut self, key: PressureSampleKey) {
+        self.consumed_pressure_sample = Some(key);
+    }
+
+    pub(crate) fn is_pressure_sample_consumed(&self, key: PressureSampleKey) -> bool {
+        self.consumed_pressure_sample == Some(key)
+    }
+
+    /// 重置 usage 计数，但保留单调 generation 与已消费样本身份。
     pub fn reset(&mut self) {
-        *self = Self::default();
+        let usage_generation = self.usage_generation;
+        let tool_growth_generation = self.tool_growth_generation;
+        let consumed_pressure_sample = self.consumed_pressure_sample;
+        *self = Self {
+            usage_generation,
+            tool_growth_generation,
+            consumed_pressure_sample,
+            ..Self::default()
+        };
     }
 }
 
@@ -119,6 +185,8 @@ pub struct ContextBudget {
     pub auto_compact_threshold: f64,
     /// 警告阈值（百分比，0.0-1.0）
     pub warning_threshold: f64,
+    /// 为模型输出预留的 token 数（默认 8192）
+    pub output_reserve: u32,
 }
 
 impl ContextBudget {
@@ -131,6 +199,7 @@ impl ContextBudget {
             context_window,
             auto_compact_threshold: Self::DEFAULT_AUTO_COMPACT_THRESHOLD,
             warning_threshold: Self::DEFAULT_WARNING_THRESHOLD,
+            output_reserve: context_window / 25, // ~4% 预留
         }
     }
 

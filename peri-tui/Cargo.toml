@@ -1,7 +1,7 @@
 [package]
 name = "peri-tui"
 version.workspace = true
-edition.workspace = true
+edition = "2024"
 description = "TUI interface for Rust Agent - interactive terminal playground"
 
 [lib]
@@ -12,18 +12,44 @@ path = "src/lib.rs"
 name = "peri"
 path = "src/main.rs"
 
-[features]
-headless = []
-
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+serial_test.workspace = true
+tracing-subscriber.workspace = true
 [dependencies]
 serde.workspace = true
-peri-agent = { path = "../peri-agent" }
+# 3.0 批 3（tui-deps）依赖收紧豁免清单（见 scripts/import-exemptions.conf）：
+# - peri-middlewares：宿主装配点（launch.rs / main.rs / cli_print.rs 构造
+#   CronScheduler / McpClientPool / ToolSearchIndex / host_ports 注入 ACP 端口）
+#   与面板数据源直读（cron/mcp/plugin 具体句柄，service_snapshot / panels /
+#   atoms / cli_plugin）——「ACP Host 部署装配点职责」，M-TUI 收紧后移除
+#   （「面板数据全部经 ACP」需新增 cron/list、mcp/list 命令面，见批 3
+#   tui-deps 未做项）
+# - peri-resources：Resources::open() 门面（app/mod.rs / main.rs / cli_print.rs
+#   初始化 thread store）+ thread/mod.rs 的 SqliteThreadStore re-export；
+#   M-TUI / L5 收紧后移除
 peri-middlewares = { path = "../peri-middlewares" }
-peri-lsp = { path = "../peri-lsp" }
-ratatui = { version = ">=0.30", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
+peri-resources = { path = "../peri-resources" }
+# ratatui-widgets（reflow.rs WordWrapper）由 ratatui 0.30 传递引入；
+# status_bar.rs `model_click_areas` 复刻了该内部算法——升级本依赖或 ratatui 版本时
+# 必须运行 `cargo test -p peri-tui --lib status_bar_test` 的 ground-truth 差分测试
+# （详见 status_bar.rs `model_click_areas` 的升级护栏注释）。
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info", "unstable-widget-ref"] }
+ratatui-kit = { version = "0.10.2", features = ["full"] }
+ratatui-kit-markdown = { version = "0.3.0", features = ["markdown-highlight"] }
+# ── P1 像素渲染基础（image-p0-p1-spec §6.3 / spike S2）──
+# default-features=false 关闭 chafa-dyn（pkg-config C 库，必须）；不启用
+# tokio/serde/termion/termwiz/chafa-*。**不启用 image-defaults**（F6 评审：
+# 该 feature 打开 image/default——exr/tiff/dds/avif 等永不被调用的解码器
+# 进编译图，攻击面扩大）；ratatui-image 自身仅需 png（resize 用 imageops，
+# 见其 Cargo.toml [dependencies.image]），格式解码器由下方 image 4 格式声明
+# 提供（feature 并集）。image 显式声明供 T5 像素校验与 T6 构造 DynamicImage
+# 用，与 ratatui-image 锁一致 0.25.x。
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 tokio.workspace = true
+tokio-util.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 uuid = { workspace = true, features = ["v7"] }
@@ -31,36 +57,56 @@ serde_json.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 dirs-next.workspace = true
-tui-textarea-2 = "0.11"
 parking_lot.workspace = true
 arboard = "3"
 png = "0.18"
-base64 = { version = "0.22", features = ["alloc"] }
-peri-widgets = { path = "../peri-widgets", features = ["markdown-highlight"] }
+base64 = { version = "0.23.1", features = ["alloc"] }
+peri-theme = { path = "../peri-theme" }
 peri-acp = { path = "../peri-acp" }
-agent-client-protocol = { version = "0.11", features = ["unstable", "unstable_session_model"] }
-agent-client-protocol-schema = { version = "0.12", features = ["unstable_elicitation", "unstable_session_model"] }
-agent-client-protocol-tokio = "0.11"
+peri-acp-types = { path = "../peri-acp-types" }
+peri-web-pty = { path = "../peri-web-pty" }
+agent-client-protocol = { version = "2", features = ["unstable"] }
+agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_elicitation"] }
 unicode-width = "0.2"
 unicode-segmentation = "1"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+pulldown-cmark-012 = { package = "pulldown-cmark", version = "0.12" }  # 与 ratatui-kit-markdown 0.3.0 固定依赖保持一致（避免双版本类型混用）
 clap = { version = "4", features = ["derive"] }
-tokio-util.workspace = true
 sysinfo.workspace = true
 fluent = "0.17"
 fluent-bundle = "0.16"
 unic-langid = { version = "0.9", features = ["macros"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
-aes-gcm = "0.10"
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
+aes-gcm = "0.11"
 ring = "0.17"
 rmp-serde = "1.3"
+# ── 设备到设备加密传输（r2-encrypted-transfer，Slice 1）──
+# 仅本地基础：身份/密钥/握手/限额。wire 与 HTTP 客户端在 Slice 3 接入。
+ed25519-dalek = "3.0.0"
+# static_secrets 提供长期静态密钥类型（StaticSecret）；zeroize 为默认 feature。
+x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
+snow = "0.10"
+# 4.1.6 已验证 rust-version 1.88（本机 rustc 1.96.1）且 macOS 默认启用 Keychain；
+# 精确锁定，避免解析到更高 MSRV 的补丁版本。
+keyring = "=4.1.6"
+zeroize = "1"
 thiserror.workspace = true
+rand = "0.10"
 futures-util = "0.3"
-walkdir = "2.5"
 fuzzy-matcher = "0.3"
+im = "15"
+reqwest.workspace = true
+# ── Slice 3：CLI 掩码输入同步码 / keystore 密码（无网络依赖）──
+rpassword = "7"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-mimalloc.workspace = true
-libmimalloc-sys.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl.workspace = true
 tikv-jemalloc-sys.workspace = true

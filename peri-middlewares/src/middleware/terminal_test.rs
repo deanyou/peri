@@ -1,32 +1,544 @@
 use std::time::Instant;
+use std::{path::Path, sync::Arc};
 
-use peri_agent::tools::BaseTool;
+#[cfg(unix)]
+use peri_agent::agent::async_tasks::TaskManager;
+use peri_agent::agent::events_v2::EventBus;
+use peri_agent::agent::stages::StageContext;
+use peri_agent::messages::BaseMessage;
+use peri_agent::session::{MessageQueue, MessageTranscript};
+use peri_agent::tools::{BaseTool, ToolExecutionStatus};
+use peri_agent::{agent::react::Reasoning, agent::stages::tool_dispatch::DispatchOutcome};
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 
+// Exercise the real platform shell without relying on Python availability or
+// PowerShell's native-executable argument quoting. Tail is fixture-owned text.
+fn output_command(count: usize, tail: &str, exit_code: i32) -> String {
+    if cfg!(windows) {
+        format!("[Console]::Out.WriteLine(('x' * {count}) + '{tail}'); exit {exit_code}")
+    } else {
+        format!("printf '%*s' {count} '' | tr ' ' x; printf '%s\\n' '{tail}'; exit {exit_code}")
+    }
+}
+
+fn dispatch_context(cwd: &Path, tool: BashTool) -> StageContext {
+    let turn = peri_agent::session::turn::TurnContext::new(
+        Arc::from(cwd.to_string_lossy().into_owned()),
+        Arc::new(CancellationToken::new()),
+    );
+    let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
+    let context = StageContext::new(turn, transcript, MessageQueue::new());
+    context
+        .runtime
+        .tools
+        .write()
+        .insert("Bash".to_string(), Arc::new(tool) as Arc<dyn BaseTool>);
+    context
+}
+
+fn dispatch_context_with_events(
+    cwd: &Path,
+    tool: BashTool,
+) -> (StageContext, peri_acp_types::event_v2::EventHandles) {
+    let turn = peri_agent::session::turn::TurnContext::new(
+        Arc::from(cwd.to_string_lossy().into_owned()),
+        Arc::new(CancellationToken::new()),
+    );
+    let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
+    let (bus, handles) = EventBus::new(Default::default());
+    let context = StageContext::builder(turn, transcript, MessageQueue::new())
+        .with_event_bus(Arc::new(bus))
+        .build();
+    context
+        .runtime
+        .tools
+        .write()
+        .insert("Bash".to_string(), Arc::new(tool) as Arc<dyn BaseTool>);
+    (context, handles)
+}
+
+async fn dispatch_bash(
+    context: &StageContext,
+    input: serde_json::Value,
+    cancel: CancellationToken,
+) -> Result<DispatchOutcome, peri_agent::error::AgentError> {
+    let catalog = context
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&context.runtime.tools.read())
+        .unwrap();
+    let reasoning = Reasoning::with_tools(
+        "run Bash",
+        vec![peri_agent::agent::react::ToolCall::new(
+            "bash-call",
+            "Bash",
+            input,
+        )],
+    );
+    peri_agent::agent::stages::tool_dispatch::dispatch_tools(context, &reasoning, &catalog, &cancel)
+        .await
+}
+
+fn maybe_export_fixture(messages: &[BaseMessage]) {
+    let Ok(path) = std::env::var("PERI_EVIDENCE_FIXTURE_OUT") else {
+        return;
+    };
+    let encoded = serde_json::to_string_pretty(messages).unwrap();
+    std::fs::write(path, encoded).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_cancelled_foreground_shell_retains_owner_until_process_exit() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let fixture = tempfile::tempdir().unwrap();
+    let manager = Arc::new(TaskManager::new());
+    let tool = BashTool::new(fixture.path().to_str().unwrap()).with_task_manager(manager.clone());
+    let command = tokio::spawn(async move {
+        tool.invoke(
+            serde_json::json!({"command": "echo $$ > ready; sleep 60", "timeout": 0}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fixture.path().join("ready").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut shutdown = peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref());
+    // 进程仍活着时必须持有 owner，不能仅因 shutdown 请求就报告完成。
+    assert!(futures::poll!(&mut shutdown).is_pending());
+    command.abort();
+    assert!(command.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        shutdown.await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete,
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_successful_shell_keeps_redirected_background_process_owned() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let fixture = tempfile::tempdir().unwrap();
+    let manager = Arc::new(TaskManager::new());
+    let tool = BashTool::new(fixture.path().to_str().unwrap()).with_task_manager(manager.clone());
+    let output = tool.invoke(serde_json::json!({
+        "command": "(while [ ! -f release ]; do sleep 0.01; done; printf done > survived) >/dev/null 2>&1 &",
+        "timeout": 0
+    }), peri_agent::tools::ToolContext::new(&[], ".")).await.unwrap();
+    assert!(output.contains("background task"), "{output}");
+    assert_eq!(manager.active_count(), 1);
+    std::fs::write(fixture.path().join("release"), "go").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fixture.path().join("survived").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background process must remain alive after Bash returns");
+    assert_eq!(
+        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+}
+
+/// 父 shell 的成功退出不能作为其剩余后台进程的退出码。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_redirected_background_process_reports_unknown_exit_code() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let fixture = tempfile::tempdir().unwrap();
+    let manager = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let tool = BashTool::new(fixture.path().to_str().unwrap())
+        .with_task_manager(manager.clone())
+        .with_on_bg_complete(Arc::new(move |result, _| {
+            let _ = tx.send(result.clone());
+        }));
+    let output = tool.invoke(serde_json::json!({
+        "command": "(while [ ! -f release ]; do sleep 0.01; done; exit 7) >/dev/null 2>&1 &",
+        "timeout": 0
+    }), peri_agent::tools::ToolContext::new(&[], ".")).await.unwrap();
+    assert!(output.contains("background task"), "{output}");
+    std::fs::write(fixture.path().join("release"), "go").unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("descendant completion notification")
+        .unwrap();
+    let files = result.shell_output.as_ref().expect("output references");
+    // 文件已发布给后台任务，worker 结束后仍须可读。
+    assert_eq!(
+        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+    for path in [files.stdout_path.as_ref(), files.stderr_path.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        std::fs::read(path).expect("published file remains readable");
+        std::fs::remove_file(path).unwrap();
+    }
+    assert_eq!(files.exit_code, None, "descendant status was never waited");
+    assert!(result.to_notification().contains("退出码未知"));
+}
+
 #[tokio::test]
 async fn test_bash_normal_command() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"command": "echo hello"}))
+        .invoke(
+            serde_json::json!({"command": "echo hello"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("hello"));
 }
 
 #[tokio::test]
+async fn test_bash_typed_evidence_preserves_nonzero_exit() {
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let output = tool
+        .invoke_output(
+            serde_json::json!({"command": output_command(0, "tail-failure", 7)}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let evidence = output.execution.expect("Bash must report wait evidence");
+    assert_eq!(evidence.status, ToolExecutionStatus::Failed);
+    assert_eq!(evidence.exit_code, Some(7));
+    assert!(output.text.contains("tail-failure"));
+}
+
+#[tokio::test]
+async fn test_bash_typed_evidence_persists_10k_to_65k_projection() {
+    let fixture = tempfile::tempdir().unwrap();
+    let tool = BashTool::new(fixture.path().to_str().unwrap());
+    let output = tool
+        .invoke_output(
+            serde_json::json!({
+                "command": output_command(20000, "", 0)
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let evidence = output.execution.expect("Bash must report wait evidence");
+    assert_eq!(evidence.status, ToolExecutionStatus::Completed);
+    assert!(evidence.output_truncated);
+    let path = evidence.output_ref.expect("full output reference");
+    let full = std::fs::read_to_string(path).unwrap();
+    assert!(full.len() > 10_000);
+    assert!(output.text.chars().count() <= 10_000);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bash_typed_evidence_marks_explicit_background_running() {
+    let manager = Arc::new(TaskManager::new());
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(manager.clone());
+    let output = tool
+        .invoke_output(
+            serde_json::json!({"command": "sleep 1", "run_in_background": true}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let evidence = output.execution.expect("background evidence");
+    assert_eq!(evidence.status, ToolExecutionStatus::Running);
+    assert!(evidence.task_id.is_some());
+    assert_eq!(manager.active_count(), 1);
+    assert_eq!(
+        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bash_typed_evidence_marks_promoted_timeout_still_running() {
+    let manager = Arc::new(TaskManager::new());
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(manager.clone());
+    let output = tool
+        .invoke_output(
+            serde_json::json!({"command": "sleep 1", "timeout": 100}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let evidence = output.execution.expect("promoted timeout evidence");
+    assert_eq!(evidence.status, ToolExecutionStatus::RunningAfterTimeout);
+    assert!(evidence.task_id.is_some());
+    assert!(evidence.output_truncated);
+    assert_eq!(manager.active_count(), 1);
+    assert_eq!(
+        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+}
+
+#[tokio::test]
+async fn test_production_dispatch_persists_bash_tail_failure_evidence() {
+    let fixture = tempfile::tempdir().unwrap();
+    let context = dispatch_context(
+        fixture.path(),
+        BashTool::new(fixture.path().to_string_lossy()),
+    );
+    let outcome = dispatch_bash(
+        &context,
+        serde_json::json!({
+            "command": output_command(20000, "TAIL_FAILURE", 7)
+        }),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let result = &outcome.results[0].1;
+    assert!(result.is_error);
+    let evidence = result.execution.as_ref().expect("typed Bash evidence");
+    assert_eq!(evidence.status, ToolExecutionStatus::Failed);
+    assert_eq!(evidence.exit_code, Some(7));
+    assert!(evidence.output_truncated);
+    let output_ref = evidence.output_ref.as_ref().expect("full output ref");
+    assert!(std::fs::read_to_string(output_ref)
+        .unwrap()
+        .contains(&format!("{}TAIL_FAILURE", "x".repeat(20_000))));
+    assert!(result.output.chars().count() <= 10_000);
+
+    let transcript = context.session.transcript.read();
+    let message = transcript
+        .visible_messages()
+        .into_iter()
+        .find(|message| matches!(message, BaseMessage::Tool { .. }))
+        .cloned()
+        .expect("canonical tool message");
+    let encoded = serde_json::to_string(&message).unwrap();
+    let restored: BaseMessage = serde_json::from_str(&encoded).unwrap();
+    assert!(matches!(
+        restored,
+        BaseMessage::Tool {
+            execution: Some(_),
+            is_error: true,
+            ..
+        }
+    ));
+    maybe_export_fixture(std::slice::from_ref(&message));
+}
+
+#[tokio::test]
+async fn test_production_dispatch_persists_bash_success_projection_and_ref() {
+    let fixture = tempfile::tempdir().unwrap();
+    let context = dispatch_context(
+        fixture.path(),
+        BashTool::new(fixture.path().to_string_lossy()),
+    );
+    let outcome = dispatch_bash(
+        &context,
+        serde_json::json!({
+            "command": output_command(20000, "", 0)
+        }),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let result = &outcome.results[0].1;
+    assert!(!result.is_error);
+    let evidence = result.execution.as_ref().expect("typed Bash evidence");
+    assert_eq!(evidence.status, ToolExecutionStatus::Completed);
+    assert_eq!(evidence.exit_code, Some(0));
+    assert!(evidence.output_truncated);
+    let output_ref = evidence.output_ref.as_ref().expect("full output ref");
+    assert!(std::fs::read_to_string(output_ref).unwrap().len() > 10_000);
+    assert!(result.output.chars().count() <= 10_000);
+}
+
+#[tokio::test]
+async fn test_production_dispatch_live_tool_end_matches_canonical_projection() {
+    let fixture = tempfile::tempdir().unwrap();
+    let (context, mut handles) = dispatch_context_with_events(
+        fixture.path(),
+        BashTool::new(fixture.path().to_string_lossy()),
+    );
+    let outcome = dispatch_bash(
+        &context,
+        serde_json::json!({
+            "command": output_command(20000, "", 7)
+        }),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let result = &outcome.results[0].1;
+    let evidence = result.execution.as_ref().expect("typed Bash evidence");
+    assert_eq!(evidence.exit_code, Some(7));
+    assert!(evidence.output_truncated);
+    let event = loop {
+        let event = handles.try_render().expect("ToolEnded render event");
+        if let peri_acp_types::event_v2::RenderEvent::ToolEnded { .. } = event {
+            break event;
+        }
+    };
+    let peri_acp_types::event_v2::RenderEvent::ToolEnded {
+        output, is_error, ..
+    } = event
+    else {
+        unreachable!();
+    };
+    assert_eq!(output, result.output);
+    assert_eq!(is_error, result.is_error);
+    assert!(output.chars().count() <= 10_000);
+}
+
+#[tokio::test]
+async fn test_production_dispatch_near_limit_output_persists_before_metadata_projection() {
+    let fixture = tempfile::tempdir().unwrap();
+    let context = dispatch_context(
+        fixture.path(),
+        BashTool::new(fixture.path().to_string_lossy()),
+    );
+    let outcome = dispatch_bash(
+        &context,
+        serde_json::json!({
+            "command": output_command(9900, "", 0)
+        }),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let result = &outcome.results[0].1;
+    let evidence = result.execution.as_ref().expect("typed evidence");
+    assert!(evidence.output_truncated);
+    let output_ref = evidence.output_ref.as_ref().expect("full output ref");
+    assert!(std::fs::read_to_string(output_ref).unwrap().len() >= 9_900);
+    assert!(result.output.contains("status: completed"));
+    assert!(result.output.chars().count() <= 10_000);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_production_dispatch_persists_promoted_timeout_lifecycle() {
+    let fixture = tempfile::tempdir().unwrap();
+    let manager = Arc::new(TaskManager::new());
+    let context = dispatch_context(
+        fixture.path(),
+        BashTool::new(fixture.path().to_string_lossy()).with_task_manager(manager.clone()),
+    );
+    let outcome = dispatch_bash(
+        &context,
+        serde_json::json!({"command": "sleep 1", "timeout": 100}),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let result = &outcome.results[0].1;
+    let evidence = result.execution.as_ref().expect("timeout evidence");
+    assert_eq!(evidence.status, ToolExecutionStatus::RunningAfterTimeout);
+    assert!(evidence.task_id.is_some());
+    assert!(result.is_error);
+    assert!(result.output.chars().count() <= 10_000);
+    assert_eq!(
+        peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await,
+        peri_acp_types::tasks::TaskShutdownReport::Complete
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_production_dispatch_persists_outer_cancel_evidence() {
+    let fixture = tempfile::tempdir().unwrap();
+    let context = dispatch_context(
+        fixture.path(),
+        BashTool::new(fixture.path().to_string_lossy()),
+    );
+    let cancel = CancellationToken::new();
+    let task_context = context.clone();
+    let task_cancel = cancel.clone();
+    let dispatch = tokio::spawn(async move {
+        dispatch_bash(
+            &task_context,
+            serde_json::json!({"command": "sleep 2"}),
+            task_cancel,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancel.cancel();
+    let error = match dispatch.await.unwrap() {
+        Ok(_) => panic!("cancel must interrupt dispatch"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, peri_agent::error::AgentError::Interrupted));
+    let transcript = context.session.transcript.read();
+    let message = transcript
+        .visible_messages()
+        .into_iter()
+        .find_map(|message| match message {
+            BaseMessage::Tool {
+                execution,
+                is_error,
+                ..
+            } => Some((execution, is_error)),
+            _ => None,
+        })
+        .expect("canonical cancelled tool message");
+    let (evidence, is_error) = message;
+    assert_eq!(
+        evidence.as_ref().expect("cancel evidence").status,
+        ToolExecutionStatus::Cancelled
+    );
+    assert!(is_error);
+}
+
+#[tokio::test]
 async fn test_bash_nonzero_exit_code() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"command": "exit 42"}))
+        .invoke(
+            serde_json::json!({"command": "exit 42"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("42"), "应包含退出码: {result}");
 }
 
-/// 验证超时后在合理时间内返回，且 kill_on_drop 确保子进程被清理
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bash_cd_does_not_persist_between_invocations() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let fixture = tempfile::tempdir().unwrap();
+    let cwd = fixture.path().canonicalize().unwrap();
+    let nested = cwd.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let tool = BashTool::new(cwd.to_str().unwrap());
+
+    for (command, expected) in [("cd nested && pwd -P", &nested), ("pwd -P", &cwd)] {
+        let output = tool
+            .invoke(
+                serde_json::json!({"command": command}),
+                peri_agent::tools::ToolContext::new(&[], "."),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.trim(), expected.to_str().unwrap());
+    }
+}
+
+/// 验证超时后在合理时间内返回，且进程组（bash + 全部子进程）被清理
 #[tokio::test]
 async fn test_bash_timeout_returns_quickly() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let start = Instant::now();
 
@@ -38,17 +550,20 @@ async fn test_bash_timeout_returns_quickly() {
     };
 
     let result = tool
-        .invoke(serde_json::json!({
-            "command": sleep_cmd,
-            "timeout": timeout_ms
-        }))
+        .invoke(
+            serde_json::json!({
+                "command": sleep_cmd,
+                "timeout": timeout_ms
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await;
     let err_msg = result.unwrap_err().to_string();
     let elapsed = start.elapsed();
 
     // 应在约 1 秒内返回（不超过 3 秒），不等待 sleep 60 完成
     assert!(
-        elapsed.as_secs() < 3,
+        elapsed.as_secs() < if cfg!(target_os = "windows") { 8 } else { 3 },
         "超时后应快速返回，实际耗时 {:?}",
         elapsed
     );
@@ -60,9 +575,13 @@ async fn test_bash_timeout_returns_quickly() {
 
 #[tokio::test]
 async fn test_bash_stderr_captured() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({"command": "echo err >&2"}))
+        .invoke(
+            serde_json::json!({"command": "echo err >&2"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("err"), "stderr 应被捕获: {result}");
@@ -129,24 +648,27 @@ fn test_bash_description_extended() {
     assert!(desc.len() > 200, "description 应为扩展后的多段落文本");
 }
 
-/// 零超时应被 clamp 到至少 1 毫秒。timeout=0 → 1ms 太短，echo 大概率超时返回 Err。
-/// 这里验证 timeout=100ms（clamp 后足够执行 echo），命令正常完成。
+/// timeout=0 表示不超时（前台/后台通用）；这里验证显式正超时下 echo 正常完成。
 #[tokio::test]
 async fn test_bash_timeout_clamped_to_minimum() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let start = Instant::now();
-    // timeout = 100 → clamp 不生效，echo quick 应在 100ms 内正常完成
+    // timeout = 2000 → clamp 不生效，echo quick 应正常完成（PowerShell 冷启动较慢）
     let result = tool
-        .invoke(serde_json::json!({
-            "command": "echo quick",
-            "timeout": 100
-        }))
+        .invoke(
+            serde_json::json!({
+                "command": "echo quick",
+                "timeout": 5000
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     let elapsed = start.elapsed();
     assert!(result.contains("quick"), "echo quick 应正常输出: {result}");
     assert!(
-        elapsed.as_millis() < 500,
+        elapsed.as_millis() < 8000,
         "应快速完成，实际耗时 {:?}",
         elapsed
     );
@@ -155,12 +677,16 @@ async fn test_bash_timeout_clamped_to_minimum() {
 /// 显式超时 600000 毫秒应被允许（上限）
 #[tokio::test]
 async fn test_bash_timeout_maximum_accepted() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
     let result = tool
-        .invoke(serde_json::json!({
-            "command": "echo ok",
-            "timeout": 600000
-        }))
+        .invoke(
+            serde_json::json!({
+                "command": "echo ok",
+                "timeout": 600000
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("ok"));
@@ -174,67 +700,55 @@ fn test_tool_name_is_Bash() {
 }
 
 #[tokio::test]
-async fn test_bash_default_timeout_is_120_seconds() {
+async fn test_bash_default_timeout_is_15_seconds() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
-    // 不传 timeout → 默认 120000ms = 120s
+    // 不传 timeout → 默认 15000ms = 15s
     let result = tool
-        .invoke(serde_json::json!({"command": "echo ok"}))
+        .invoke(
+            serde_json::json!({"command": "echo ok"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("ok"));
 }
 
 #[tokio::test]
-async fn test_bash_description_and_run_in_background_parsed() {
+async fn test_bash_legacy_params_ignored() {
+    // description 是 schema 未声明的字段，残留应被静默忽略（不影响执行）
+    // 注：run_in_background 现已支持（见 issue bg-tasks-unified-management），不再是 legacy
+    let _process_env = crate::process_env::lock().expect("process env lock");
     let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
-    // description 和 run_in_background 不影响执行
     let result = tool
-        .invoke(serde_json::json!({
-            "command": "echo ok",
-            "description": "test description",
-            "run_in_background": true
-        }))
+        .invoke(
+            serde_json::json!({
+                "command": "echo ok",
+                "description": "test description",
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
         .await
         .unwrap();
     assert!(result.contains("ok"));
 }
 
 #[test]
-fn test_truncate_bytes_ascii() {
-    let s = "hello world";
-    assert_eq!(truncate_bytes(s, 5), "hello");
-}
-
-#[test]
-fn test_truncate_bytes_within_limit() {
-    let s = "hello";
-    assert_eq!(truncate_bytes(s, 100), "hello");
-}
-
-#[test]
-fn test_truncate_bytes_utf8_safe() {
-    // 中文字符每个占 3 字节，在字节 7 处截断（是字符边界）
-    let s = "你好世界";
-    assert_eq!(truncate_bytes(s, 6), "你好");
-}
-
-#[test]
-fn test_truncate_bytes_utf8_mid_character() {
-    // "你好" = 6 bytes, 在字节 5 处截断（不是字符边界）
-    // 应回退到字节 3 处（"你" 的末尾）
-    let s = "你好世界";
-    let result = truncate_bytes(s, 5);
-    assert_eq!(result, "你", "应在字符边界截断，实际: {}", result);
-}
-
-#[test]
-fn test_truncate_bytes_empty_string() {
-    assert_eq!(truncate_bytes("", 10), "");
-}
-
-#[test]
-fn test_truncate_bytes_zero_max() {
-    assert_eq!(truncate_bytes("hello", 0), "");
+fn test_bash_schema_no_legacy_params() {
+    // description 从未声明为 BashTool 参数；run_in_background 现已支持（见 bg-tasks-unified-management）
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let params = tool.parameters();
+    let props = params["properties"].as_object().unwrap();
+    assert!(
+        !props.contains_key("description"),
+        "schema 不应声明 description 参数"
+    );
+    assert!(props.contains_key("command"), "command 应保留");
+    assert!(props.contains_key("timeout"), "timeout 应保留");
+    assert!(
+        props.contains_key("run_in_background"),
+        "run_in_background 现已支持，schema 应声明"
+    );
 }
 
 #[test]
@@ -261,4 +775,414 @@ fn test_truncate_output_persists_full_content_on_byte_truncation() {
         result.contains("peri-tool-output-"),
         "字节截断应包含文件路径: {result}"
     );
+}
+
+// ── 后台任务超时语义（issue 2026-08-02-background-task-15s-timeout-kills-and-misreports）──
+// parse_timeout / bg_shell_task_id 纯函数测试已随实现迁至
+// `peri-agent/src/agent/async_tasks_test.rs`（L1 迁移点），此处不再重复。
+
+/// bg 显式超时：应杀死整个进程组（bash 为组长），sh/sleep 子进程不得孤儿存活创建 marker。
+/// 命令 `sh -c 'sleep 3; touch marker'` + timeout 2000：若只杀 bash 单进程（旧行为），
+/// sh 孤儿会在 3s 时 touch；等 3.5s 断言 marker 不存在可区分新旧行为。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bg_explicit_timeout_kills_process_group() {
+    let registry = Arc::new(TaskManager::new());
+    let marker = std::env::temp_dir().join(format!(
+        "peri-bg-timeout-kill-{}.marker",
+        uuid::Uuid::new_v4()
+    ));
+    let marker_path = marker.to_string_lossy().to_string();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry)
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            let _ = tx.send(r.clone());
+        }));
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "command": format!("sh -c 'sleep 3; touch {}'", marker_path),
+                "run_in_background": true,
+                "timeout": 2000,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("shell-"), "应返回 task_id: {result}");
+
+    // 回调保留失败与真实超时终态，通知不再携带输出正文。
+    let notif = rx
+        .recv()
+        .await
+        .expect("bg 超时后应触发 on_bg_complete 回调");
+    assert!(!notif.success, "超时结果应为失败");
+    assert!(
+        notif.to_notification().contains("超时被终止"),
+        "通知必须区分终止和仍在后台运行"
+    );
+    assert!(notif.timed_out, "超时结果应标记 timed_out");
+
+    // 等 3.5s（> sleep 3）：若进程组未被杀，sh/sleep 孤儿会创建 marker
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert!(!marker.exists(), "子进程不应存活，marker 不应被创建");
+    let _ = std::fs::remove_file(&marker);
+}
+
+/// run_in_background 任务应在**启动时**注册（BgTaskStarted 立即推送），
+/// 运行期间 registry 可见（TUI 展示栏依赖此事件在运行期间显示任务）；
+/// 完成后 registry 归零。
+///
+/// 回归：此前 bg shell 只在完成时 register_with_kind（Started 与 Completed
+/// 同时发出），任务运行期间 TUI 的 status 下方展示栏没有条目。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bg_shell_registered_while_running() {
+    let registry = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            let _ = tx.send(r.clone());
+        }));
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sleep 1.2",
+                "run_in_background": true,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.lines().any(|l| l.starts_with("pid: ")),
+        "应返回 pid 行: {result}"
+    );
+    assert!(result.contains("kill"), "应说明 kill 方式: {result}");
+    let task_id = result
+        .lines()
+        .find(|l| l.starts_with("task_id: "))
+        .expect("应返回 task_id 行")
+        .trim_start_matches("task_id: ")
+        .to_string();
+
+    // 运行期间（sleep 1.2 尚未结束）：任务必须已注册且可查询
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(registry.active_count(), 1, "运行期间任务应已注册");
+    let tasks = registry.list_tasks();
+    assert_eq!(tasks.len(), 1, "运行期间应可列出任务");
+    assert_eq!(tasks[0].0, task_id, "注册的任务 id 应与返回的 task_id 一致");
+
+    // 完成后：回调收到成功结果，registry 清空
+    let notif = rx
+        .recv()
+        .await
+        .expect("bg 完成后应触发 on_bg_complete 回调");
+    assert!(notif.success, "sleep 1.2 应成功退出");
+    assert_eq!(notif.task_id, task_id);
+    assert_eq!(registry.active_count(), 0, "完成后任务应已清理");
+}
+
+/// bg shell 的 stdout/stderr 应 tee 到日志文件：返回消息含日志路径，
+/// 运行期间 agent 可经 Read 读取部分输出，完成后文件包含全部输出。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bg_shell_log_file_tee() {
+    let registry = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            let _ = tx.send(r.clone());
+        }));
+
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "command": "printf 'first\\n'; sleep 1.5; printf 'second\\n'",
+                "run_in_background": true,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let log_line = result
+        .lines()
+        .find(|l| l.contains("stdout.log"))
+        .expect("应返回 stdout 日志路径: {result}");
+    let log_path = log_line
+        .split(' ')
+        .find(|t| t.contains("peri-bg-"))
+        .expect("日志路径应含 peri-bg- 前缀: {log_line}")
+        .to_string();
+    let stderr_path = log_line
+        .split(' ')
+        .find(|t| t.contains("peri-bg-") && t.contains("stderr.log"))
+        .expect("应返回 stderr 日志路径: {log_line}")
+        .to_string();
+
+    // 运行期间（sleep 1.5 未结束）：日志文件应已含 first，不含 second
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let partial = std::fs::read_to_string(&log_path).expect("运行期间应可读日志文件");
+    assert!(
+        partial.contains("first"),
+        "运行期间应已写入 first: {partial}"
+    );
+    assert!(!partial.contains("second"), "second 尚未输出: {partial}");
+
+    // 完成后：通知到达时日志文件应含全部输出
+    let notif = rx
+        .recv()
+        .await
+        .expect("bg 完成后应触发 on_bg_complete 回调");
+    assert!(notif.success);
+    let files = notif
+        .shell_output
+        .as_ref()
+        .expect("typed output references");
+    assert!(files.complete);
+    assert_eq!(files.stdout_path.as_deref(), Some(log_path.as_str()));
+    assert_eq!(files.exit_code, Some(0));
+    assert!(!notif.to_notification().contains("second"));
+    assert!(notif.to_notification().contains("Read"));
+    let full = std::fs::read_to_string(&log_path).expect("完成后应可读日志文件");
+    assert!(
+        full.contains("first") && full.contains("second"),
+        "完成后应含全部输出: {full}"
+    );
+
+    let _ = std::fs::remove_file(&log_path);
+    let _ = std::fs::remove_file(&stderr_path);
+}
+
+/// 同步超时 + 有注册表：不杀进程，promote 为后台任务续跑；
+/// 完成回调收到 success=true 和完整输出文件引用，active_count 归零。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_promotes_to_background() {
+    let registry = Arc::new(TaskManager::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BackgroundTaskResult>();
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap())
+        .with_task_manager(registry.clone())
+        .with_on_bg_complete(Arc::new(move |r, _kind| {
+            let _ = tx.send(r.clone());
+        }));
+
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sh -c 'sleep 2; echo done'",
+                "timeout": 200,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(err.contains("shell-"), "Err 应含 task_id: {err}");
+    assert!(
+        err.contains("background task"),
+        "Err 应说明已转后台续跑: {err}"
+    );
+    assert!(
+        err.lines().any(|l| l.starts_with("pid: ")),
+        "Err 应含 pid 行: {err}"
+    );
+    assert!(err.contains("kill"), "Err 应说明 kill 方式: {err}");
+
+    // Err 中的 task_id 应与回调结果一致
+    let task_id = err
+        .lines()
+        .find(|l| l.starts_with("task_id: "))
+        .expect("Err 应含 task_id 行")
+        .trim_start_matches("task_id: ")
+        .to_string();
+
+    // 约 2s 后续跑任务完成，回调收到成功结果
+    let notif = rx
+        .recv()
+        .await
+        .expect("promote 完成后应触发 on_bg_complete 回调");
+    assert_eq!(notif.task_id, task_id, "回调任务 id 应与 promote 返回一致");
+    assert!(notif.success, "续跑完成应成功");
+    let files = notif
+        .shell_output
+        .as_ref()
+        .expect("promoted output references");
+    assert!(files.complete);
+    assert_eq!(files.exit_code, Some(0));
+    assert!(std::fs::read_to_string(files.stdout_path.as_ref().unwrap())
+        .unwrap()
+        .contains("done"));
+    assert!(!notif.to_notification().contains("done"));
+    assert!(!notif.timed_out, "正常完成不应标记 timed_out");
+
+    // complete() 清理后 active_count 归零
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+}
+
+/// 同步超时 + 无注册表：杀进程组，部分输出落盘；
+/// Err 含 "timed out" 与部分输出文件路径，文件内容含已产生输出。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_without_registry_kills_and_persists_partial() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap()); // 无 registry
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sh -c 'echo partial-before-timeout; sleep 30'",
+                "timeout": 500,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(
+        err.contains("Partial output"),
+        "Err 应含 partial output 提示: {err}"
+    );
+
+    // 提取落盘文件路径并验证内容
+    let hint = err
+        .lines()
+        .find(|l| l.contains("peri-tool-output-"))
+        .expect("Err 应包含部分输出文件路径");
+    let path_str = hint
+        .split("saved to ")
+        .nth(1)
+        .expect("提示应含 'saved to'")
+        .split(' ')
+        .next()
+        .expect("路径后应有空格")
+        .trim_end_matches(']');
+    let file_content = std::fs::read_to_string(path_str).expect("部分输出文件应可读");
+    assert!(
+        file_content.contains("partial-before-timeout"),
+        "部分输出文件应含已产生输出: {file_content}"
+    );
+    let _ = std::fs::remove_file(path_str);
+}
+
+// ── stdin null + 超时诊断分流（issue: bash 错误原因定位）──────────────────────
+
+/// stdin 重定向为 /dev/null：read 立即 EOF 返回，不挂死到超时。
+/// 旧行为（stdin 继承终端）下该命令会永久阻塞等待输入。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bash_stdin_null_read_fails_fast() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let start = Instant::now();
+    let result = tool
+        .invoke(
+            serde_json::json!({"command": "read x; echo \"got:${x:-<eof>}\""}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_secs() < 3,
+        "read 应立即 EOF 返回，实际 {:?}",
+        elapsed
+    );
+    assert!(
+        result.contains("got:<eof>"),
+        "stdin 为 null 时 read 应读到 EOF: {result}"
+    );
+}
+
+/// 同步超时 promote 且无输出：文案应如实说明"可能永不自行结束"而非承诺完成。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_promote_no_output_diagnoses_stall() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let registry = Arc::new(TaskManager::new());
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
+
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sh -c 'sleep 2'", // 无输出
+                "timeout": 200,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(
+        err.contains("no output produced"),
+        "无输出分支应明确说明: {err}"
+    );
+    assert!(
+        err.contains("may never complete on its own"),
+        "应说明可能永不自行结束: {err}"
+    );
+    assert!(
+        err.contains("waiting for input"),
+        "应提示等待输入的可能原因: {err}"
+    );
+    assert!(
+        err.contains("Process state:"),
+        "应附进程状态快照用于定位: {err}"
+    );
+    assert!(
+        err.contains("run_in_background"),
+        "应提示服务/守护进程应用后台模式: {err}"
+    );
+    assert!(err.contains("kill"), "应说明 kill 方式: {err}");
+
+    // 等 promote 续跑任务收尾，避免残留注册
+    tokio::time::sleep(Duration::from_millis(2300)).await;
+    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
+}
+
+/// 同步超时 promote 且有输出：文案应如实说明"有进展、续跑合理"。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_sync_timeout_promote_with_output_notes_progress() {
+    let _process_env = crate::process_env::lock().expect("process env lock");
+    let registry = Arc::new(TaskManager::new());
+    let tool =
+        BashTool::new(std::env::temp_dir().to_str().unwrap()).with_task_manager(registry.clone());
+
+    let err = tool
+        .invoke(
+            serde_json::json!({
+                "command": "sh -c 'echo progressing; sleep 2'",
+                "timeout": 200,
+            }),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "Err 应含 timed out: {err}");
+    assert!(
+        err.contains("producing output"),
+        "有输出分支应说明有进展: {err}"
+    );
+    assert!(
+        !err.contains("no output produced"),
+        "有输出分支不应走无输出文案: {err}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(2300)).await;
+    assert_eq!(registry.active_count(), 0, "完成后 active_count 应归零");
 }

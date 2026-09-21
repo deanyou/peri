@@ -1,16 +1,22 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::Path,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use parking_lot::RwLock;
 
+use peri_acp_types::ports::LspPoolPort;
+
 use crate::{
-    client::{LspClient, ServerState},
+    client::{LspClient, ServerState, DEFAULT_STARTUP_TIMEOUT_MS},
     config::{LspConfigFile, LspConfigSource},
     diagnostics::DiagnosticsRegistry,
     error::LspError,
+    uri::path_to_uri,
 };
 
 /// LSP 服务器池：管理多个 LSP 服务器实例，按文件扩展名路由
@@ -22,8 +28,11 @@ pub struct LspServerPool {
     root_uri: String,
     /// 诊断注册表
     diagnostics: Arc<DiagnosticsRegistry>,
-    /// 已初始化的服务器名集合
-    initialized: RwLock<HashSet<String>>,
+    /// 池曾成功激活；只决定动态添加是否自动启动，不表示任何 client 已就绪。
+    active: AtomicBool,
+    /// 池操作互斥 — 序列化添加、路由选择和关闭；client 自己拥有就绪状态。
+    /// tokio::sync::Mutex — guard 可以跨 .await 持有（锁内调用 client.start）
+    start_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug)]
@@ -53,6 +62,9 @@ impl LspServerPool {
                 server_config.env.clone().unwrap_or_default(),
                 server_config.initialization_options.clone(),
                 server_config.max_restarts.unwrap_or(3),
+                server_config
+                    .startup_timeout
+                    .unwrap_or(DEFAULT_STARTUP_TIMEOUT_MS),
                 Arc::clone(&diagnostics),
             ));
 
@@ -72,20 +84,24 @@ impl LspServerPool {
         Self {
             servers: RwLock::new(servers),
             extension_map: RwLock::new(extension_map),
-            root_uri: format!("file://{}", cwd),
+            root_uri: path_to_uri(Path::new(cwd)),
             diagnostics,
-            initialized: RwLock::new(HashSet::new()),
+            active: AtomicBool::new(false),
+            start_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// 按需初始化：启动所有未初始化的服务器（用于 workspaceSymbol 等全局操作）
     pub async fn ensure_initialized(&self) -> Result<(), LspError> {
+        // 与 ensure_server_for_file/add_server 互斥：路由和激活操作串行化
+        let _guard = self.start_lock.lock().await;
+
+        // 锁内收集：等待锁期间可能已有服务器被并发启动
         let to_start: Vec<(String, Arc<LspClient>)> = {
-            let initialized = self.initialized.read();
             let guard = self.servers.read();
             guard
                 .iter()
-                .filter(|(n, _)| !initialized.contains(*n))
+                .filter(|(_, c)| !c.is_ready())
                 .map(|(n, c)| (n.clone(), Arc::clone(c)))
                 .collect()
         };
@@ -101,7 +117,7 @@ impl LspServerPool {
             match client.start(&self.root_uri).await {
                 Ok(()) => {
                     tracing::info!(target: "lsp", server = %name, "LSP 服务器启动成功");
-                    self.initialized.write().insert(name.clone());
+                    self.active.store(true, Ordering::Release);
                 }
                 Err(e) => {
                     tracing::warn!(target: "lsp", server = %name, error = %e, "LSP 服务器启动失败");
@@ -123,6 +139,7 @@ impl LspServerPool {
     /// 按文件扩展名单独初始化：只启动处理该扩展名的服务器
     /// 如果没有匹配的服务器，返回 NoServerForFile
     pub async fn ensure_server_for_file(&self, file_path: &str) -> Result<(), LspError> {
+        let _guard = self.start_lock.lock().await;
         let ext = Path::new(file_path)
             .extension()
             .and_then(|e| e.to_str())
@@ -141,14 +158,6 @@ impl LspServerPool {
             }
         };
 
-        // 检查是否已初始化
-        {
-            let initialized = self.initialized.read();
-            if initialized.contains(&server_name) {
-                return Ok(());
-            }
-        }
-
         // 只启动匹配的服务器
         let client = {
             let servers = self.servers.read();
@@ -165,7 +174,7 @@ impl LspServerPool {
         match client.start(&self.root_uri).await {
             Ok(()) => {
                 tracing::info!(target: "lsp", server = %server_name, "LSP 服务器启动成功");
-                self.initialized.write().insert(server_name);
+                self.active.store(true, Ordering::Release);
                 Ok(())
             }
             Err(e) => {
@@ -217,6 +226,7 @@ impl LspServerPool {
 
     /// 优雅关闭所有服务器
     pub async fn shutdown(&self) {
+        let _guard = self.start_lock.lock().await;
         let servers: Vec<(String, Arc<LspClient>)> = {
             let guard = self.servers.read();
             guard
@@ -228,7 +238,7 @@ impl LspServerPool {
             tracing::info!(target: "lsp", server = %name, "正在关闭 LSP 服务器");
             client.shutdown().await;
         }
-        self.initialized.write().clear();
+        self.active.store(false, Ordering::Release);
     }
 
     /// 动态添加一个 LSP 服务器（如果池已初始化，自动启动新服务器）
@@ -237,7 +247,13 @@ impl LspServerPool {
             return;
         }
 
+        let _guard = self.start_lock.lock().await;
         let name = config.name.clone();
+        let previous = self.servers.write().remove(&name);
+        if let Some(previous) = previous {
+            previous.shutdown().await;
+        }
+        self.extension_map.write().retain(|_, owner| owner != &name);
         let client = Arc::new(LspClient::new(
             config.name,
             config.command,
@@ -245,6 +261,7 @@ impl LspServerPool {
             config.env.unwrap_or_default(),
             config.initialization_options,
             config.max_restarts.unwrap_or(3),
+            config.startup_timeout.unwrap_or(DEFAULT_STARTUP_TIMEOUT_MS),
             Arc::clone(&self.diagnostics),
         ));
 
@@ -260,11 +277,10 @@ impl LspServerPool {
         self.servers.write().insert(name.clone(), client.clone());
 
         // 如果池已有已初始化的服务器，立即启动新服务器
-        if !self.initialized.read().is_empty() {
+        if self.active.load(Ordering::Acquire) {
             match client.start(&self.root_uri).await {
                 Ok(()) => {
                     tracing::info!(target: "lsp", server = %name, "动态添加的 LSP 服务器启动成功");
-                    self.initialized.write().insert(name);
                 }
                 Err(e) => {
                     tracing::warn!(target: "lsp", server = %name, error = %e, "动态添加的 LSP 服务器启动失败")
@@ -290,9 +306,21 @@ impl LspServerPool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::LspServerConfig;
-    include!("pool_test.rs");
+/// 会话级端口实现：装配面（`peri-middlewares::assembly` ChainSlot::Lsp）
+/// 经 `downcast_arc` 还原后复用同一 pool（跨 turn 共享服务器进程与
+/// 就绪/诊断状态）；宿主退出时经 `shutdown` 优雅关闭子进程。
+#[async_trait::async_trait]
+impl LspPoolPort for LspServerPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn shutdown(&self) {
+        // 显式固有方法调用，避免与 trait 方法同名解析歧义
+        LspServerPool::shutdown(self).await;
+    }
 }
+
+#[cfg(test)]
+#[path = "pool_test.rs"]
+mod tests;

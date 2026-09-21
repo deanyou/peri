@@ -1,0 +1,264 @@
+//! TUI 启动共享层——App + ACP server/client 构建与拆解。
+//!
+//! 把 App 初始化、ACP server/client 配对、插件/Hook 装配等步骤提取为
+//! `build_app_and_acp` / `teardown_app` 公共函数，供 `kit::entry::run_kit_fullscreen` 调用。
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::Result;
+use tokio::sync::mpsc;
+
+use crate::acp_client::{AcpNotification, AcpTuiClient};
+use crate::app::App;
+use crate::app::agent::LlmProvider;
+use peri_acp::transport::mpsc::mpsc_transport_pair;
+use peri_acp_types::permission::PermissionMode;
+
+/// TUI 启动选项——CLI 解析后由调用方填好传入。
+///
+/// 字段语义与 `main.rs::TuiOptions` 一致，但放在 lib 层供 kit 路径复用。
+#[derive(Default, Clone)]
+pub struct TuiLaunchOptions {
+    pub permission_mode: Option<String>,
+    pub skip_permissions: bool,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub continue_session: bool,
+    pub resume_session: Option<String>,
+    pub session_id: Option<String>,
+    pub session_name: Option<String>,
+    pub settings: Option<String>,
+    pub allowed_tools: Vec<String>,
+    pub disallowed_tools: Vec<String>,
+    pub db_path: Option<PathBuf>,
+}
+
+/// 构建 App + ACP server/client，并把 acp_client 注入 App。
+///
+/// 调用方负责后续：spawn kit 专用 notifier → `kit::acp_bridge` → atoms；spawn SUBMIT 消费者。
+pub async fn build_app_and_acp(
+    opts: &TuiLaunchOptions,
+    _panic_notify_rx: Option<mpsc::UnboundedReceiver<String>>,
+) -> Result<(
+    App,
+    Option<(AcpTuiClient, mpsc::UnboundedReceiver<AcpNotification>)>,
+)> {
+    let mut app = App::new(opts.db_path.clone()).await?;
+
+    // (I17-D) panic_notify_rx 已退役——ServiceRegistry.panic_notify_rx 字段删除，
+    // 该参数仅保留签名以维持调用方兼容；实际 panic 通知走 tracing log。
+
+    // 根据环境变量/CLI 参数设置初始权限模式
+    {
+        let initial_mode = if opts.skip_permissions {
+            PermissionMode::Bypass
+        } else if let Some(ref mode_str) = opts.permission_mode {
+            match mode_str.to_lowercase().as_str() {
+                "bypass" => PermissionMode::Bypass,
+                "default" => PermissionMode::Default,
+                "accept-edit" => PermissionMode::AcceptEdit,
+                "auto-mode" => PermissionMode::AutoMode,
+                other => {
+                    eprintln!("未知权限模式 '{}'，使用 Bypass", other);
+                    PermissionMode::Bypass
+                }
+            }
+        } else {
+            PermissionMode::Bypass
+        };
+        app.services.permission_mode.store(initial_mode);
+    }
+
+    // --model 覆盖
+    if let Some(ref model_str) = opts.model {
+        let config = app.services.peri_config.read();
+        if let Some(new_provider) = LlmProvider::from_config_for_alias(&config, model_str) {
+            tracing::info!(model = %new_provider.model_name(), "CLI --model 覆盖生效");
+        }
+    }
+
+    // 会话恢复：-c 恢复当前目录最近会话，-r <id> 恢复指定会话。
+    //
+    // (I17-A) launch 层仅 log 提示，实际的 thread 恢复由 kit/entry 在
+    // acp_client + THREAD_LOAD_TX 就绪后异步触发 load_session（避免
+    // 在 launch 同步阶段重复 list_threads 查询）。
+    if let Some(ref session_id) = opts.resume_session {
+        tracing::info!(session_id = %session_id, "-r: kit entry 将恢复指定会话");
+    } else if opts.continue_session {
+        tracing::info!("-c: kit entry 将恢复当前目录最近会话（若存在）");
+    }
+
+    // 检测是否需要 Setup 向导。
+    //
+    // (I17-B) 实际的 wizard 触发由 kit/entry.rs 在 atoms 初始化后通过
+    // WIZARD_ACTIVE atom 设置，这里仅做日志提示。
+    {
+        let cfg = app.services.peri_config.read();
+        if crate::app::setup_wizard::needs_setup(&cfg.config) {
+            tracing::info!(
+                "needs_setup=true: 首次启动未配置 Provider，kit entry 将触发 SetupWizard"
+            );
+        }
+    }
+
+    // 后台初始化 MCP 连接池（不阻塞 UI）
+    app.spawn_mcp_init();
+
+    // 加载已启用插件数据
+    {
+        let claude_dir = dirs_next::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".claude");
+        app.services.plugin_data = Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
+            &claude_dir,
+            Some(std::path::Path::new(&app.services.cwd)),
+        ));
+        // (S13c-4b) plugin_commands + plugin_skills 注入已随 command/ 删除——
+        // 插件技能/命令注册由 ACP server 侧 SkillsMiddleware + PluginMiddleware + HookMiddleware 负责。
+
+        // E2: 启动时清理孤儿插件文件
+        let claude_dir_clone = claude_dir.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                peri_middlewares::plugin::cleanup_orphaned_plugins(&claude_dir_clone).await
+            {
+                tracing::warn!(target: "peri", error = %e, "启动时清理孤儿插件文件失败");
+            } else {
+                tracing::info!(target: "peri", "启动时清理孤儿插件文件完成");
+            }
+        });
+    }
+
+    let needs_setup = {
+        let cfg = app.services.peri_config.read();
+        crate::app::setup_wizard::needs_setup(&cfg.config)
+    };
+    let acp_client = if needs_setup {
+        None
+    } else {
+        Some(attach_acp(&mut app).await?)
+    };
+
+    Ok((app, acp_client))
+}
+
+/// Attach the single ACP deployment for an already-created App.
+///
+/// Keeping this seam separate from [`build_app_and_acp`] is important for the
+/// first-run setup path: the wizard may need to finish before a provider exists,
+/// while the host/client/notification transport must still be assembled exactly
+/// once afterwards. Callers must only invoke this when `app.acp_deployment` is
+/// empty; an already attached deployment is rejected to avoid losing the
+/// notification receiver owned by the original attachment.
+pub async fn attach_acp(
+    app: &mut App,
+) -> Result<(AcpTuiClient, mpsc::UnboundedReceiver<AcpNotification>)> {
+    if app.acp_client.is_some() || app.acp_deployment.is_some() {
+        anyhow::bail!("ACP deployment is already attached to this App");
+    }
+
+    // ── ACP Host + Client ────────────────────────────────────────────────
+    // 内嵌 server 已迁出为 ACP 层 host（`peri_acp::host`）：控制面装配经
+    // `assemble_server_config` 统一完成，TUI 进程不再持有控制面，只经
+    // AcpTuiClient（mpsc client）与 host 通信。
+    let acp_client = {
+        let provider = {
+            let cfg_guard = app.services.peri_config.read();
+            LlmProvider::from_config(&cfg_guard)
+        }
+        .or_else(LlmProvider::from_env);
+
+        if let Some(provider) = provider {
+            let host_config = peri_acp::host::assemble::assemble_server_config(
+                peri_acp::host::assemble::HostAssemblyInput {
+                    provider: provider.clone(),
+                    peri_config: app.services.peri_config.clone(),
+                    config_source: app.config_source.clone(),
+                    permission_mode: app.services.permission_mode.clone(),
+                    // M-TUI 收口：middlewares 具体实现（CronScheduler / McpClientPool /
+                    // ToolSearchIndex / SkillsProvider / PluginManager /
+                    // SettingsHooksLoader / 插件聚合数据）由 ACP Host 装配面内部构造
+                    // （peri_acp::host::assemble）；TUI 只提供协议面输入（§0 依赖方向）。
+                    thread_store: app.services.thread_store.clone(),
+                    cwd: app.services.cwd.clone(),
+                    bare: false,
+                    // TUI=true：复刻迁移前 TUI 每秒 tick 行为（cron 面板直持
+                    // cron_state，tick 由 host 侧 scheduler 驱动执行）。
+                    drive_cron_tick: true,
+                },
+            )
+            .await;
+
+            // (I17-D) app.services.acp_session_manager 字段已退役——
+            // 该句柄此前仅由 ServiceRegistry 持有但无任何消费者读取。
+
+            let (client_transport, server_transport) = mpsc_transport_pair();
+            let host = peri_acp::host::spawn_acp_server(Arc::new(server_transport), host_config);
+
+            let (acp_client, notification_tx, notification_rx) =
+                AcpTuiClient::new_interactive(client_transport);
+            acp_client.spawn_pump(notification_tx);
+
+            app.acp_deployment = Some(crate::acp_client::AcpDeployment::new(
+                acp_client.clone(),
+                host,
+            ));
+            app.acp_client = Some(acp_client.clone());
+
+            (acp_client, notification_rx)
+        } else {
+            anyhow::bail!("No usable provider configured after setup")
+        }
+    };
+
+    Ok(acp_client)
+}
+
+/// App 关闭：fire SessionEnd hooks + MCP pool shutdown。
+///
+/// 对称 `build_app_and_acp`——所有路径在退出前都应该调用。
+///
+/// 显式关闭 ACP transport 并等待原 host：任务/会话排空后才关闭部署拥有的 Langfuse。
+/// Incomplete 时部署 owner 仅在 App 仍被调用方持有时可重试，本函数不安排重试。
+/// 全屏退出路径随后会 Drop App；未完成的关闭不能因此视为已 join。
+pub async fn teardown_app(app: &mut App) {
+    // 关闭 MCP 连接池
+    if let Some(pool) = app.services.mcp_pool.take() {
+        tracing::info!("正在关闭 MCP 连接池...");
+        let report = shutdown_mcp_pool(pool, app.services.mcp_task_owner.take()).await;
+        if report.is_complete() {
+            tracing::info!("MCP 连接池已关闭");
+        } else {
+            tracing::warn!(?report, "MCP 连接池关闭未完全收敛");
+        }
+    }
+    if let Some(deployment) = app.acp_deployment.as_mut() {
+        let report = deployment.shutdown().await;
+        if report.is_complete() {
+            app.acp_deployment.take();
+        } else {
+            tracing::warn!(
+                ?report,
+                "ACP deployment shutdown incomplete or failed; no automatic retry is scheduled"
+            );
+        }
+    }
+    app.acp_client.take();
+}
+
+pub(crate) async fn shutdown_mcp_pool(
+    pool: Arc<peri_middlewares::mcp::McpClientPool>,
+    mut owner: Option<peri_middlewares::mcp::McpTaskOwner>,
+) -> peri_acp_types::ports::McpPoolShutdownReport {
+    pool.begin_shutdown();
+    if let Some(owner) = owner.as_mut() {
+        owner.begin_shutdown();
+        let _ = owner.shutdown().await;
+    }
+    pool.shutdown().await
+}
+
+#[cfg(test)]
+#[path = "launch_test.rs"]
+mod tests;

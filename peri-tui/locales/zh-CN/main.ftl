@@ -23,7 +23,7 @@ command-mcp-description = 管理 MCP 服务器连接
 command-memory-description = 编辑用户/项目级 CLAUDE.md 记忆文件
 command-history-description = 打开历史对话浏览面板
 command-loop-description = 注册定时循环任务（自然语言描述，如 /loop 每隔5分钟提醒我喝水）
-command-cron-description = 查看和管理定时任务
+command-cron-list-description = 查看和管理定时任务
 command-tasks-description = 查看 agent 线程和定时任务
 command-plugin-description = 管理插件（浏览、安装、卸载）
 command-config-description = 全局配置（autocompact、语言、系统提示词覆盖）
@@ -41,7 +41,7 @@ help-available-commands = 可用命令：
 help-alias-prefix = （别名: /{ $aliases }）
 help-skills-count = Skills（{ $count } 个可用）: 输入 # 前缀查看
 help-skills-empty = Skills: 将 .md 文件放入 .claude/skills/ 目录即可添加
-help-shortcuts = 快捷键：Shift+Tab 切换权限模式 │ Ctrl+T 切换模型 │ Shift+Enter 换行 │ Esc 退出 │ Ctrl+C 中断
+help-shortcuts = 快捷键：Shift+Tab 切换权限模式 │ { $model_key } 切换模型 │ Shift+Enter 换行 │ Esc 退出 │ Ctrl+C 中断
 
 # compact command
 compact-agent-running = Agent 运行中，无法执行压缩
@@ -76,6 +76,11 @@ lang-unsupported = 不支持的语言: { $lang }
 # ---- Status Bar ----
 
 statusbar-permission-dont-ask = Don't Ask
+statusbar-initializing = 初始化中…
+statusbar-preparing = 正在准备会话…
+statusbar-read-only-busy = 只读 · 由其他实例执行
+statusbar-read-only-recovery = 只读 · 上次执行未干净收尾
+statusbar-read-only-store = 只读 · 会话库不可写
 statusbar-permission-accept-edit = Accept Edit
 statusbar-permission-auto = Auto Mode
 statusbar-permission-bypass = Bypass
@@ -88,30 +93,12 @@ statusbar-mcp-ready =  MCP 就绪 ({ $total } 个服务器)
 statusbar-mcp-failed =  MCP 失败: { $msg }
 statusbar-lsp-diag = 诊断: { $errors }E/{ $warnings }W
 
-# ---- Status Bar Shortcut Hints (main view) ----
+# ---- Status Bar Shortcut Hints ----
 
-key-command = 命令
-key-switch-session = :切换Session
-key-close = :关闭
-key-scroll = :滚动
-key-cancel = :取消
-key-newline = :换行
-key-open-browser = :打开浏览器
-key-submit = :提交
-key-switch = :切换
-key-switch-tab = :切换标签
-key-move = :移动
-key-select = :选择
-key-confirm = :确认
-key-delete = :删除
-key-reconnect = :重连
-key-detail = :详情
-key-execute = :执行
-key-back = :返回
-key-install = :安装
-key-tab = :切换
-key-effort = :力度
-key-switch-model = :切换模型
+statusbar-hint-quit-pending =  再次按 Ctrl+C 退出，其他键取消 
+statusbar-hint-popup =  Esc: 关闭 | Enter: 确认 
+statusbar-hint-menu =  Esc: 关闭 | Tab: 导航 | Enter: 选择 
+statusbar-hint-main =  /: 命令 | Shift+Enter: 换行 | Shift+Tab: 模式 
 
 # ---- Welcome Page ----
 
@@ -122,6 +109,7 @@ welcome-feature-files = 管理文件和运行终端命令
 welcome-feature-agents = 将任务委派给专业子 Agent
 welcome-login-hint-1 = 请输入
 welcome-login-hint-2 = 配置 API Key 开始使用
+welcome-shortcuts = Enter 发送  |  Shift+Enter 换行  |  @ 提及文件
 welcome-shortcut-quit = :退出
 welcome-shortcut-stop = :停止
 welcome-shortcut-newline = :换行
@@ -156,8 +144,10 @@ setup-welcome-title =  ── Peri 设置 ── 欢迎
 setup-choose-provider =  选择如何配置你的 Provider：
 setup-source-custom-api = Custom API
 setup-source-migrate = 从 Claude Code 迁移
+setup-source-peri-free = Peri Code 免费服务
 setup-source-custom-desc = 手动输入 Provider 详情
 setup-source-migrate-desc = 从 ~/.claude/ 导入配置
+setup-source-peri-free-desc = 一键填入 Peri Code 免费网关，无需 API Key
 setup-key-confirm = :确认
 setup-key-select = :选择
 setup-key-quit = :退出
@@ -170,11 +160,13 @@ setup-edit-title =  ── 设置 ── 编辑: { $type } ({ $id })
 setup-field-type = 类型
 setup-field-id = ID
 setup-field-base-url = 基础URL
+setup-field-test-connectivity = 测试连通性
 setup-hint-base-url-v1 = OpenAI Base URL 需要 /v1 后缀
 setup-field-api-key = API密钥
-setup-field-opus = 旗舰
-setup-field-sonnet = 标准
-setup-field-haiku = 极速
+setup-field-fable = Fable
+setup-field-opus = Opus
+setup-field-sonnet = Sonnet
+setup-field-haiku = Haiku
 setup-model-label = Model
 setup-label-key = 密钥：
 setup-provider-anthropic = Anthropic
@@ -183,9 +175,10 @@ setup-confirm = 确认
 setup-test-connectivity = [ 测试联通性 ]
 setup-key-switch-type = :切换类型
 setup-key-back-list = :返回列表
-setup-complete-title =  ── 设置完成 ✓
+setup-complete-title =  ── 确认设置
 setup-press-enter = 按
-setup-to-start = 开始使用
+setup-to-start = 保存并启用配置
+setup-save-failed = 设置未能保存。请检查配置文件和写入权限；若配置被外部修改，请重启后再试。
 setup-no-key = (无密钥)
 setup-no-providers = 未配置任何 Provider，请选择"Custom API"或从 Claude Code 导入。
 
@@ -202,10 +195,20 @@ config-field-language = 语言
 config-field-persona = Persona
 config-field-tone = Tone
 config-field-proactiveness = Proactiveness
-config-field-diff = 内联 Diff
+config-field-cache-warning = 缓存警告
+config-field-diff = 显示 Diff
+config-field-1m-context = 1M 上下文
+config-field-active-alias = 当前别名
+config-field-permission-mode = 当前会话权限
 config-value-on = 开
 config-value-off = 关
+config-streaming-value-streaming = streaming
+config-streaming-value-block = 块式
+config-streaming-value-none = 无
+config-language-value-en = English
+config-language-value-zh = 中文
 config-saved = 配置已保存
+panel-config-nav-hint =   ↑/↓::导航  Enter::切换  ←/→::切换  Esc::关闭
 
 # Config panel groups
 config-group-general = 通用
@@ -218,9 +221,16 @@ config-desc-language = en, zh-CN，或留空为自动
 config-desc-persona = 覆盖系统提示词 persona（留空=默认）
 config-desc-tone = 覆盖系统提示词 tone（留空=默认）
 config-desc-proactiveness = low / medium / high — agent 主动性级别
+config-desc-cache-warning = （开/关 — 在对话中显示最终缓存覆盖率过低警告）
 config-desc-diff = （开/关 — 显示 Write/Edit 工具的内联 diff）
 config-field-streaming = 渲染模式
 config-desc-streaming = streaming / block / none — LLM 输出渲染粒度
+
+# Scroll FPS
+config-field-scroll-fps = 滚动帧率
+config-fps-value-60 = 60fps
+config-fps-value-30 = 30fps
+config-fps-value-20 = 20fps
 
 # ---- Login Panel ----
 
@@ -232,11 +242,13 @@ login-no-model = （未设置）
 login-empty-hint =   （无 provider，按 Ctrl+N 新建）
 login-confirm-delete-label =  确认删除
 login-confirm-delete-question =  ？
-login-key-activate = :激活
 login-key-new = :新建
 login-key-delete = :删除
 login-key-paste = :粘贴
 login-confirm-delete = :确认删除
+login-confirm-delete-warning =   此操作不可撤销。
+login-confirm = 确认
+login-model-label = 模型
 
 # ---- HITL Popup ----
 
@@ -278,7 +290,7 @@ app-compact-auto-cleared = 自动清理：释放了 { $count } 个工具调用�
 app-compact-limit-reached = 上下文压缩后仍超出限制，已停止自动继续。请使用 /compact 手动压缩或 /clear 清空历史。
 app-model-switched = 模型已切换为: { $alias } ({ $effort } effort)
 app-1m-context-enabled = 已启用 1M 上下文模式（context window: 1,000,000 tokens）
-app-prompt-cache-low = Prompt cache 命中率 { $rate }% < 80% (req: { $req })
+app-prompt-cache-low = Prompt cache 覆盖率 { $rate }% < 80% (req: { $req })
 app-no-mcp-configured = 无 MCP 服务器配置（请在 .mcp.json 或 settings.json 中添加）
 app-no-cron-tasks = 无定时任务
 app-cron-deleted = 已删除定时任务: { $preview }
@@ -294,13 +306,12 @@ app-bg-continuation = 正在回顾 { $count } 个后台 Agent 结果...
 
 # Login panel
 hint-login-browse = :导航
-hint-login-activate = :激活
 hint-login-edit = :编辑
 hint-login-new = :新建
 hint-login-delete = :删除
 hint-login-close = :关闭
 hint-login-field = :字段
-hint-login-save = :保存
+hint-login-confirm = :确认
 hint-login-paste = :粘贴
 hint-login-toggle = :切换
 hint-login-back = :返回
@@ -374,6 +385,7 @@ mcp-action-enable = 启用
 # OAuth Messages
 mcp-oauth-completed = [i] OAuth 授权完成: { $server }
 mcp-oauth-failed = [i] OAuth 授权失败: { $server } - { $error }
+mcp-oauth-restored = [i] 已使用已保存凭证连接: { $server }
 mcp-clear-auth-ok = [i] OAuth 凭证已清除: { $server }
 mcp-clear-auth-failed = [i] 清除 OAuth 凭证失败: { $server }
 mcp-action-ok = [i] 操作完成: { $server }
@@ -428,3 +440,780 @@ app-plugin-added = Marketplace 已添加: { $name } (正在获取内容...)
 
 # 后台 Agent 管理栏
 bg-bar-focus-hint = 按 Esc 退出聚焦
+
+# ---- 模型面板 ----
+
+model-panel-title =  选择模型 
+model-panel-description =   切换模型。仅对当前会话生效。
+model-field-max-token = 最大 Token
+model-field-effort = 推理力度
+model-field-1m-context = 1M 上下文
+model-effort-low = 低
+model-effort-medium = 中
+model-effort-high = 高
+model-effort-xhigh = 超高
+model-effort-max = 最大
+panel-model-nav-hint =   ↑/↓::切换  Tab::左右  →/←::改值  Esc::退出/关闭
+panel-model-inline-toggle-hint =   Enter 切换
+
+# ---- 状态面板 ----
+
+status-panel-title =  状态 
+status-tab-cost = 费用
+status-tab-context =  上下文
+status-label-duration = 会话时长
+status-label-input-tokens = 输入 Tokens
+status-label-output-tokens = 输出 Tokens
+status-label-cache-create = Cache 创建
+status-label-cache-read = Cache 读取
+status-label-llm-calls = LLM 调用次数
+status-label-estimated-cost = 估算费用
+status-label-current-model = 当前模型
+status-label-context = 上下文
+status-label-used = 已用
+status-label-messages = 消息
+status-label-tools = 工具
+status-empty-data = 暂无请求数据
+panel-status-nav-hint =   ←/→::切换  Esc::关闭
+
+status-tab-service =  服务
+status-label-provider = 提供商:
+status-label-model = 模型:
+status-label-permission = 权限:
+status-label-cpu = CPU:
+status-label-memory = 内存:
+status-label-mcp = MCP:
+status-label-cron = Cron:
+status-label-cwd = 工作目录:
+status-label-total-vms = 视图总数:
+status-label-user-turns = 用户轮次:
+status-label-assistant-turns = 助手轮次:
+status-label-tool-calls = 工具调用:
+status-label-subagent-groups = 子代理组:
+status-label-system-notes = 系统注释:
+
+# ---- Agent 面板 ----
+
+agent-panel-title-none =  Agent 选择 (无) 
+agent-panel-title =  Agent 选择 
+agent-panel-none-label = 无 Agent（默认）
+agent-panel-empty-hint = 在 .claude/agents/ 目录中添加 Agent 定义文件
+panel-agent-nav-hint =   ↑/↓::导航  Enter::打开  Esc::关闭
+
+# ---- Agent 会话信息面板 ----
+
+agent-panel-title-session =   当前 Agent 会话
+agent-label-provider = 提供商
+agent-label-model = 模型
+agent-label-permission-mode = 权限模式
+agent-label-cwd = 工作目录
+agent-label-messages = 消息数
+agent-label-total-messages = 总消息数
+agent-subagents-count =   子 Agent（{ $count }）
+agent-no-subagents =   此会话中未派生子 Agent
+agent-collapsed = （已折叠）
+agent-expanded = （已展开）
+agent-message-count =   { $count } 条消息
+
+# ---- Hook 面板 ----
+
+hooks-panel-title-none =  Hook 配置 (无) 
+hooks-panel-title =  Hook 配置 
+hooks-configured-count = 已配置 { $count } 个 hook
+hooks-readonly-hint = 此面板为只读。要添加或修改 hook，请编辑插件的 hooks.json。
+hooks-no-hooks =   未配置 hook。
+hooks-no-hooks-hint =   Hook 可通过插件 hooks/hooks.json 添加。
+panel-hooks-nav-hint =   ↑/↓::导航  Enter::打开  Esc::关闭
+hook-event-before-tool = 工具执行前
+hook-event-after-tool = 工具执行后
+hook-event-after-tool-fail = 工具执行失败后
+hook-event-before-auto-mode = 自动模式决策前
+hook-event-user-submit = 用户提交提示词时
+hook-event-session-start = 新会话开始时
+hook-event-session-end = 会话结束时
+hook-event-agent-stop = Agent 停止时
+hook-event-agent-stop-fail = Agent 运行失败时
+hook-event-parallel-tools-done = 所有并行工具完成时
+hook-event-subagent-start = SubAgent 开始时
+hook-event-subagent-stop = SubAgent 停止时
+hook-event-before-compact = 上下文压缩前
+hook-event-after-compact = 上下文压缩后
+hook-event-needs-input = Agent 需要用户输入时
+
+# ---- 主题面板 ----
+
+theme-desc = 切换配色主题
+theme-title = 主题
+theme-preview = 预览
+theme-list = 主题列表
+theme-confirm = 确认
+theme-cancel = 取消
+theme-current = 当前
+theme-source-builtin = 内置
+theme-source-file = 文件
+theme-switched = 主题已切换
+theme-navigate = 浏览
+
+# ---- 历史浏览器 ----
+
+thread-browser-title =  恢复会话 ({ $cursor }/{ $total }) 
+thread-browser-search-placeholder = 搜索…
+thread-browser-empty =   （暂无对话）
+thread-browser-no-match =   （无匹配对话）
+thread-browser-untitled = （无标题）
+thread-browser-time-just-now = 刚刚
+thread-browser-time-minutes = { $count } 分钟前
+thread-browser-time-hours = { $count } 小时前
+thread-browser-time-days = { $count } 天前
+panel-threads-header-hint =   Enter::继续 · v::查看历史 · Esc::关闭
+panel-threads-nav-hint =   ↑/↓::选择  Enter::继续  v::查看  Tab::范围  d::删除  Esc::关闭
+panel-threads-confirm-hint =   Enter::confirm  Esc::cancel
+
+# ---- Rewind 弹窗 ----
+
+rewind-title = 回滚
+rewind-msg-count = ({ $count }条消息)
+rewind-mode-messages = 1. 回到此 prompt
+rewind-mode-files = 2. 回到此 prompt + 恢复文件
+rewind-mode-confirm = ⚠ 确认: 恢复文件?
+rewind-files-to-restore = 将恢复的文件:
+rewind-confirm-hint = Enter 确认, Esc 取消
+rewind-write-op = Write → 删除+Git restore
+rewind-edit-op = Edit → 恢复
+# ---- Rewind v2（弹窗与消费者文案）----
+rewind-executing = 正在回退…
+rewind-budget-title = 回退将撤销 { $count } 个文件改动：
+rewind-budget-more = ... 还有 { $count } 项
+rewind-budget-confirm-hint = Enter 确认回退 · Esc 返回候选
+rewind-query-failed = 查询失败: { $error }
+rewind-loading = 正在加载回退候选…
+rewind-empty = 无可回退的消息。
+rewind-empty-hint = 完成一轮对话后双击 Esc 即可回滚。
+rewind-title-count = 回退到（{ $count }）
+rewind-enter-hint = Enter 回退 · Esc 关闭
+rewind-error-no-client = ACP client 未初始化，无法查询回退候选
+rewind-error-no-session = 无活动会话，无法查询回退候选
+rewind-error-query-failed = 候选查询失败: { $error }
+rewind-error-budget-missing = rewind-preview 响应缺少 file_changes 数组
+rewind-error-path-missing = 预算项缺少 path
+rewind-execute-failed = 回退执行失败: { $error }
+
+# ---- OAuth 弹窗 ----
+
+oauth-title =  OAuth 授权 — { $server } 
+oauth-prompt = 选择「打开浏览器」开始授权，授权完成后将授权码粘贴到输入框提交：
+oauth-callback-label = 授权码 > 
+oauth-btn-open = 打开浏览器
+oauth-btn-copy = 复制链接
+oauth-btn-cancel = 取消
+oauth-hint-btn-focus =   ←→: 选择按钮  |  Enter: 激活  |  Tab: 输入授权码  |  Esc: 取消
+oauth-hint-input-focus =   粘贴授权码后 Enter 提交  |  Tab: 切回按钮  |  Esc: 取消
+oauth-copied-hint =   ✓ 授权链接已复制（可在浏览器打开）
+oauth-opened-hint =   已在浏览器打开授权页（未弹出可复制链接）
+
+# ---- Login 面板 ----
+
+login-field-name = 名称
+login-field-type = 类型
+login-field-base-url = 基础 URL
+login-field-api-key = API 密钥
+login-field-fable-model = Fable 模型
+login-field-opus-model = Opus 模型
+login-field-sonnet-model = Sonnet 模型
+login-field-haiku-model = Haiku 模型
+
+# ---- 配置面板补充 ----
+
+config-lang-display-en = English
+config-lang-display-zh = 简体中文
+config-lang-display-auto = auto
+config-streaming-display-streaming = streaming
+config-streaming-display-block = block
+config-streaming-display-none = none
+config-proactiveness-display-low = low
+config-proactiveness-display-medium = medium
+config-proactiveness-display-high = high
+
+# ---- 命令输出 ----
+
+command-channel-desc = 管理 MCP 频道连接: open <source> / close / status
+command-channel-usage = 用法: /channel open <source> | /channel close | /channel status
+command-channel-not-init = Channel 系统未初始化
+command-channel-unavailable = 服务器 { $server } 不支持 channel 功能或未连接
+command-channel-opened = 频道已开启: { $source }
+command-channel-all-closed = 所有频道已关闭
+command-channel-closed = 频道已关闭: { $server }
+command-channel-no-channels = 没有开启的频道。使用 /channel open <source> 开启
+command-channel-list-header = 已开启的频道:
+command-channel-list-item =   { $source }
+command-bg-usage = 用法: /bg <命令描述>
+    例如: /bg 用中文搜索 Rust 2026 roadmap 最新进展
+command-loop-usage = 用法: /loop <自然语言时间描述> <提示词>
+    例如: /loop 每隔5分钟提醒我喝水
+command-plugin-add-failed-detail = 添加 marketplace 失败: { $error }
+command-plugin-install-failed = 安装插件失败: { $error }
+command-plugin-update-failed = 更新 marketplace 失败: { $error }
+command-agent-reset = Agent 已重置（未设置 agent_id）
+command-agent-switched = Agent 已切换为: { $name } ({ $id })
+command-lang-current-suffix =  (当前)
+command-config-save-failed = 配置保存失败: { $error }
+command-plugin-help = 用法:
+    /plugin                                    — 打开插件面板
+    /plugin marketplace add <url>              — 添加市场源
+    /plugin install <name>@<marketplace>       — 安装插件
+    /plugin marketplace update <name>          — 更新市场缓存
+
+# ---- 消息渲染 ----
+
+render-batch-all-failed = { $count } 个 agent 失败
+render-batch-partial = { $done } 个 agent 已完成，{ $failed } 个失败
+render-batch-done = { $count } 个 agent 已完成
+render-status-failed = 失败
+render-status-done = 完成
+render-tool-uses = · { $count } 次工具调用
+render-user-answered = 用户回答了 Peri 的问题：
+render-thought-for = 思考了 { $count } 字符
+render-more-lines = … 还有 { $count } 行
+render-todo-summary = { $done }/{ $total } 任务
+render-todo-summary-active = { $done }/{ $total } 任务 · { $active }
+render-agent-header = Agent
+
+# ---- 消息区 Spinner ----
+
+msg-spinner-tokens = · ↓ { $count } tokens
+msg-spinner-brewed =   ✻  处理耗时 { $duration }
+msg-keepgoing = 继续
+msg-copy-md = 复制
+msg-tip-prefix =   ⎿  提示: 
+msg-todo-available =  (可开始)
+
+# ---- @image 行（image-p0-p1-spec §4 T4）----
+# 用户气泡 `@image <path>` 行的 meta 行文案；$name 为文件名（hover 时为绝对路径），
+# $size 为人类可读大小（user-image-size-*）或缺失文案（user-image-missing）。
+user-image-meta = [Image: { $name } · { $size }]
+user-image-missing = 缺失
+user-image-size-bytes = { $count } B
+user-image-size-kb = { $count } KB
+user-image-size-mb = { $count } MB
+user-image-open-failed = 打开图片失败
+
+# ---- 图片预览浮层（image-p0-p1-spec §7 T7）----
+# 上下文 overlay 预览：meta 行（$w/$h 为像素尺寸，JPEG/GIF/WebP 未解析时为 0）、
+# 解码中行、手工路径降级提示、校验/解码失败固定文案（不显示原因细节）。
+image-preview-meta = [Image: { $name } · { $w }×{ $h } · { $size } · { $mime }]
+image-preview-loading = [Image: { $name }]
+image-preview-degraded = 仅受管理目录（~/.peri/images）内的图片可自动预览
+image-preview-error = 无法预览此图片
+image-preview-no-protocol = 当前终端不支持图片显示（Kitty graphics），仅显示文本信息
+
+# ---- 消息条目状态后备文案（spec §4.1：符号的文本后备）----
+msg-status-running = 运行中
+msg-status-done = 完成
+msg-status-failed = 失败
+msg-status-needs-approval = 需要审批
+msg-status-collapsed = 已折叠
+msg-status-expanded = 已展开
+msg-status-queued = 排队中
+msg-user-prompt = 你
+msg-assistant-prompt = Perihelion
+msg-status-loading = 加载中
+msg-new-output = 新输出
+render-group-failed-count = { $count } 个失败
+
+# ---- Interaction block（§6.8，Slice 4）----
+# inline transcript block 与 AskUser 面板 / HITL 弹窗双轨（D5）——
+# result 文案为纯文本（无符号），渲染层负责状态符号与颜色。
+
+render-interaction-title-permission = 需要批准
+render-interaction-title-ask-user = 询问用户
+render-interaction-question-permission = { $verb } 想要运行：{ $summary }
+render-interaction-tool-unknown = 未知工具
+render-interaction-allow-once = 允许一次
+render-interaction-deny = 拒绝
+render-interaction-result-allowed-once = 已允许一次
+render-interaction-result-denied = 已拒绝
+render-interaction-result-answered = 已回答
+render-interaction-result-rejected = 已拒绝
+
+# ---- Composer（§10）----
+
+composer-attachments = @ { $count } 个文件
+composer-context-usage = { $pct }% ctx
+
+# ---- 消息视图占位符 ----
+
+msg-placeholder-image = [图片]
+msg-placeholder-document = [文档: { $name }]
+
+# ---- 应用杂项 ----
+
+app-cli-no-input = 无输入 prompt。用法: peri -p "你的问题" 或 echo "问题" | peri -p
+app-thread-deleted = 已删除对话: { $title }
+app-memory-project = 项目说明
+app-memory-user = 用户全局
+
+# ---- 状态栏补充 ----
+
+statusbar-rewind-wait =  Agent 运行中，请等待后再撤销 
+statusbar-rewind-pending =  再按 ESC 回滚对话 
+statusbar-rewind-action = 回滚对话
+statusbar-rewind-other-key = 其他键
+statusbar-rewind-move = 移动
+statusbar-rewind-switch-file = 切换回退文件
+
+# ---- Common (P0) ----
+common-loading = 正在加载
+common-esc-close =   Esc: close
+common-nav-enter-close =   ↑/↓::navigate  Enter::open  Esc::close
+common-empty =   (empty)
+
+# ---- Setup Wizard (P0) ----
+setup-no-provider = 未配置 Provider · Agent 功能暂不可用
+setup-config-hint-title = 可通过以下任一方式完成配置：
+setup-close-hint = Enter::close · Esc::close
+setup-step-1 =   1. 进入主界面后打开 Login 页面配置 API Key
+setup-step-2 =   2. 或打开 Settings 页面调整 Provider 配置
+setup-step-3 =   3. 或手动编辑 
+setup-skip-hint = Enter::skip · Esc::close
+setup-wizard-title =  Setup Wizard 
+setup-welcome = 欢迎使用 Peri TUI
+
+# ---- Notifications (P0) ----
+paste-truncated = 粘贴已截断至 { $max } 字符
+paste-in-progress = 正在处理剪贴板粘贴，请稍候
+paste-image-failed = 无法粘贴图片：PNG 无效、超过 20 MiB 或保存失败
+submit-blocked = 当前请求运行中，稍后再执行该命令
+export-success = 已导出消息文本：{ $path }
+export-fail = 导出消息文本失败：{ $error }
+cancel-request-sent = 已发送取消请求
+bg-task-notify-completed = [✓] { $name } 完成 ({ $duration }s)
+bg-task-notify-failed = [✗] { $name } 失败 ({ $duration }s)
+
+# ---- Thread Load (P0) ----
+thread-switch-confirm-title = 切换 thread 确认
+thread-switch-bg-tasks-message = 当前 thread 有 { $count } 个后台任务仍在运行
+thread-switch-task-counts =   { $shell } shell  { $agent } agent  { $workflow } workflow
+thread-switch-bg-note = 切换后这些任务继续在后台执行，但当前视图不再显示其状态。
+
+# ---- System Reminders (P0) ----
+reminder-cron-task = Cron 任务
+reminder-bg-task = 后台任务
+reminder-fork-mode = Fork 模式
+reminder-context-compaction = 上下文压缩
+reminder-system-prompt = 系统提示
+reminder-trust-boundary = 信任边界
+reminder-tool-reminder = 工具提醒
+reminder-subagent-result = 子Agent 结果
+reminder-system-reminder = 系统提醒
+reminder-legacy-marker = 旧版提醒
+reminder-required-marker = 必达提醒
+reminder-structured-marker = 系统提醒
+reminder-legacy-source = 旧版历史
+channel-wechat = 微信
+channel-feishu = 飞书
+channel-dingtalk = 钉钉
+
+# ---- Common (P1) ----
+common-no-matches =   (no matches)
+common-na = —
+common-on = ON
+common-off = OFF
+
+# ---- Panel Titles ----
+panel-title-model = Model
+panel-title-login = Login
+panel-title-agent = Agent
+panel-title-hooks = Hooks
+panel-title-config = Config
+panel-title-threads = Threads
+panel-title-mcp = MCP
+panel-title-plugin = Plugin
+panel-title-cron = Cron
+panel-title-status = Status
+panel-title-memory = Memory
+panel-title-tasks = Tasks
+panel-title-betas = Betas
+panel-title-workflow = Workflow
+panel-title-ask-user = Ask User
+panel-title-theme = Theme
+panel-title-subagent-detail = SubAgent 详情
+panel-title-shell-detail = Shell 详情
+panel-title-goal = Goal
+
+# ---- Panel Descriptions ----
+panel-desc-model = Model 别名选择
+panel-desc-login = Provider 凭证管理
+panel-desc-agent = SubAgent 定义
+panel-desc-hooks = Hook 事件
+panel-desc-config = PeriConfig 编辑器
+panel-desc-threads = 历史对话浏览器
+panel-desc-mcp = MCP 服务器池
+panel-desc-plugin = 已安装插件
+panel-desc-cron = 定时任务
+panel-desc-status = 服务快照
+panel-desc-memory = 持久化记忆
+panel-desc-tasks = 后台任务
+panel-desc-betas = 功能开关
+panel-desc-workflow = Workflow 运行
+panel-desc-ask-user = Agent 用户提问（自动打开）
+panel-desc-theme = 配色方案选择
+panel-desc-subagent-detail = SubAgent 嵌套消息详情
+panel-desc-shell-detail = 后台 Shell 任务详情
+panel-desc-goal = 当前 Goal 详情
+goal-status-active = 进行中
+goal-status-complete = 已完成
+goal-status-blocked = 已阻塞
+goal-detail-status = 状态
+goal-detail-continuations = 主动接续次数
+goal-detail-blocked-reason = 阻塞原因
+goal-detail-empty = 当前会话没有可用的 Goal。
+subagent-detail-not-found = 未找到该 SubAgent — 会话可能已重置。
+shell-detail-not-found = 未找到该 Shell 任务 — 可能已结束或会话已重置。
+shell-detail-no-output = 运行中的 Shell 任务不会向 TUI 推送输出流。
+shell-detail-running = 运行中…
+shell-detail-output-preview = 输出预览
+shell-detail-status-running = 状态：运行中
+shell-detail-status-succeeded = 状态：成功
+shell-detail-status-failed = 状态：失败
+shell-detail-status-cancelled = 状态：已取消
+bg-task-unknown-kind = 未知的后台任务类型 — 未打开抽屉。
+workflow-run-not-synced = 所选 Workflow 运行不在当前快照中（可能已结束或尚未同步）。
+
+# ---- Betas Panel ----
+panel-betas-readonly-hint =   (只读 — 功能开关在构建时配置)
+panel-betas-empty =   暂无可用的 Beta 功能
+panel-betas-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+
+# ---- Cron Panel ----
+panel-cron-stats =   { $configured } 个已配置，{ $enabled } 个已启用
+panel-cron-confirm-hint =   Enter::confirm  Esc::close
+panel-cron-nav-hint =   ↑/↓::navigate  Enter::toggle  Esc::close
+panel-cron-empty =   暂未配置定时任务
+panel-cron-empty-hint =   让 Agent 帮你设置定时任务
+panel-cron-next-fire =      next: { $time }
+panel-cron-status-on = ON
+panel-cron-status-off = OFF
+panel-cron-status-format = [{ $status }]
+
+# ---- MCP Panel ----
+panel-mcp-phase-pending = pending
+panel-mcp-phase-initializing = initializing
+panel-mcp-phase-ready = ready
+panel-mcp-phase-failed = failed
+panel-mcp-pool-label =   MCP Pool: 
+panel-mcp-connected =    { $connected }/{ $total } 已连接
+panel-mcp-empty =   暂未配置 MCP 服务器
+panel-mcp-empty-hint =   通过 ~/.claude/settings.json (mcpServers) 添加服务器
+panel-mcp-server-detail =      transport: { $transport }  tools: { $count }  skills: { $skills }
+panel-mcp-needs-auth =  [需要授权]
+panel-mcp-list-hint =   Enter: 查看详情  |  Esc: 关闭
+panel-mcp-oauth-hint =   Enter: 查看详情  |  Esc: 关闭
+# MCP 面板详情视图（OAuth 授权入口）
+panel-mcp-detail-url = URL:
+panel-mcp-detail-cache = 缓存：
+panel-mcp-detail-cache-none = 暂无缓存活动
+panel-mcp-detail-error = 错误：
+panel-mcp-detail-btn-auth = 授权
+panel-mcp-detail-btn-back = 返回
+panel-mcp-detail-hint =   ←→: 选择操作  |  Enter: 确认  |  Esc: 返回列表
+panel-mcp-icon-connected = ✔
+panel-mcp-icon-error = ✗
+panel-mcp-cache-hit = 缓存命中
+panel-mcp-cache-version-hit = 缓存版本命中
+panel-mcp-cache-protocol-hit = 协议缓存命中
+panel-mcp-cache-saved = 缓存已保存
+panel-mcp-cache-ready = 缓存就绪
+panel-mcp-cache-disabled = 缓存已关闭：已认证服务
+panel-mcp-cache-live-fetch = 持久化缓存：实时读取
+panel-mcp-cache-none = 持久化缓存：—
+
+# ---- Memory Panel ----
+panel-memory-stats =   { $count } 个记忆文件在 ~/.claude/memory 中
+panel-memory-nav-hint =   Enter) 在 $EDITOR 中编辑  Esc) 关闭
+panel-memory-empty =   未找到记忆文件
+panel-memory-empty-hint =   创建 ~/.claude/memory/<名称>.md 以持久化跨会话笔记
+panel-memory-unit-b = B
+panel-memory-unit-kb = KB
+panel-memory-unit-mb = MB
+panel-memory-unit-gb = GB
+panel-memory-time-just-now = 刚刚
+panel-memory-time-min-ago = { $n } 分钟前
+panel-memory-time-hour-ago = { $n } 小时前
+panel-memory-time-day-ago = { $n } 天前
+
+# ---- Plugin Panel ----
+panel-plugin-stats =   { $count } 个插件已加载
+panel-plugin-readonly-hint =   (只读 — 通过 ~/.claude/plugins/config.json 切换)
+panel-plugin-empty =   暂未安装插件
+panel-plugin-empty-hint =   安装方式: agm install <名称>
+panel-plugin-version-unknown = ?
+
+# ---- Plugin Panel Tabs ----
+panel-plugin-tab-installed = 已安装
+panel-plugin-tab-discover = 探索
+panel-plugin-tab-marketplaces = 市场
+panel-plugin-tab-errors = 错误
+
+# ---- Plugin Panel Discover ----
+panel-plugin-discover-coming = 探索 — Phase 2 即将推出
+panel-plugin-discover-hint = 从市场中搜索和安装插件
+panel-plugin-discover-install-user = 安装（用户级）
+panel-plugin-discover-install-project = 安装（项目级）
+panel-plugin-discover-field-version = 版本
+panel-plugin-discover-field-marketplace = 市场
+panel-plugin-discover-field-author = 作者
+panel-plugin-discover-field-description = 描述
+
+# ---- Plugin Panel Marketplaces ----
+panel-plugin-marketplaces-coming = 市场 — Phase 2 即将推出
+panel-plugin-marketplaces-hint = 管理插件市场
+
+# ---- Plugin Panel Errors ----
+panel-plugin-errors-coming = 错误 — Phase 2 即将推出
+panel-plugin-errors-hint = 查看插件加载错误
+
+# ---- Plugin Panel Detail ----
+panel-plugin-detail-title = 详情: { $name }
+panel-plugin-detail-marketplace = 来源市场
+panel-plugin-detail-author = 作者
+panel-plugin-detail-path = 路径
+panel-plugin-detail-scope = 作用域
+panel-plugin-detail-error = 加载错误
+
+# ---- Plugin Panel Actions ----
+panel-plugin-action-disable = 禁用插件
+panel-plugin-action-enable = 启用插件
+panel-plugin-action-uninstall = 卸载
+panel-plugin-action-update = 更新
+panel-plugin-action-back = 返回插件列表
+panel-plugin-detail-actions = 操作
+
+# ---- Plugin Panel Fields ----
+panel-plugin-field-skills = Skills
+panel-plugin-field-commands = Commands
+panel-plugin-field-agents = Agents
+panel-plugin-field-mcp = MCP
+
+# ---- Plugin Panel Discover ----
+panel-plugin-discover-search = 搜索插件...
+panel-plugin-discover-empty = 未找到结果
+
+# ---- Plugin Panel Marketplaces ----
+panel-plugin-marketplaces-add = 添加市场...
+panel-plugin-marketplace-add-label = 添加:
+panel-plugin-marketplaces-delete = 删除
+panel-plugin-marketplaces-empty = 未配置市场
+
+# ---- Plugin Panel Errors ----
+panel-plugin-errors-title = 加载错误
+panel-plugin-errors-empty = 无错误
+
+# ---- Plugin Panel Status ----
+panel-plugin-status-enabled = 已启用
+panel-plugin-status-disabled = 已禁用
+
+# ---- Plugin Panel Confirm ----
+panel-plugin-confirm-uninstall = ⚠ 确认卸载？Enter 确认，Esc 取消
+panel-plugin-confirm-delete-mp = ⚠ 确认删除市场？Enter 确认，Esc 取消
+panel-plugin-confirm-hint = Enter: 确认  Esc: 取消
+
+# ---- Plugin Panel Marketplace ----
+panel-plugin-marketplaces-online = 在线
+panel-plugin-marketplaces-offline = 离线
+panel-plugin-marketplace-refreshing = 刷新中...
+panel-plugin-marketplace-hint-keys = Enter: 详情/添加  |  ↑/↓: 导航  |  Esc: 关闭
+panel-plugin-marketplace-add-url-hint = 输入 URL (github.com/org/repo, /path/to/dir, 等)
+panel-plugin-marketplace-add-input-footer = Enter: 保存  Esc: 取消
+panel-plugin-marketplace-action-refresh = 刷新
+panel-plugin-marketplace-action-delete = 删除
+panel-plugin-marketplace-detail-hint = ↑/↓: 选择  |  Enter: 执行  |  Esc: 返回
+
+# ---- Plugin Panel Search ----
+panel-plugin-discover-input = 输入以搜索...
+
+# ---- Plugin Panel Search ----
+panel-plugin-search-loading = 搜索中...
+panel-plugin-search-no-results = 未找到结果
+panel-plugin-search-error = 搜索失败: { $error }
+panel-plugin-search-invalid-response = 搜索响应格式无效
+panel-plugin-operation-complete = 操作完成
+panel-plugin-operation-failed = 操作失败
+panel-plugin-discover-press-enter = 按 Enter 搜索
+panel-plugin-action-install = 安装
+panel-plugin-list-count = 发现 { $count } 个插件
+panel-plugin-discover-hint-keys = Enter: 查看详情  |  输入: 过滤  |  ←/→/Tab: 切换视图
+
+# ---- Plugin Panel Navigation ----
+common-nav-tab-close = ←/→/Tab 切换视图 · ↑/↓ 导航 · Enter 查看 · Esc 关闭
+
+# ---- Tasks Panel ----
+panel-tasks-total-label =   总计: 
+panel-tasks-breakdown =    ({ $bg } 后台, { $cron } 定时, { $subagent } 子代理)
+panel-tasks-section-bg =   ▼ 后台任务 ({ $count })
+panel-tasks-kind-sh = [sh]
+panel-tasks-kind-ag = [ag]
+panel-tasks-kind-wf = [wf]
+panel-tasks-kind-unknown = [?]
+panel-tasks-pid =  pid:{ $pid }
+panel-tasks-section-cron =   ▼ 定时任务 ({ $count })
+panel-tasks-section-subagent =   ▼ 子代理 ({ $count })
+panel-tasks-collapsed =  (已折叠)
+panel-tasks-live =  (运行中)
+panel-tasks-msgs =   { $count } 条消息
+panel-tasks-empty =   当前无活跃任务
+panel-tasks-empty-hint-1 =   通过 /loop 命令调度定时任务；
+panel-tasks-empty-hint-2 =   子代理由 Task / SubAgent 工具创建。
+panel-tasks-nav-hint =   ↑/↓::navigate  Enter::open  Esc::close
+
+# ---- Theme Panel ----
+panel-theme-active-mark =  *
+panel-theme-nav-hint =   ↑/↓::navigate  Enter::switch  Esc::close
+panel-theme-empty =   (未找到主题)
+panel-theme-preview = 预览
+panel-theme-tab-dark = 暗色
+panel-theme-tab-light = 浅色
+panel-theme-tab-hint =   Tab::切换分类
+panel-theme-daily-on = 开
+panel-theme-daily-off = 关
+panel-theme-download-label = 从 GitHub 下载
+panel-theme-footer-hint =   Ctrl+T::daily({ $status })  Ctrl+D::{ $download }
+
+# ---- Workflow Panel kanban ----
+workflow-loading-runs = 正在加载工作流运行信息
+workflow-no-runs = 当前会话无工作流运行
+workflow-footer-shortcuts = Tab::切换运行 · Shift+Tab::上一个 · ←/→::切换面板 · ↑/↓::导航 · Enter::终止运行 · Esc::关闭
+workflow-phases-header = 阶段（共 { $count } 个 agent）
+workflow-model-header = 模型
+
+# ---- AskUser Panel ----
+panel-ask-user-empty =   暂无待答问题。
+panel-ask-user-malformed =   Agent 询问了 0 个问题（请求异常）。
+panel-ask-user-answered-mark =  ✓ 
+panel-ask-user-no-options =   (无可用选项)
+panel-ask-user-hint-tab-multi-answered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+panel-ask-user-hint-tab-multi-unanswered =   Tab::next-question · ↑/↓::navigate · Space::select · Enter::next · Esc::cancel
+panel-ask-user-hint-single-answered =   ↑/↓::navigate · Space::select · Enter::submit · Esc::cancel
+panel-ask-user-hint-single-unanswered =   ↑/↓::navigate · Space::select · Esc::cancel
+panel-ask-user-hint-tab-multi-select-answered =   Tab::下一题 · ↑/↓::导航 · Space::多选 · Enter::提交 · Esc::取消
+panel-ask-user-hint-tab-multi-select-unanswered =   Tab::下一题 · ↑/↓::导航 · Space::多选 · Enter::下一题 · Esc::取消
+panel-ask-user-hint-single-multi-select-answered =   ↑/↓::导航 · Space::多选 · Enter::提交 · Esc::取消
+panel-ask-user-hint-single-multi-select-unanswered =   ↑/↓::导航 · Space::多选 · Esc::取消
+panel-ask-user-hint-typing =   输入中 · Ctrl+W::删词 · Backspace::删字 · Enter::确认 · Esc::取消
+
+# ---- Others ----
+bg-task-overflow = … { $count } more
+bg-task-tools-running = { $name } · { $count } tools
+bg-task-tools-done = · { $count } tools
+tool-name-shell = Shell
+tool-name-folder = Folder
+mention-popup-title =  @{ $name } 
+slash-completion-title =  /{ $name } 
+
+# ---- HITL Popup (P2) ----
+popup-hitl-empty =   暂无待审批请求。
+popup-hitl-tool-label =   工具: { $name }
+popup-hitl-non-serializable = <无法序列化>
+popup-hitl-truncated-info =     ... (共 { $chars } 字符)
+popup-hitl-batch-header =   批量 ({ $more } 项):
+popup-hitl-batch-item =     - { $name } ({ $input })
+popup-hitl-batch-more =     ... 还有 { $count } 项
+popup-hitl-action-hint =   Enter: 批准  |  Esc: 拒绝
+popup-hitl-title =  审批请求
+
+# ---- AskUser Popup (P2) ----
+popup-ask-user-empty =   暂无待答问题。
+popup-ask-user-malformed =   Agent 询问了 0 个问题（请求异常）。
+popup-ask-user-answered-mark =  ✓ 
+popup-ask-user-no-options =   (无可用选项)
+popup-ask-user-hint-multi-submit =   Tab::下一题 · ↑/↓::导航 · Space::选择 · Enter::提交 · Esc::取消
+popup-ask-user-hint-multi-next =   Tab::下一题 · ↑/↓::导航 · Space::选择 · Enter::下一题 · Esc::取消
+popup-ask-user-hint-single-submit =   ↑/↓::导航 · Space::选择 · Enter::提交 · Esc::取消
+popup-ask-user-hint-single-unsubmitted =   ↑/↓::导航 · Space::选择 · Esc::取消
+popup-ask-user-title =  用户问答
+
+# ---- Confirm Popup (P2) ----
+dirty-recovery-title = 解除 dirty 状态并恢复原会话？
+dirty-recovery-risk = 旧子进程可能仍在运行。
+dirty-recovery-unknown = 之前的副作用未知。
+dirty-recovery-responsibility = 继续表示你接受风险，并承担后续结果。
+dirty-recovery-hint = 上/下：选择 · Enter：执行 · Esc：取消
+dirty-recovery-cancel = 取消（默认）
+dirty-recovery-accept = 接受风险，解除 dirty 并加载
+
+popup-confirm-empty =   暂无待确认项。
+popup-confirm-action-hint =   Enter: 确认  Esc: 取消
+popup-confirm-title =  确认
+popup-confirm-reject-title = 拒绝回答
+popup-confirm-reject-message = 是否拒绝回答？拒绝后 Agent 将收到拒绝信号并结束工具调用。
+
+# ---- 下载进度弹窗 ----
+
+popup-download-title-active = 正在下载主题 ({ $done }/{ $total })
+popup-download-title-done = 下载完成 ({ $total } 个文件, { $success } 成功, { $failed } 失败)
+popup-download-footer-active = 下载中，请稍候...
+popup-download-footer-done = 按 Esc 关闭
+popup-download-empty = （无可下载的文件）
+popup-download-finished-notify = 主题下载完成: { $success }/{ $total } 成功, { $failed } 失败
+
+# ---- System Notes (app message stream) ----
+app-note-budget-warning = 上下文窗口使用率 { NUMBER($pct, maximumFractionDigits: 0) }%（{ $used }/{ $limit }）
+app-note-compact-completed = { $type }完成 { $detail }
+app-note-compact-completed-summary = { $type }完成 { $detail } —— { $summary }
+app-note-compact-detail = （压缩 { $messages } 条消息，估算节省 { $tokens } tokens，重新注入 { $files } 个文件、{ $skills } 个 Skills）
+app-note-compact-detail-full = （压缩 { $messages } 条消息，token 节省量未测量，重新注入 { $files } 个文件、{ $skills } 个 Skills）
+app-note-compact-error = 上下文压缩失败: { $message }
+app-note-rewind-error = 回退失败: { $message }
+app-note-compact-type-full = 完整压缩
+app-note-compact-type-micro = 微压缩
+app-note-compact-type-smart = 智能压缩
+app-note-agent-failed = Agent 执行失败: { $message }
+app-note-cache-hit-low = Prompt cache 覆盖率 {$pct}% < 80%（req: { $req_id }）
+app-note-cache-coverage-low = Prompt cache 覆盖率 {$pct}% < 80% — 已缓存 {$cached} / 输入 {$input}，未缓存 {$uncached}（req: {$req_id}）
+
+# ---- 语义工具卡片 ----
+
+reminder-compact-file = 文件上下文
+reminder-compact-skill = Skill 指令
+reminder-compact-summary = 压缩摘要
+
+# 待发送队列
+steer-queue-title = 待发送 { $count }
+steer-input-rejected = 输入未被接收，原稿已保留。
+steer-input-uncertain = 暂未收到输入回执，正在核对并重试。
+steer-session-unavailable = 会话未能建立：{ $error }。原稿已保留。
+steer-session-read-only = 本会话以只读进入，无法提交输入，原稿已保留。
+
+thread-browser-project = 项目
+thread-browser-workspace = 工作区
+thread-browser-scope-count =   { $scope } · { $count } 个会话
+thread-browser-scope-loaded =   { $scope } · 已加载 { $count } 个会话 · 还有更多
+thread-browser-messages = { $count } 条消息
+panel-threads-more-hint =   ↑/↓::浏览（到末尾自动加载）  PgUp/PgDn::翻页  Tab::范围  n::更多  d::删除
+thread-browser-all = 全部历史
+thread-browser-selected = 选中：{ $title }
+thread-browser-selected-path = 路径：{ $path } · ID：{ $id }
+thread-browser-actions = ↑↓ 选择  Enter 继续  v 查看  Tab 范围  d 删除  Esc 关闭
+thread-browser-actions-compact = Enter 继续  v 查看  Tab 范围  d 删除  Esc 关闭
+thread-browser-preview-actions = v 返回  ↑↓ 滚动  PgUp/PgDn 翻页  Esc 关闭
+thread-history-preview-hint = 只读历史 · ↑/↓::滚动 · v::返回 · Esc::关闭
+thread-history-loading = 正在加载历史…
+thread-history-disconnected = 未连接，无法读取历史。
+thread-history-user = 用户
+thread-history-assistant = 助手
+thread-history-system = 系统上下文
+thread-history-tool = 工具结果
+session-restore-failed = 会话恢复失败：{ $error }。请重试或使用 /clear 创建会话。
+
+panel-host-settings = 宿主配置
+
+permission-mode-update-failed = 权限模式更新失败：{ $error }
+setup-activation-failed = 设置已保存，但未能在当前运行中启用。请按 Enter 重试。
+setup-saving = 正在保存并启用设置…
+setup-connectivity-checking = 正在检查端点…
+setup-connectivity-invalid = 请输入有效的 HTTP(S) URL，且不要内嵌凭据。
+setup-connectivity-failed = 端点检查失败或超时。请检查 URL 和网络。
+setup-connectivity-reachable = 端点可达；尚未验证 API Key 和模型。
+setup-connectivity-status = 端点返回 HTTP { $status }；尚未验证 API Key 和模型。
+setup-migration-failed = 未能在 ~/.claude/settings.json 找到有效的 Provider。请选择自定义 API 手动填写。
+setup-provider-incomplete = 请至少选中一个 Provider，并填写完整的 ID、API Key 和模型。
+setup-field-id-readonly = ID（只读）

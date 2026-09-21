@@ -1,31 +1,58 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+//! Plugin hook middleware — fires registered hooks at lifecycle events.
+//!
+//! 本文件是 Facade：保留 [`HookMiddleware`] struct + `Middleware` trait 实现
+//! 作为唯一 public 类型（API 兼容），实际职责委托给 `hooks/` 目录下同级子模块：
+//!
+//! - `dispatcher`：核心 hook 分发引擎（fire_event 内部循环 + standalone 路径统一）
+//! - `input_builder`：`HookInput` 字面量构造集中收口
+//! - `action_resolver`：`HookAction` → `AgentResult` / `ToolCall` 归约（消除 5 处重复 match）
+//! - `permission_gate`：PermissionRequest 双条件门控
+//! - `stop_block_guard`：Stop Block 连续次数状态机（上限 8）
+//! - `once_tracker`：一次性 hook 状态跟踪
+//!
+//! [TRAP] collect_tool_results 延迟写入不变量：dispatcher 和 action_resolver
+//! 不写 state（仅 `after_agent` 的 stop_block 写 state）。
+
+// 兼容旧调用点（`crate::hooks::middleware::fire_standalone_lifecycle_hooks`）：
+use peri_agent::middleware::capabilities as hook_state;
+// 函数已迁移到 `dispatcher.rs`，此处保留 pub use 以维持 ABI。
+pub use crate::hooks::dispatcher::fire_standalone_lifecycle_hooks;
+
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+    ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+};
 use peri_agent::{
-    agent::{
-        react::{AgentOutput, ReactLLM, ToolCall, ToolResult},
-        state::State,
-    },
+    agent::react::{AgentOutput, ReactLLM, ToolCall, ToolResult},
     error::{AgentError, AgentResult},
     messages::BaseMessage,
-    middleware::Middleware,
+    middleware::r#trait::Middleware,
+    session::{MessageKind, MessageSource, QueuedMessage},
 };
+use serde_json::json;
 
-use crate::hitl::{PermissionMode, SharedPermissionMode};
+use crate::permission::SharedPermissionMode;
+// HookType 仅 `middleware_test.rs` 通过 `use super::*` 使用。保留以维持测试不变。
+#[allow(unused_imports)]
 use crate::hooks::{
-    executor::{execute_agent_hook, execute_command_hook, execute_http_hook, execute_prompt_hook},
-    matcher::{matches_if_condition, matches_matcher},
+    action_resolver,
+    dispatcher::HookDispatcher,
+    input_builder,
+    once_tracker::OnceTracker,
+    permission_gate,
+    stop_block_guard::{format_stop_block_feedback_no_wrapper, GuardDecision, StopBlockGuard},
     types::{HookAction, HookEvent, HookInput, HookType, RegisteredHook},
 };
 
 /// Plugin hook middleware — fires registered hooks at lifecycle events.
 pub struct HookMiddleware {
-    hooks: Arc<RwLock<HashMap<HookEvent, Vec<RegisteredHook>>>>,
-    llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    /// 核心分发引擎（fire_event 内部循环 + once 跟踪）。
+    dispatcher: HookDispatcher,
+    /// 共享上下文字段，构造期确定后只读。
     cwd: String,
     session_id: String,
     transcript_path: String,
@@ -33,13 +60,15 @@ pub struct HookMiddleware {
     /// PermissionRequest 仅在权限对话框即将展示时触发。
     permission_mode: Arc<SharedPermissionMode>,
     current_model: String,
-    once_fired: Arc<Mutex<HashSet<String>>>,
-    /// Whether this is the first message of a new session (triggers SessionStart).
-    is_session_start: bool,
+    /// SessionStart 的 source 值（"startup"/"resume"/"clear"/"compact"）。
+    /// None 表示不触发 SessionStart。
+    session_start_source: Option<String>,
     /// 判断工具是否需要用户审批。用于 PermissionRequest hook 门控。
-    /// 默认使用 [`crate::hitl::default_requires_approval`]，
+    /// 默认使用 [`crate::permission::default_requires_approval`]，
     /// 可通过 `with_requires_approval` 覆盖。
     requires_approval: fn(&str) -> bool,
+    /// Stop hook block 连续次数计数器（最多 8 次，超过后忽略）
+    stop_block_guard: Arc<StopBlockGuard>,
 }
 
 impl HookMiddleware {
@@ -60,7 +89,7 @@ impl HookMiddleware {
             transcript_path,
             permission_mode,
             current_model,
-            false,
+            None,
         )
     }
 
@@ -73,7 +102,7 @@ impl HookMiddleware {
         transcript_path: impl Into<String>,
         permission_mode: Arc<SharedPermissionMode>,
         current_model: impl Into<String>,
-        is_session_start: bool,
+        session_start_source: Option<String>,
     ) -> Self {
         let mut map: HashMap<HookEvent, Vec<RegisteredHook>> = HashMap::new();
         for hook in registered_hooks {
@@ -84,232 +113,102 @@ impl HookMiddleware {
         tracing::info!(
             total_hooks,
             event_count,
-            is_session_start,
+            session_start = session_start_source.is_some(),
             "HookMiddleware created with registered hooks"
         );
+
+        let once_tracker = Arc::new(OnceTracker::new());
+        let stop_block_guard = Arc::new(StopBlockGuard::new());
+
+        let cwd_owned: String = cwd.into();
         Self {
-            hooks: Arc::new(RwLock::new(map)),
-            llm_factory,
-            cwd: cwd.into(),
+            dispatcher: HookDispatcher::new(
+                Arc::new(RwLock::new(map)),
+                llm_factory,
+                once_tracker,
+                cwd_owned.clone(),
+            ),
+            cwd: cwd_owned,
             session_id: session_id.into(),
             transcript_path: transcript_path.into(),
             permission_mode,
             current_model: current_model.into(),
-            once_fired: Arc::new(Mutex::new(HashSet::new())),
-            is_session_start,
-            requires_approval: crate::hitl::default_requires_approval,
+            session_start_source,
+            requires_approval: crate::permission::default_requires_approval,
+            stop_block_guard,
         }
     }
 
+    /// Keep asynchronous hooks and command processes in the session execution scope.
+    pub fn with_task_manager(
+        mut self,
+        task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
+    ) -> Self {
+        self.dispatcher = self.dispatcher.with_task_manager(task_manager);
+        self
+    }
+
     // -----------------------------------------------------------------------
-    // Helpers
+    // fire_event — Facade 委托给 dispatcher，保留 pub(crate) 接口供测试与
+    // middleware trait 方法调用。
     // -----------------------------------------------------------------------
 
-    /// 判断当前权限模式下，给定工具是否会触发权限对话框。
+    /// 触发 hook 事件，返回归约后的最终 action。
     ///
-    /// 对齐 Claude Code：PermissionRequest 仅在权限对话框即将展示时触发。
-    fn needs_permission_dialog(&self, tool_name: &str) -> bool {
-        match self.permission_mode.load() {
-            // Bypass: 所有工具直接放行，无对话框
-            PermissionMode::Bypass => false,
-            // DontAsk: 直接拒绝敏感工具，无对话框
-            PermissionMode::DontAsk => false,
-            // AcceptEdit: 编辑工具放行，其他弹窗
-            PermissionMode::AcceptEdit => !crate::hitl::is_edit_tool(tool_name),
-            // AutoMode: 分类器决定；简化处理——当无分类器或 Unsure 时弹窗
-            // 为避免 hook 系统依赖分类器，AutoMode 下始终触发 PermissionRequest
-            PermissionMode::AutoMode => true,
-            // Default: 敏感工具始终弹窗
-            PermissionMode::Default => true,
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // fire_event — core dispatch loop
-    // -----------------------------------------------------------------------
-
-    async fn fire_event(
+    /// 保留在 facade 层是因为 `middleware_test.rs` 直接通过 `mw.fire_event(...)`
+    /// 调用，且 middleware trait 方法（before_agent/before_tool/...）也通过它
+    /// 委托到 dispatcher。
+    pub(crate) async fn fire_event(
         &self,
         event: HookEvent,
         input: &HookInput,
         tool_name: Option<&str>,
         tool_input: Option<&serde_json::Value>,
     ) -> HookAction {
-        // 确保 hook_event_name 与实际触发的事件一致。
-        //
-        // 调用方可能在 before_tool 中复用同一个 HookInput 连续触发多个事件
-        // （PreToolUse → PermissionRequest → Notification），而 HookInput::tool_call()
-        // 构造函数硬编码 hook_event_name = PreToolUse。若不修正，PermissionRequest hook
-        // 脚本从 stdin 读到的 hook_event_name 会是 "PreToolUse" 而非 "PermissionRequest"。
-        let input = if input.hook_event_name != event {
-            let mut corrected = input.clone();
-            corrected.hook_event_name = event.clone();
-            corrected
-        } else {
-            input.clone()
-        };
-
-        let hooks = {
-            let map = self.hooks.read();
-            match map.get(&event) {
-                Some(h) => {
-                    tracing::debug!(
-                        event = ?event,
-                        count = h.len(),
-                        "HookMiddleware: found hooks for event"
-                    );
-                    h.clone()
-                }
-                None => {
-                    return HookAction::Allow;
-                }
-            }
-        };
-
-        if hooks.is_empty() {
-            return HookAction::Allow;
-        }
-
-        let mut final_action = HookAction::Allow;
-
-        for registered in &hooks {
-            // once check
-            if Self::is_once_hook(&registered.hook) && self.was_once_fired(registered) {
-                continue;
-            }
-
-            // matcher check
-            if let Some(name) = tool_name {
-                let matcher_str = registered.matcher.as_deref().unwrap_or_else(|| {
-                    registered
-                        .hook
-                        .get_matcher()
-                        .map(|s| s.as_str())
-                        .unwrap_or("*")
-                });
-                if !matches_matcher(matcher_str, name) {
-                    continue;
-                }
-            }
-
-            // if condition check
-            if let Some(condition) = registered.hook.get_condition() {
-                if let (Some(name), Some(inp)) = (tool_name, tool_input) {
-                    if !matches_if_condition(condition, name, inp) {
-                        continue;
-                    }
-                }
-            }
-
-            // Execute hook (async hooks are spawned in background, result ignored)
-            if let Some(ref msg) = registered.hook.get_status_message() {
-                tracing::info!(
-                    plugin = %registered.plugin_name,
-                    event = ?event,
-                    "Hook status: {}",
-                    msg
-                );
-            }
-            let action = if registered.hook.is_async() {
-                // Fire-and-forget: spawn in background, return Allow immediately
-                let hook = registered.hook.clone();
-                let owned_input = input.clone();
-                let registered = registered.clone();
-                tokio::spawn(async move {
-                    let _ = match &hook {
-                        HookType::Command { .. } => {
-                            execute_command_hook(&hook, &owned_input, &registered).await
-                        }
-                        HookType::Http { .. } => execute_http_hook(&hook, &owned_input).await,
-                        // Prompt/Agent hooks need LLM factory which can't be cloned into spawn;
-                        // async only applies to Command per schema definition.
-                        _ => HookAction::Allow,
-                    };
-                });
-                HookAction::Allow
-            } else {
-                match &registered.hook {
-                    HookType::Command { .. } => {
-                        execute_command_hook(&registered.hook, &input, registered).await
-                    }
-                    HookType::Prompt { .. } => {
-                        execute_prompt_hook(&registered.hook, &input, &self.llm_factory).await
-                    }
-                    HookType::Http { .. } => execute_http_hook(&registered.hook, &input).await,
-                    HookType::Agent { .. } => {
-                        execute_agent_hook(&registered.hook, &input, &self.llm_factory, &self.cwd)
-                            .await
-                    }
-                }
-            };
-
-            // once mark
-            if Self::is_once_hook(&registered.hook) {
-                self.mark_once_fired(registered);
-            }
-
-            // Short-circuit on Block / PreventContinuation
-            match &action {
-                HookAction::Block { .. } | HookAction::PreventContinuation { .. } => return action,
-                HookAction::ModifyInput { new_input } => {
-                    final_action = HookAction::ModifyInput {
-                        new_input: new_input.clone(),
-                    };
-                }
-                HookAction::PermissionOverride { decision, reason } => {
-                    // Phase 2: 权限覆盖决策暂不改变实际权限行为，仅记录
-                    tracing::debug!(
-                        "PermissionOverride from hook: {:?} (reason: {:?})",
-                        decision,
-                        reason
-                    );
-                    final_action = HookAction::PermissionOverride {
-                        decision: decision.clone(),
-                        reason: reason.clone(),
-                    };
-                }
-                _ => {}
-            }
-        }
-
-        final_action
+        self.dispatcher
+            .fire_event(event, input, tool_name, tool_input)
+            .await
     }
 
-    // -----------------------------------------------------------------------
-    // Helper methods
-    // -----------------------------------------------------------------------
+    /// 在一批并行工具调用全部完成后触发 PostToolBatch hook。
+    /// 由 dispatch_tools 在所有 tool_result 写入后调用。
+    pub async fn fire_post_tool_batch(
+        &self,
+        state: &mut dyn hook_state::StateView,
+    ) -> AgentResult<()> {
+        let prompt_text = state
+            .messages()
+            .iter()
+            .rev()
+            .find(|m| matches!(m, BaseMessage::Human { .. }))
+            .map(|m| m.content())
+            .unwrap_or_default();
 
-    fn is_once_hook(hook: &HookType) -> bool {
-        hook.is_once()
-    }
+        let input = input_builder::post_tool_batch(
+            &self.session_id,
+            &self.transcript_path,
+            &self.cwd,
+            &format!("{:?}", self.permission_mode.load()),
+            &self.current_model,
+            &prompt_text,
+            state.messages().len(),
+        );
 
-    fn once_key(registered: &RegisteredHook) -> String {
-        format!(
-            "{}:{}:{:?}",
-            registered.plugin_id,
-            serde_json::to_string(&registered.hook).unwrap_or_default(),
-            registered.event
-        )
-    }
+        let action = self
+            .fire_event(HookEvent::PostToolBatch, &input, None, None)
+            .await;
 
-    fn was_once_fired(&self, registered: &RegisteredHook) -> bool {
-        let key = Self::once_key(registered);
-        self.once_fired.lock().contains(&key)
-    }
-
-    fn mark_once_fired(&self, registered: &RegisteredHook) {
-        let key = Self::once_key(registered);
-        self.once_fired.lock().insert(key);
+        action_resolver::resolve_post_tool_batch_action(&action)
     }
 }
 
 #[async_trait]
-impl<S: State> Middleware<S> for HookMiddleware {
+impl Middleware for HookMiddleware {
     fn name(&self) -> &str {
         "HookMiddleware"
     }
 
-    async fn before_agent(&self, state: &mut S) -> AgentResult<()> {
+    async fn before_agent(&self, state: &mut dyn hook_state::BeforeAgentState) -> AgentResult<()> {
         // Extract the latest human message as prompt text
         let prompt = state
             .messages()
@@ -319,34 +218,24 @@ impl<S: State> Middleware<S> for HookMiddleware {
             .map(|m| m.content())
             .unwrap_or_default();
 
-        // SessionStart: only when is_session_start is true (first message of a new session)
-        if self.is_session_start {
+        // SessionStart: only when session_start_source is Some
+        if let Some(ref source) = self.session_start_source {
             let input = HookInput::session_start(
                 &self.session_id,
                 &self.transcript_path,
                 &self.cwd,
-                "startup",
+                source,
                 &self.current_model,
             );
             let action = self
                 .fire_event(HookEvent::SessionStart, &input, None, None)
                 .await;
+            action_resolver::resolve_action_to_result(
+                &action,
+                "SessionStart",
+                "SessionStart hook prevented continuation",
+            )?;
             match &action {
-                HookAction::Block { reason } => {
-                    return Err(AgentError::ToolRejected {
-                        tool: "SessionStart".to_string(),
-                        reason: reason.clone(),
-                    });
-                }
-                HookAction::PreventContinuation { stop_reason } => {
-                    let reason = stop_reason
-                        .clone()
-                        .unwrap_or_else(|| "SessionStart hook prevented continuation".to_string());
-                    return Err(AgentError::ToolRejected {
-                        tool: "SessionStart".to_string(),
-                        reason,
-                    });
-                }
                 HookAction::SystemMessage { message } => {
                     tracing::info!("SessionStart hook system message: {}", message);
                 }
@@ -371,30 +260,49 @@ impl<S: State> Middleware<S> for HookMiddleware {
             .fire_event(HookEvent::UserPromptSubmit, &input, None, None)
             .await;
 
-        // Handle UserPromptSubmit actions
-        match &action {
-            HookAction::Block { reason } => {
-                return Err(AgentError::ToolRejected {
-                    tool: "UserPromptSubmit".to_string(),
-                    reason: reason.clone(),
-                });
-            }
-            HookAction::PreventContinuation { stop_reason } => {
-                let reason = stop_reason
-                    .clone()
-                    .unwrap_or_else(|| "Hook prevented continuation".to_string());
-                return Err(AgentError::ToolRejected {
-                    tool: "UserPromptSubmit".to_string(),
-                    reason,
-                });
-            }
-            _ => {}
-        }
+        action_resolver::resolve_action_to_result(
+            &action,
+            "UserPromptSubmit",
+            "Hook prevented continuation",
+        )?;
+
+        // P1-5: InstructionsLoaded —— 每次 user prompt 时规则/skill 已加载
+        let instructions_input = HookInput {
+            session_id: self.session_id.clone(),
+            transcript_path: self.transcript_path.clone(),
+            cwd: self.cwd.clone(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            hook_event_name: HookEvent::InstructionsLoaded,
+            tool_name: None,
+            tool_input: None,
+            tool_use_id: None,
+            tool_output: None,
+            prompt: Some(prompt),
+            source: None,
+            model: Some(self.current_model.clone()),
+            subagent_name: None,
+            subagent_result: None,
+            message_count: None,
+            additional_data: None,
+        };
+        self.fire_event(
+            HookEvent::InstructionsLoaded,
+            &instructions_input,
+            None,
+            None,
+        )
+        .await;
 
         Ok(())
     }
 
-    async fn before_tool(&self, _state: &mut S, tool_call: &ToolCall) -> AgentResult<ToolCall> {
+    async fn before_tool(
+        &self,
+        _state: &mut dyn hook_state::BeforeToolState,
+        tool_call: &ToolCall,
+    ) -> AgentResult<ToolCall> {
         let permission_mode_str = format!("{:?}", self.permission_mode.load());
         let input = HookInput::tool_call(
             &self.session_id,
@@ -416,28 +324,19 @@ impl<S: State> Middleware<S> for HookMiddleware {
             )
             .await;
 
+        // 原实现的 `_ => {}`：只有 Block / PreventContinuation / ModifyInput 会
+        // 提前 return，其余（Allow / Notification / SystemMessage / ...）继续走
+        // PermissionRequest 门控。
         match &action {
-            HookAction::Block { reason } => {
-                return Err(AgentError::ToolRejected {
-                    tool: tool_call.name.clone(),
-                    reason: reason.clone(),
-                });
-            }
-            HookAction::PreventContinuation { stop_reason } => {
-                let reason = stop_reason
-                    .clone()
-                    .unwrap_or_else(|| "Hook prevented continuation".to_string());
-                return Err(AgentError::ToolRejected {
-                    tool: tool_call.name.clone(),
-                    reason,
-                });
-            }
-            HookAction::ModifyInput { new_input } => {
-                return Ok(ToolCall {
-                    id: tool_call.id.clone(),
-                    name: tool_call.name.clone(),
-                    input: new_input.clone(),
-                });
+            HookAction::Block { .. }
+            | HookAction::PreventContinuation { .. }
+            | HookAction::ModifyInput { .. } => {
+                // resolve_action_to_toolcall: Block/Prevent → Err, ModifyInput → Ok(new ToolCall)
+                return action_resolver::resolve_action_to_toolcall(
+                    &action,
+                    tool_call,
+                    "Hook prevented continuation",
+                );
             }
             _ => {}
         }
@@ -445,14 +344,17 @@ impl<S: State> Middleware<S> for HookMiddleware {
         // PermissionRequest 门控：仅对敏感工具 + 权限对话框即将展示时触发。
         //
         // Claude Code 行为：PermissionRequest 仅在权限对话框即将展示给用户时触发。
-        // Bypass/AutoMode(DontAsk 的 auto-allow 路径) 不展示对话框，因此不触发。
+        // Bypass 不展示对话框，因此不触发。
         //
         // 使用 hitl::default_requires_approval 判断工具是否需要审批（Bash/Write/Edit/Agent/
         // mcp__*/WebFetch/WebSearch 等）。非敏感工具（Read/Glob/Grep 等）不触发。
-        let is_sensitive = (self.requires_approval)(&tool_call.name);
-        let needs_dialog = self.needs_permission_dialog(&tool_call.name);
+        let should_fire = permission_gate::should_fire_permission_request(
+            self.permission_mode.load(),
+            &tool_call.name,
+            self.requires_approval,
+        );
 
-        if is_sensitive && needs_dialog {
+        if should_fire {
             let action = self
                 .fire_event(
                     HookEvent::PermissionRequest,
@@ -461,6 +363,19 @@ impl<S: State> Middleware<S> for HookMiddleware {
                     Some(&tool_call.input),
                 )
                 .await;
+
+            // P1-5: PermissionDenied —— 当 hook 拒绝权限时触发
+            let is_denied = matches!(&action, HookAction::Block { .. })
+                || matches!(&action, HookAction::PreventContinuation { .. });
+            if is_denied {
+                self.fire_event(
+                    HookEvent::PermissionDenied,
+                    &input,
+                    Some(&tool_call.name),
+                    Some(&tool_call.input),
+                )
+                .await;
+            }
 
             // Fire Notification (agent is waiting for user permission)
             self.fire_event(
@@ -471,31 +386,11 @@ impl<S: State> Middleware<S> for HookMiddleware {
             )
             .await;
 
-            match &action {
-                HookAction::Block { reason } => {
-                    return Err(AgentError::ToolRejected {
-                        tool: tool_call.name.clone(),
-                        reason: reason.clone(),
-                    });
-                }
-                HookAction::PreventContinuation { stop_reason } => {
-                    let reason = stop_reason
-                        .clone()
-                        .unwrap_or_else(|| "Hook prevented continuation".to_string());
-                    return Err(AgentError::ToolRejected {
-                        tool: tool_call.name.clone(),
-                        reason,
-                    });
-                }
-                HookAction::ModifyInput { new_input } => {
-                    return Ok(ToolCall {
-                        id: tool_call.id.clone(),
-                        name: tool_call.name.clone(),
-                        input: new_input.clone(),
-                    });
-                }
-                _ => {}
-            }
+            return action_resolver::resolve_action_to_toolcall(
+                &action,
+                tool_call,
+                "Hook prevented continuation",
+            );
         }
 
         Ok(tool_call.clone())
@@ -503,7 +398,7 @@ impl<S: State> Middleware<S> for HookMiddleware {
 
     async fn after_tool(
         &self,
-        _state: &mut S,
+        _state: &mut dyn hook_state::AfterToolState,
         tool_call: &ToolCall,
         result: &ToolResult,
     ) -> AgentResult<()> {
@@ -521,7 +416,7 @@ impl<S: State> Middleware<S> for HookMiddleware {
             &permission_mode_str,
             &tool_call.name,
             &tool_call.input,
-            &serde_json::json!(result.output),
+            &action_resolver::tool_output_to_json(result),
             result.is_error,
         );
 
@@ -532,34 +427,81 @@ impl<S: State> Middleware<S> for HookMiddleware {
         Ok(())
     }
 
-    async fn after_agent(&self, _state: &mut S, output: &AgentOutput) -> AgentResult<AgentOutput> {
-        // 构造 Stop hook 的 HookInput。
-        // subagent_result 携带 agent 最终输出（截断到 500 字符），
-        // source 携带 stop_reason（若存在）标识结束原因。
-        let input = HookInput {
-            session_id: self.session_id.clone(),
-            transcript_path: self.transcript_path.clone(),
-            cwd: self.cwd.clone(),
-            permission_mode: Some(format!("{:?}", self.permission_mode.load())),
-            agent_id: None,
-            agent_type: None,
-            hook_event_name: HookEvent::Stop,
-            tool_name: None,
-            tool_input: None,
-            tool_use_id: None,
-            tool_output: None,
-            prompt: None,
-            source: output
-                .stop_reason
-                .as_deref()
-                .map(|_| "agent_complete".to_string()),
-            model: Some(self.current_model.clone()),
-            subagent_name: None,
-            subagent_result: Some(output.text.chars().take(500).collect::<String>()),
-            message_count: None,
-        };
+    async fn after_tools_batch(
+        &self,
+        state: &mut dyn hook_state::StateView,
+        _results: &[(ToolCall, ToolResult)],
+    ) -> AgentResult<()> {
+        self.fire_post_tool_batch(state).await
+    }
 
-        let _action = self.fire_event(HookEvent::Stop, &input, None, None).await;
+    async fn after_agent(
+        &self,
+        state: &mut dyn hook_state::AfterAgentState,
+        output: &AgentOutput,
+    ) -> AgentResult<AgentOutput> {
+        let input = input_builder::stop(
+            &self.session_id,
+            &self.transcript_path,
+            &self.cwd,
+            &format!("{:?}", self.permission_mode.load()),
+            &self.current_model,
+            output,
+        );
+
+        let action = self.fire_event(HookEvent::Stop, &input, None, None).await;
+
+        match &action {
+            HookAction::Block { reason } => match self.stop_block_guard.on_block(reason) {
+                GuardDecision::ForceFinish => {
+                    return Ok(output.clone());
+                }
+                GuardDecision::Block { count, reason } => {
+                    let feedback = format_stop_block_feedback_no_wrapper(&reason, count);
+                    let reminder = TrustedSystemReminderFactory::for_producer()
+                        .construct(SystemReminder {
+                            version: SYSTEM_REMINDER_VERSION,
+                            category: ReminderCategory::Guidance,
+                            source: ReminderSource("hook".into()),
+                            kind: "stop_blocked".into(),
+                            severity: ReminderSeverity::Warning,
+                            delivery: ReminderDelivery::Required,
+                            audiences: ReminderAudiences(vec![
+                                ReminderAudience::Model,
+                                ReminderAudience::Automation,
+                            ]),
+                            body: feedback,
+                            summary: Some(format!("Stop hook 阻止结束（{count}/8）")),
+                            metadata: json!({ "block_count": count }),
+                        })
+                        .map_err(|error| AgentError::MiddlewareError {
+                            middleware: self.name().to_string(),
+                            reason: error.to_string(),
+                        })?;
+                    state.enqueue_v2_message(QueuedMessage::system_reminder(
+                        MessageKind::Defer,
+                        MessageSource::StopHookFeedback,
+                        reminder,
+                    ));
+                    let mut output = output.clone();
+                    output.block_continue = Some(reason);
+                    return Ok(output);
+                }
+                GuardDecision::Pass => {}
+            },
+            HookAction::PreventContinuation { stop_reason } => {
+                return Err(AgentError::ToolRejected {
+                    tool: "Stop".to_string(),
+                    reason: stop_reason
+                        .clone()
+                        .unwrap_or_else(|| "Stop hook prevented continuation".to_string()),
+                });
+            }
+            _ => {
+                // 非 block 时重置计数器
+                self.stop_block_guard.on_non_block();
+            }
+        }
 
         // Fire Notification (agent done, waiting for user input)
         self.fire_event(HookEvent::Notification, &input, None, None)
@@ -570,158 +512,40 @@ impl<S: State> Middleware<S> for HookMiddleware {
 
     async fn on_error(
         &self,
-        _state: &mut S,
-        error: &peri_agent::error::AgentError,
+        _state: &mut dyn hook_state::StateView,
+        error: &AgentError,
     ) -> AgentResult<()> {
-        // 当 agent 因错误退出时触发 StopFailure hook。
-        // 这覆盖了 Interrupted、MaxIterationsExceeded、LLM 调用失败等场景，
-        // 这些路径不经过 after_agent（直接返回 Err），因此需要在此处单独触发。
+        // StopFailure 仅在 API/LLM 调用失败时触发，
+        // 跳过 Interrupted、MaxIterationsExceeded、ToolRejected 等非 API 错误。
+        let should_fire = matches!(
+            error,
+            AgentError::LlmError(_)
+                | AgentError::LlmHttpError { .. }
+                | AgentError::ModelError(..)
+                | AgentError::MiddlewareError { .. }
+        );
+
+        if !should_fire {
+            return Ok(());
+        }
+
+        // 当 agent 因 API/LLM 错误退出时触发 StopFailure hook。
+        // 非 API 错误（Interrupted / MaxIterationsExceeded / ToolRejected 等）
+        // 已在 guard 中过滤。
         let error_description = format!("{:?}", error);
-        let input = HookInput {
-            session_id: self.session_id.clone(),
-            transcript_path: self.transcript_path.clone(),
-            cwd: self.cwd.clone(),
-            permission_mode: Some(format!("{:?}", self.permission_mode.load())),
-            agent_id: None,
-            agent_type: None,
-            hook_event_name: HookEvent::StopFailure,
-            tool_name: None,
-            tool_input: None,
-            tool_use_id: None,
-            tool_output: Some(serde_json::json!(error_description)),
-            prompt: None,
-            source: None,
-            model: Some(self.current_model.clone()),
-            subagent_name: None,
-            subagent_result: None,
-            message_count: None,
-        };
+        let input = input_builder::stop_failure(
+            &self.session_id,
+            &self.transcript_path,
+            &self.cwd,
+            &format!("{:?}", self.permission_mode.load()),
+            &self.current_model,
+            &error_description,
+        );
 
         self.fire_event(HookEvent::StopFailure, &input, None, None)
             .await;
 
         Ok(())
-    }
-}
-
-/// Fire standalone lifecycle hooks outside of the middleware lifecycle.
-///
-/// Used by the TUI layer for events that occur outside the agent ReAct loop:
-/// - `SessionEnd`: when `/clear` resets the session
-/// - `PreCompact` / `PostCompact`: before/after context compaction
-/// - `Notification`: when agent needs user attention (e.g. AskUserQuestion)
-///
-/// The HookMiddleware instance is owned by the agent task and not accessible
-/// from these code paths, so we dispatch hooks directly.
-pub async fn fire_standalone_lifecycle_hooks(
-    registered_hooks: &[RegisteredHook],
-    event: HookEvent,
-    cwd: &str,
-    session_id: &str,
-    transcript_path: &str,
-    current_model: &str,
-    message_count: Option<usize>,
-) {
-    // Filter hooks matching the event
-    let matching: Vec<&RegisteredHook> = registered_hooks
-        .iter()
-        .filter(|h| h.event == event)
-        .collect();
-
-    if matching.is_empty() {
-        return;
-    }
-
-    let input = match &event {
-        HookEvent::SessionEnd => HookInput {
-            session_id: session_id.to_string(),
-            transcript_path: transcript_path.to_string(),
-            cwd: cwd.to_string(),
-            permission_mode: None,
-            agent_id: None,
-            agent_type: None,
-            hook_event_name: event.clone(),
-            tool_name: None,
-            tool_input: None,
-            tool_use_id: None,
-            tool_output: None,
-            prompt: None,
-            source: None,
-            model: Some(current_model.to_string()),
-            subagent_name: None,
-            subagent_result: None,
-            message_count: None,
-        },
-        HookEvent::PreCompact | HookEvent::PostCompact => HookInput::compact(
-            session_id,
-            transcript_path,
-            cwd,
-            event.clone(),
-            message_count.unwrap_or(0),
-        ),
-        HookEvent::Notification => HookInput {
-            session_id: session_id.to_string(),
-            transcript_path: transcript_path.to_string(),
-            cwd: cwd.to_string(),
-            permission_mode: None,
-            agent_id: None,
-            agent_type: None,
-            hook_event_name: event.clone(),
-            tool_name: None,
-            tool_input: None,
-            tool_use_id: None,
-            tool_output: None,
-            prompt: None,
-            source: None,
-            model: Some(current_model.to_string()),
-            subagent_name: None,
-            subagent_result: None,
-            message_count: None,
-        },
-        _ => return,
-    };
-
-    for registered in matching {
-        if let Some(ref msg) = registered.hook.get_status_message() {
-            tracing::info!(
-                plugin = %registered.plugin_name,
-                event = ?event,
-                "Hook status: {}",
-                msg
-            );
-        }
-
-        if registered.hook.is_async() {
-            // Fire-and-forget async hook
-            let hook = registered.hook.clone();
-            let input = input.clone();
-            let registered = registered.clone();
-            tokio::spawn(async move {
-                let _ = match &hook {
-                    HookType::Command { .. } => {
-                        execute_command_hook(&hook, &input, &registered).await
-                    }
-                    HookType::Http { .. } => execute_http_hook(&hook, &input).await,
-                    _ => HookAction::Allow,
-                };
-            });
-            continue;
-        }
-
-        let _action = match &registered.hook {
-            HookType::Command { .. } => {
-                execute_command_hook(&registered.hook, &input, registered).await
-            }
-            HookType::Prompt { .. } => {
-                // No LLM factory available in standalone context; skip
-                HookAction::Allow
-            }
-            HookType::Http { .. } => execute_http_hook(&registered.hook, &input).await,
-            HookType::Agent { .. } => {
-                // No LLM factory available in standalone context; skip
-                HookAction::Allow
-            }
-        };
     }
 }
 

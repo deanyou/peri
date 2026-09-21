@@ -1,6 +1,7 @@
 use tempfile::NamedTempFile;
 
 use super::*;
+use crate::plugin::PluginOrigin;
 
 #[test]
 fn test_load_from_nonexistent_path() {
@@ -21,6 +22,34 @@ fn test_load_from_valid_json() {
     assert_eq!(config.mcp_servers.len(), 1);
     assert_eq!(config.mcp_servers["fs"].command.as_deref(), Some("npx"));
     assert_eq!(config.mcp_servers["fs"].args.as_ref().unwrap().len(), 2);
+}
+
+#[test]
+fn test_load_explicit_protocol_version() {
+    let mut f = NamedTempFile::new().unwrap();
+    std::io::Write::write_all(
+        &mut f,
+        br#"{"mcpServers":{"next":{"url":"https://example.com/mcp","protocolVersion":"2026-07-28"}}}"#,
+    )
+    .unwrap();
+
+    let config = load_from_path(f.path()).unwrap();
+    assert_eq!(
+        config.mcp_servers["next"].protocol_version,
+        Some(peri_acp_types::plugin::McpProtocolVersion::V2026_07_28)
+    );
+}
+
+#[test]
+fn test_load_unknown_protocol_version_fails() {
+    let mut f = NamedTempFile::new().unwrap();
+    std::io::Write::write_all(
+        &mut f,
+        br#"{"mcpServers":{"invalid":{"url":"https://example.com/mcp","protocolVersion":"unknown"}}}"#,
+    )
+    .unwrap();
+
+    assert!(load_from_path(f.path()).is_err());
 }
 
 #[test]
@@ -403,6 +432,7 @@ fn test_load_merged_config_full_with_plugin() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
     std::fs::write(
@@ -503,6 +533,7 @@ fn test_load_merged_config_full_multiple_plugins() {
                 install_path: plugin_a_dir.clone(),
                 scope: InstallScope::User,
                 project_path: None,
+                origin: PluginOrigin::PeriInstalled,
             },
             InstalledPlugin {
                 id: "pb@beta".into(),
@@ -512,6 +543,7 @@ fn test_load_merged_config_full_multiple_plugins() {
                 install_path: plugin_b_dir.clone(),
                 scope: InstallScope::User,
                 project_path: None,
+                origin: PluginOrigin::PeriInstalled,
             },
         ],
     };
@@ -593,6 +625,7 @@ fn test_load_merged_config_full_plugin_env_preserves_existing() {
             install_path: plugin_dir.clone(),
             scope: InstallScope::User,
             project_path: None,
+            origin: PluginOrigin::PeriInstalled,
         }],
     };
     std::fs::write(

@@ -1,103 +1,30 @@
-use std::io;
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use peri_acp::transport::mpsc::mpsc_transport_pair;
-use peri_tui::{
-    acp_client::AcpTuiClient,
-    acp_server::{run_acp_server, AcpServerConfig},
-    app::App,
-    event, ui,
-};
-use ratatui::{
-    crossterm::{
-        event::{
-            DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-            EnableFocusChange, EnableMouseCapture,
-        },
-        execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    },
-    prelude::*,
-};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-mod acp_stdio;
 mod cli_args;
+mod cli_meta;
 mod cli_plugin;
 mod cli_print;
+mod cli_workflow;
 
 // ─── Panic Hook（TUI 专用）───────────────────────────────────────────────────
-
-/// 全局 panic 通知通道 sender（OnceLock 保证只初始化一次）
-static PANIC_NOTIFY: OnceLock<tokio::sync::mpsc::UnboundedSender<String>> = OnceLock::new();
-
-/// 格式化 panic 信息为可读字符串（消息 + 位置 + backtrace）
-fn format_panic_message(panic_info: &std::panic::PanicHookInfo<'_>) -> String {
-    let payload = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
-        s.to_string()
-    } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic payload".to_string()
-    };
-
-    let location = panic_info
-        .location()
-        .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
-        .unwrap_or_else(|| "unknown location".to_string());
-
-    // 自动捕获 backtrace（无需手动设置 RUST_BACKTRACE=1）
-    let backtrace = std::backtrace::Backtrace::capture();
-    let bt_str = match backtrace.status() {
-        std::backtrace::BacktraceStatus::Captured => format!("\n{}", backtrace),
-        _ => String::new(),
-    };
-
-    format!("'{}'\n  at {}{}", payload, location, bt_str)
-}
-
-/// 安装自定义 panic hook：
-/// - 通过 tracing::error! 记录到日志文件（不写 stderr）
-/// - 通过 PANIC_NOTIFY 通道通知 TUI
-fn install_panic_hook() {
-    std::panic::set_hook(Box::new(|panic_info| {
-        let msg = format_panic_message(panic_info);
-        tracing::error!("thread panicked at {}", msg);
-        if let Some(tx) = PANIC_NOTIFY.get() {
-            let _ = tx.send(msg);
-        }
-    }));
-}
-
-/// 创建 panic 通知通道并安装自定义 panic hook。
-/// 必须在 enable_raw_mode() 之前调用。
-/// 返回 UnboundedReceiver 供 TUI 消费。
-pub fn init_panic_notify() -> tokio::sync::mpsc::UnboundedReceiver<String> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let _ = PANIC_NOTIFY.set(tx);
-    install_panic_hook();
-    rx
-}
+// 实现已移至 peri_tui::kit::panic（lib 侧），AppShell mount 后重装 hook，
+// 覆盖 ratatui::init() 的包装 hook——见 kit/panic.rs 模块注释。
+use peri_acp::host::stdio::StdioInput;
+use peri_tui::kit::panic::init_panic_notify;
 
 // ─── CLI 定义 ──────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(name = "peri", version, about = "Peri AI Agent")]
 struct Cli {
-    // ── 向后兼容 ──
-    /// 向后兼容，无操作（YOLO 已是默认行为）
-    #[arg(short = 'y', long = "yolo")]
-    yolo: bool,
-    /// 启用 HITL 审批模式（等同 --permission-mode default）
-    #[arg(short = 'a', long = "approve")]
-    approve: bool,
-
     // ── 非交互模式 ──
     /// 非交互模式：输出响应后退出
     #[arg(short = 'p', long = "print")]
@@ -113,7 +40,7 @@ struct Cli {
     bare: bool,
 
     // ── 权限与安全 ──
-    /// 权限模式：bypass / default / dont-ask / accept-edit / auto-mode
+    /// 权限模式：bypass / default / accept-edit / auto-mode
     #[arg(long = "permission-mode", visible_alias = "permissionMode")]
     permission_mode: Option<String>,
     /// 绕过所有权限检查（仅限沙箱环境）
@@ -157,6 +84,12 @@ struct Cli {
     /// 加载额外 settings 文件或 JSON 字符串
     #[arg(long = "settings")]
     settings: Option<String>,
+    /// 全局配置文件路径（默认 ~/.peri/settings.json）
+    #[arg(long = "config-file", visible_alias = "configFile")]
+    config_file: Option<PathBuf>,
+    /// SQLite 会话数据库路径（默认 ~/.peri/threads/threads.db）
+    #[arg(long = "db-path", visible_alias = "dbPath")]
+    db_path: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -176,28 +109,80 @@ enum Commands {
         #[arg(short = 'g', long)]
         agent: Option<String>,
     },
+    /// 运行 workflow CLI 子命令（read/list/validate/boundary/adlc/help）
+    #[command(disable_help_flag = true)]
+    Workflow {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// 查询 Peri 持久化 metadata
+    Meta {
+        #[command(subcommand)]
+        action: MetaAction,
+    },
     /// 更新：从 GitHub 下载并安装最新版本
     Update,
     /// 配置同步：在设备间同步 settings/skills/mcp/plugins
     Sync {
         #[command(subcommand)]
         action: SyncAction,
-        /// Relay server URL
-        #[arg(long, default_value = "wss://peri-sync.claude-code-best.win")]
+        /// Server URL（仅 HTTPS；http/ws/wss 一律拒绝）
+        #[arg(
+            long,
+            default_value = "https://peri-sync.claude-code-best.win",
+            global = true
+        )]
         server: String,
+        /// 显式加密 keystore 文件路径（仅打开已存在的加密 keystore）
+        #[arg(long, global = true)]
+        keystore_path: Option<String>,
     },
     /// 插件管理
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
     },
+    /// 启动 Web PTY 终端服务
+    Web {
+        /// 监听地址（默认 0.0.0.0，监听所有网卡）
+        #[arg(long, default_value = "0.0.0.0", env = "HOST")]
+        host: String,
+        /// 监听端口（默认 0 = 随机分配）
+        #[arg(long, default_value_t = 0, env = "PORT")]
+        port: u16,
+    },
+}
+
+#[derive(Subcommand)]
+enum MetaAction {
+    /// 查询单条持久化 session metadata
+    Session {
+        /// Session ID（任意合法 UUID）
+        session_id: String,
+        /// JSON 输出
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum SyncAction {
-    /// 发送本地配置到远端设备
+    /// 设备身份与信任管理
+    Device {
+        #[command(subcommand)]
+        action: peri_tui::sync::device_cli::DeviceAction,
+    },
+    /// 发送本地配置到已信任远端设备
+    Send {
+        /// 目标设备 ID（trusted peers 中）
+        #[arg(long)]
+        to: String,
+    },
+    /// 从已信任远端设备接收配置（掩码输入同步码）
+    Receive,
+    /// 旧 WebSocket 发送模式（Slice 4 移除）
     Sender,
-    /// 从远端设备接收配置
+    /// 旧 WebSocket 接收模式（Slice 4 移除）
     Receiver,
 }
 
@@ -225,19 +210,80 @@ enum PluginAction {
         #[arg(short = 's', long)]
         scope: Option<String>,
     },
+    /// 管理 marketplace 注册
+    Marketplace {
+        #[command(subcommand)]
+        action: MarketplaceAction,
+    },
+    /// 启用插件
+    Enable {
+        /// 插件 ID（格式: name@marketplace）
+        plugin: String,
+        /// 作用范围：user / project / local
+        #[arg(long, short)]
+        scope: Option<String>,
+    },
+    /// 禁用插件
+    Disable {
+        /// 插件 ID（格式: name@marketplace）
+        plugin: String,
+        /// 作用范围：user / project / local
+        #[arg(long, short)]
+        scope: Option<String>,
+    },
+    /// 更新已安装的插件
+    Update {
+        /// 插件名称（格式: name@marketplace）
+        plugin: String,
+        /// 安装范围：user / project / local
+        #[arg(long, short)]
+        scope: Option<String>,
+    },
+    /// 查看插件详细信息
+    Info {
+        /// 插件 ID（格式: name@marketplace）
+        plugin: String,
+    },
+    /// 搜索 marketplace 插件
+    Search {
+        /// 搜索关键词
+        query: String,
+    },
+    /// 清理 7 天未使用的孤儿插件文件
+    Cleanup,
+}
+
+#[derive(Subcommand)]
+enum MarketplaceAction {
+    /// 添加一个 marketplace
+    Add {
+        /// marketplace 来源（GitHub 简写 "user/repo"、URL、本地路径等）
+        source: String,
+    },
+    /// 列出已注册的 marketplace
+    List,
+    /// 删除一个 marketplace
+    Remove {
+        /// marketplace 名称
+        name: String,
+    },
+    /// 更新 marketplace 缓存
+    Update {
+        /// marketplace 名称
+        name: String,
+    },
 }
 
 // ─── 环境变量注入 ──────────────────────────────────────────────────────────
 
 /// 从 settings.json 读取 env 字段并注入进程环境变量
 /// 仅在进程环境变量不存在时设置（进程环境优先）
+/// 路径跟随 config_path()（支持 set_global_config_path 重定向）
 fn inject_env_from_settings() {
-    let path = dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".peri")
-        .join("settings.json");
-
-    inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    inject_env_from_file(
+        &peri_tui::config::config_path(),
+        &[&["config", "env"], &["env"]],
+    );
 }
 
 /// 从 Claude Code 配置文件 ~/.claude/settings.json 读取 env 字段并注入进程环境变量。
@@ -292,8 +338,10 @@ fn inject_env_from_file(path: &std::path::Path, env_paths: &[&[&str]]) {
 /// 遍历 env map 注入进程环境变量，仅在变量未设置时写入
 fn inject_env_map(env_map: &serde_json::Map<String, serde_json::Value>) {
     for (key, value) in env_map {
-        if let Some(value_str) = value.as_str() {
-            if std::env::var(key).is_err() {
+        if let Some(value_str) = value.as_str()
+            && std::env::var(key).is_err()
+        {
+            unsafe {
                 std::env::set_var(key, value_str);
             }
         }
@@ -319,40 +367,292 @@ fn inject_settings_override(source: &str) {
         return;
     };
 
-    if let Some(env_obj) = json.get("config").and_then(|c| c.get("env")) {
-        if let Some(env_map) = env_obj.as_object() {
-            for (key, value) in env_map {
-                if let Some(value_str) = value.as_str() {
-                    if std::env::var(key).is_err() {
-                        std::env::set_var(key, value_str);
-                    }
+    if let Some(env_obj) = json.get("config").and_then(|c| c.get("env"))
+        && let Some(env_map) = env_obj.as_object()
+    {
+        inject_env_map(env_map);
+    }
+}
+
+// ─── 辅助函数 ──────────────────────────────────────────────────────────────
+
+/// 轻量预扫描 argv，识别 `--config-file` / `--configFile`（gate 决策 Option A：
+/// env 注入前先按重定向路径执行，使 `--config-file` 文件内的 `env` 字段
+/// 注入进程——"该文件就是全局配置"语义）。
+///
+/// - 支持空格形式（下一 token 为值）与 `=` 形式（`--config-file=path`）。
+/// - 下一 token 以 `-` 开头视为缺值 → 返回 None（fail-open，交给 clap 报错）。
+/// - `--` 之后停止扫描；重复 flag 取最后一次（last-wins）。
+/// - 非 UTF-8 的 OsString 值直接构造 PathBuf，无需 utf8 转换。
+fn pre_scan_config_file(args: impl Iterator<Item = std::ffi::OsString>) -> Option<PathBuf> {
+    let mut result: Option<PathBuf> = None;
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        let Some(s) = arg.to_str() else {
+            // 非 UTF-8 token 无法匹配 flag 前缀，跳过（fail-open）
+            continue;
+        };
+        if s == "--" {
+            break;
+        }
+        if let Some(value) = s.strip_prefix("--config-file=") {
+            result = Some(PathBuf::from(value));
+        } else if let Some(value) = s.strip_prefix("--configFile=") {
+            result = Some(PathBuf::from(value));
+        } else if s == "--config-file" || s == "--configFile" {
+            match args.peek() {
+                Some(next) if next.to_str().is_some_and(|n| n.starts_with('-')) => {
+                    // 下一 token 是 option-like → 缺值，fail-open 交给 clap 报错
+                    return None;
                 }
+                Some(next) => {
+                    result = Some(PathBuf::from(next));
+                    args.next();
+                }
+                None => return None,
             }
         }
     }
+    result
+}
+
+/// 统一创建 tokio runtime（4 workers，4MB stack），避免 7 处重复构造
+fn build_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(4 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .map_err(Into::into)
+}
+
+fn validate_cli(cli: &Cli) -> std::result::Result<(), &'static str> {
+    if cli.print.is_some() && cli.command.is_some() {
+        return Err("--print cannot be used with a subcommand");
+    }
+    if matches!(cli.command, Some(Commands::Meta { .. }))
+        && (cli.print.is_some()
+            || cli.output_format.is_some()
+            || cli.max_turns.is_some()
+            || cli.bare
+            || cli.permission_mode.is_some()
+            || cli.skip_permissions
+            || cli.model.is_some()
+            || cli.effort.is_some()
+            || cli.cont
+            || cli.resume.is_some()
+            || cli.session_id.is_some()
+            || cli.session_name.is_some()
+            || cli.no_session_persistence
+            || cli.allowed_tools.is_some()
+            || cli.disallowed_tools.is_some()
+            || cli.settings.is_some()
+            || cli.config_file.is_some())
+    {
+        return Err("meta only accepts --db-path and session --json");
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum TopLevelOptionShape {
+    Flag,
+    RequiredValue,
+    OptionalValue,
+}
+
+fn top_level_option_shape(arg: &OsStr) -> Option<TopLevelOptionShape> {
+    use clap::ArgAction;
+
+    let raw = arg.to_str()?;
+    let name = raw.split_once('=').map_or(raw, |(name, _)| name);
+    let command = Cli::command();
+    command.get_arguments().find_map(|declared| {
+        let long_match = declared
+            .get_long()
+            .is_some_and(|long| name == format!("--{long}"))
+            || declared.get_all_aliases().is_some_and(|aliases| {
+                aliases
+                    .into_iter()
+                    .any(|alias| name == format!("--{alias}"))
+            });
+        let short_match = declared
+            .get_short()
+            .is_some_and(|short| name == format!("-{short}"))
+            || declared.get_all_short_aliases().is_some_and(|aliases| {
+                aliases.into_iter().any(|alias| name == format!("-{alias}"))
+            });
+        if !long_match && !short_match {
+            return None;
+        }
+        if raw.contains('=') {
+            return Some(TopLevelOptionShape::Flag);
+        }
+        if matches!(
+            declared.get_action(),
+            ArgAction::SetTrue
+                | ArgAction::SetFalse
+                | ArgAction::Count
+                | ArgAction::Help
+                | ArgAction::HelpShort
+                | ArgAction::HelpLong
+                | ArgAction::Version
+        ) {
+            return Some(TopLevelOptionShape::Flag);
+        }
+        match declared.get_num_args() {
+            Some(range) if range.min_values() == 0 => Some(TopLevelOptionShape::OptionalValue),
+            _ => Some(TopLevelOptionShape::RequiredValue),
+        }
+    })
+}
+
+/// 按已接受的顶层 grammar走到 subcommand槽位。已知 option严格消费 `Cli` 声明的值；
+/// malformed option-like token只消费自身，使后续明确的 `meta` shape保持可见，同时
+/// 不把任意 option value或普通 positional中的 `meta`误判为 command。
+fn malformed_argv_requests_meta(args: &[OsString]) -> bool {
+    let mut index = 1;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "meta" {
+            return true;
+        }
+        if arg == "--" {
+            return args.get(index + 1).is_some_and(|next| next == "meta");
+        }
+        if ["-h", "--help", "-V", "--version"]
+            .iter()
+            .any(|terminal| arg == terminal)
+        {
+            return false;
+        }
+
+        match top_level_option_shape(arg) {
+            Some(TopLevelOptionShape::Flag) => index += 1,
+            Some(TopLevelOptionShape::RequiredValue) => {
+                index += 1;
+                if args
+                    .get(index)
+                    .is_some_and(|value| !value.to_string_lossy().starts_with('-'))
+                {
+                    index += 1;
+                }
+            }
+            Some(TopLevelOptionShape::OptionalValue) => {
+                index += 1;
+                if args
+                    .get(index)
+                    .is_some_and(|value| !value.to_string_lossy().starts_with('-'))
+                {
+                    if args[index] == "meta"
+                        && args.get(index + 1).is_some_and(|next| next == "session")
+                    {
+                        return true;
+                    }
+                    index += 1;
+                }
+            }
+            None if arg.to_string_lossy().starts_with('-') => index += 1,
+            None => return false,
+        }
+    }
+    false
+}
+
+fn argv_requests_meta(args: &[OsString]) -> bool {
+    match Cli::try_parse_from(args) {
+        Ok(cli) => matches!(cli.command, Some(Commands::Meta { .. })),
+        Err(_) => malformed_argv_requests_meta(args),
+    }
+}
+
+fn argv_requests_meta_json(args: &[OsString]) -> bool {
+    args.iter().any(|arg| arg == OsStr::new("--json"))
+}
+
+fn emit_meta_outcome(outcome: cli_meta::MetaCommandOutcome) -> Result<()> {
+    if let Some(output) = outcome.stdout {
+        print!("{output}");
+    }
+    if let Some(error) = outcome.stderr {
+        eprint!("{error}");
+    }
+    if outcome.exit_code != 0 {
+        std::process::exit(i32::from(outcome.exit_code));
+    }
+    Ok(())
+}
+
+fn try_run_meta_before_configuration(args: &[OsString]) -> Option<Result<()>> {
+    if !argv_requests_meta(args) {
+        return None;
+    }
+    let json = argv_requests_meta_json(args);
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(_) => return Some(emit_meta_outcome(cli_meta::invalid_argument_outcome(json))),
+    };
+    if validate_cli(&cli).is_err() {
+        return Some(emit_meta_outcome(cli_meta::invalid_argument_outcome(json)));
+    }
+    let Some(Commands::Meta { action }) = cli.command else {
+        return Some(emit_meta_outcome(cli_meta::invalid_argument_outcome(json)));
+    };
+    let runtime = match build_runtime() {
+        Ok(runtime) => runtime,
+        Err(_) => return Some(emit_meta_outcome(cli_meta::internal_error_outcome(json))),
+    };
+    let outcome = match action {
+        MetaAction::Session { session_id, json } => {
+            runtime.block_on(cli_meta::run_meta_session(cli.db_path, session_id, json))
+        }
+    };
+    Some(emit_meta_outcome(outcome))
 }
 
 // ─── 入口 ──────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
-    // Set jemalloc MALLOC_CONF env vars BEFORE any allocation.
-    // Must be the very first line — jemalloc reads these during init.
+    let args: Vec<OsString> = std::env::args_os().collect();
+    if cli_workflow::argv_requests_workflow(&args) {
+        return cli_workflow::run_before_configuration(&args);
+    }
+    if argv_requests_meta(&args) {
+        return try_run_meta_before_configuration(&args)
+            .expect("Meta argv detection and dispatch must agree");
+    }
+
+    // Set jemalloc MALLOC_CONF env vars before ordinary runtime startup.
     peri_tui::alloc_config::init_alloc_conf();
 
+    // 预扫描 argv 重定向全局配置路径，必须在 env 注入之前（gate 决策 Option A）：
+    // --config-file 文件内的 env 字段需注入进程。fail-open：扫描不到时保持
+    // 默认路径，后续 clap 解析报错兜底。
+    peri_tui::config::set_global_config_path(pre_scan_config_file(std::env::args_os().skip(1)));
+
     // 最先注入环境变量（进程环境变量优先）
-    // 优先级：进程环境 > Peri 配置 > Claude Code 配置
-    inject_env_from_settings();
-    inject_env_from_claude_settings();
+    // 优先级：进程环境 > 项目本地配置 > Peri 全局配置 > Claude Code 配置
+    // 项目本地配置（./.peri/settings.json），项目覆盖全局
+    if let Some(path) = peri_tui::config::workspace_config_path() {
+        inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
+    }
+    inject_env_from_settings(); // ~/.peri/settings.json
+    inject_env_from_claude_settings(); // ~/.claude/settings.json
 
     let cli = Cli::parse();
+    if let Err(message) = validate_cli(&cli) {
+        Cli::command()
+            .error(clap::error::ErrorKind::ArgumentConflict, message)
+            .exit();
+    }
+
+    // 以 clap 解析结果为准（幂等；prescan 与 clap 同源 argv，二者一致）
+    peri_tui::config::set_global_config_path(cli.config_file.clone());
 
     // -p/--print 模式（优先级高于子命令）
     if cli.print.is_some() {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-            .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-            .enable_all()
-            .build()?;
+        // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+        let rt = build_runtime()?;
         return rt.block_on(cli_print::run_print(
             cli.print.and_then(|o| o),
             cli.output_format,
@@ -366,12 +666,12 @@ fn main() -> Result<()> {
             cli.disallowed_tools.unwrap_or_default(),
             cli.settings,
             None,
+            cli.db_path,
         ));
     }
 
     match cli.command {
-        None => run_tui(TuiOptions {
-            approve: cli.approve,
+        None => match run_tui(TuiOptions {
             permission_mode: cli.permission_mode,
             skip_permissions: cli.skip_permissions,
             model: cli.model,
@@ -383,25 +683,40 @@ fn main() -> Result<()> {
             settings: cli.settings,
             allowed_tools: cli.allowed_tools.unwrap_or_default(),
             disallowed_tools: cli.disallowed_tools.unwrap_or_default(),
-        }),
+            db_path: cli.db_path,
+        }) {
+            Ok(()) => Ok(()),
+            Err(_) => std::process::exit(1),
+        },
         Some(Commands::Acp {
             cwd,
             model: _,
             agent: _,
         }) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-                .enable_all()
-                .build()?;
-            rt.block_on(acp_stdio::run_acp_stdio(cwd))
+            // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+            let rt = build_runtime()?;
+            rt.block_on(async {
+                // stdio host 位于 ACP 层（部署装配点），cli 仅作为启动入口调用；
+                // thread 存储与 middlewares 具体实现（CronScheduler / McpClientPool /
+                // 插件数据等）由 host 装配面（assemble_server_config）内部构造
+                // （§0 依赖方向，docs/top-level.md §7/§8）；cli 只提供协议面输入。
+                peri_acp::host::stdio::run_acp_stdio(StdioInput {
+                    cwd,
+                    permission_mode: peri_acp_types::permission::SharedPermissionMode::new(
+                        peri_acp_types::permission::PermissionMode::Bypass,
+                    ),
+                    db_path: cli.db_path,
+                })
+                .await
+            })
+        }
+        Some(Commands::Meta { .. }) => unreachable!("Meta 在配置读取前完成 dispatch"),
+        Some(Commands::Workflow { .. }) => {
+            unreachable!("Workflow 在配置读取前完成 dispatch")
         }
         Some(Commands::Update) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-                .enable_all()
-                .build()?;
+            // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+            let rt = build_runtime()?;
             rt.block_on(async {
                 match peri_tui::update::run_update().await {
                     Ok(tag) => println!("Updated to {tag}"),
@@ -413,14 +728,26 @@ fn main() -> Result<()> {
                 Ok(())
             })
         }
-        Some(Commands::Sync { action, server }) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-                .enable_all()
-                .build()?;
+        Some(Commands::Sync {
+            action,
+            server,
+            keystore_path,
+        }) => {
+            // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+            let rt = build_runtime()?;
+            let keystore_path = keystore_path.as_deref().map(std::path::Path::new);
             rt.block_on(async {
                 match action {
+                    SyncAction::Device { action } => {
+                        peri_tui::sync::device_cli::dispatch(action, keystore_path)
+                    }
+                    SyncAction::Send { to } => {
+                        peri_tui::sync::channel_flow::run_send_cli(&server, keystore_path, &to)
+                            .await
+                    }
+                    SyncAction::Receive => {
+                        peri_tui::sync::channel_flow::run_receive_cli(&server, keystore_path).await
+                    }
                     SyncAction::Sender => peri_tui::sync::run_sync_sender(&server).await,
                     SyncAction::Receiver => peri_tui::sync::run_sync_receiver(&server).await,
                 }
@@ -432,11 +759,8 @@ fn main() -> Result<()> {
             })
         }
         Some(Commands::Plugin { action }) => {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-                .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-                .enable_all()
-                .build()?;
+            // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+            let rt = build_runtime()?;
             rt.block_on(async {
                 match action {
                     PluginAction::List { json } => cli_plugin::run_plugin_list(json),
@@ -446,8 +770,55 @@ fn main() -> Result<()> {
                     PluginAction::Uninstall { plugin, scope } => {
                         cli_plugin::run_plugin_uninstall(&plugin, scope.as_deref()).await
                     }
+                    PluginAction::Enable { plugin, scope } => {
+                        let scope = scope.as_deref().unwrap_or("user");
+                        cli_plugin::run_plugin_enable(&plugin, scope)
+                    }
+                    PluginAction::Disable { plugin, scope } => {
+                        let scope = scope.as_deref().unwrap_or("user");
+                        cli_plugin::run_plugin_disable(&plugin, scope)
+                    }
+                    PluginAction::Update { plugin, scope } => {
+                        let scope = scope.as_deref().unwrap_or("user");
+                        cli_plugin::run_plugin_update(&plugin, scope).await
+                    }
+                    PluginAction::Info { plugin } => cli_plugin::run_plugin_info(&plugin),
+                    PluginAction::Search { query } => cli_plugin::run_plugin_search(&query),
+                    PluginAction::Cleanup => {
+                        let claude_dir = dirs_next::home_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join(".claude");
+                        cli_plugin::run_plugin_cleanup(&claude_dir).await
+                    }
+                    PluginAction::Marketplace { action } => match action {
+                        MarketplaceAction::Add { source } => {
+                            cli_plugin::run_marketplace_add(&source).await
+                        }
+                        MarketplaceAction::List => cli_plugin::run_marketplace_list(),
+                        MarketplaceAction::Remove { name } => {
+                            cli_plugin::run_marketplace_remove(&name)
+                        }
+                        MarketplaceAction::Update { name } => {
+                            cli_plugin::run_marketplace_update(&name).await
+                        }
+                    },
                 }
             })
+        }
+        Some(Commands::Web { host, port }) => {
+            let mut config = peri_web_pty::config::Config::from_env();
+            config.host = host;
+            config.port = port;
+            // peri web 模式下默认启动 peri 对话
+            if config.initial_cmd.is_none() {
+                config.initial_cmd = Some("peri".to_string());
+            }
+            let rt = build_runtime()?;
+            rt.block_on(async { peri_web_pty::start_server(config).await })
+                .map_err(|e| {
+                    eprintln!("Web PTY server error: {e:#}");
+                    std::process::exit(1);
+                })
         }
     }
 }
@@ -457,7 +828,6 @@ fn main() -> Result<()> {
 /// TUI 模式启动选项
 #[allow(dead_code)] // 部分 CLI 桥接字段尚未接入
 struct TuiOptions {
-    approve: bool,
     permission_mode: Option<String>,
     skip_permissions: bool,
     model: Option<String>,
@@ -469,6 +839,15 @@ struct TuiOptions {
     settings: Option<String>,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
+    db_path: Option<PathBuf>,
+}
+
+fn propagate_tui_result(result: Result<()>) -> Result<()> {
+    if let Err(e) = result {
+        eprintln!("Error: {e}");
+        return Err(e);
+    }
+    Ok(())
 }
 
 fn run_tui(opts: TuiOptions) -> Result<()> {
@@ -477,566 +856,47 @@ fn run_tui(opts: TuiOptions) -> Result<()> {
         inject_settings_override(settings_path);
     }
 
-    if opts.approve {
-        std::env::set_var("YOLO_MODE", "false");
-    }
-
-    if opts.skip_permissions {
-        std::env::set_var("YOLO_MODE", "true");
-    }
-
     // 在创建 tokio runtime 之前初始化 tracing，确保 reqwest::blocking::Client
     // 的内部 runtime 与应用 runtime 完全隔离，避免嵌套 runtime drop panic。
-    let _telemetry = peri_agent::telemetry::init_tracing("agent-tui");
+    let _telemetry = peri_acp::telemetry::init_tracing("agent-tui");
 
     // 安装自定义 panic hook，必须在 enable_raw_mode() 之前，
     // 否则 Rust 默认 panic hook 的 stderr 输出会破坏 TUI 画面。
     let panic_notify_rx = init_panic_notify();
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4) // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费）
-        .thread_stack_size(4 * 1024 * 1024) // 4 MB (default: 8 MB)
-        .enable_all()
-        .build()?;
+    // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
+    let rt = build_runtime()?;
 
     let result = rt.block_on(async {
-        // 初始化终端
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste,
-            EnableFocusChange
-        )?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        // 运行应用
-        let result = run_app(&mut terminal, &opts, panic_notify_rx).await;
-
-        // 恢复终端
-        disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            DisableFocusChange
-        )?;
-        terminal.show_cursor()?;
-
-        result
+        // ratatui-kit fullscreen() 自行管理 raw mode / alternate screen / 事件循环。
+        // 外层不做任何终端操作。
+        let launch_opts = peri_tui::launch::TuiLaunchOptions {
+            permission_mode: opts.permission_mode.clone(),
+            skip_permissions: opts.skip_permissions,
+            model: opts.model.clone(),
+            effort: opts.effort.clone(),
+            continue_session: opts.continue_session,
+            resume_session: opts.resume_session.clone(),
+            session_id: opts.session_id.clone(),
+            session_name: opts.session_name.clone(),
+            settings: opts.settings.clone(),
+            allowed_tools: opts.allowed_tools.clone(),
+            disallowed_tools: opts.disallowed_tools.clone(),
+            db_path: opts.db_path.clone(),
+        };
+        peri_tui::kit::entry::run_kit_fullscreen(launch_opts, panic_notify_rx).await
     });
 
     // 先 drop rt（关闭所有 tokio 任务），再 drop _telemetry
     drop(rt);
     drop(_telemetry);
 
-    if let Err(e) = result {
-        eprintln!("Error: {e}");
-    }
-
-    Ok(())
-}
-
-async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    tui_opts: &TuiOptions,
-    panic_notify_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
-) -> Result<()> {
-    let mut app = App::new().await;
-
-    // 接入 panic hook 通知通道
-    app.services.panic_notify_rx = Some(panic_notify_rx);
-
-    // 根据环境变量/CLI 参数设置初始权限模式
-    {
-        use peri_middlewares::prelude::PermissionMode;
-        let initial_mode = if tui_opts.skip_permissions {
-            PermissionMode::Bypass
-        } else if let Some(ref mode_str) = tui_opts.permission_mode {
-            match mode_str.as_str() {
-                "bypass" => PermissionMode::Bypass,
-                "default" => PermissionMode::Default,
-                "dont-ask" => PermissionMode::DontAsk,
-                "accept-edit" => PermissionMode::AcceptEdit,
-                "auto-mode" => PermissionMode::AutoMode,
-                _ => {
-                    if std::env::var("YOLO_MODE")
-                        .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
-                        .unwrap_or(true)
-                    {
-                        PermissionMode::Bypass
-                    } else {
-                        PermissionMode::Default
-                    }
-                }
-            }
-        } else if tui_opts.approve {
-            PermissionMode::Default
-        } else if std::env::var("YOLO_MODE")
-            .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
-            .unwrap_or(true)
-        {
-            PermissionMode::Bypass
-        } else {
-            PermissionMode::Default
-        };
-        app.services.permission_mode.store(initial_mode);
-    }
-
-    // --model 覆盖
-    if let Some(ref model_str) = tui_opts.model {
-        if let Some(ref config) = app.services.peri_config {
-            if let Some(new_provider) =
-                peri_tui::app::agent::LlmProvider::from_config_for_alias(config, model_str)
-            {
-                tracing::info!(model = %new_provider.model_name(), "CLI --model 覆盖生效");
-            }
-        }
-    }
-
-    // 会话恢复：-c 恢复当前目录最近会话，-r <id> 恢复指定会话
-    if let Some(ref session_id) = tui_opts.resume_session {
-        tracing::info!(session_id = %session_id, "-r: 恢复指定会话");
-        app.open_thread(session_id.clone());
-    } else if tui_opts.continue_session {
-        let store = app.services.thread_store.clone();
-        let cwd = app.services.cwd.clone();
-        let thread_id = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let threads = store.list_threads().await.ok()?;
-                threads.into_iter().find(|t| t.cwd == cwd).map(|t| t.id)
-            })
-        });
-        if let Some(tid) = thread_id {
-            tracing::info!(thread_id = %tid, "-c: 恢复最近会话");
-            app.open_thread(tid);
-        } else {
-            tracing::info!("-c: 当前目录无历史会话，创建新会话");
-        }
-    }
-
-    // 检测是否需要 Setup 向导
-    if let Some(ref cfg) = app.services.peri_config {
-        if peri_tui::app::setup_wizard::needs_setup(&cfg.config) {
-            app.global_ui.setup_wizard = Some(peri_tui::app::SetupWizardPanel::new());
-        }
-    } else if peri_tui::app::LlmProvider::from_env().is_none() {
-        // 无配置文件且无法从环境变量获取 provider → 需要 setup
-        app.global_ui.setup_wizard = Some(peri_tui::app::SetupWizardPanel::new());
-    }
-
-    // 后台初始化 MCP 连接池（不阻塞 UI）
-    app.spawn_mcp_init();
-
-    // 加载已启用插件数据
-    {
-        let claude_dir = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".claude");
-        app.services.plugin_data = Some(peri_middlewares::plugin::load_enabled_plugins_aggregated(
-            &claude_dir,
-        ));
-        // 将插件命令注册到所有 session 的 CommandRegistry
-        let plugin_commands = app
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_commands.clone())
-            .unwrap_or_default();
-        // 将插件 skills 追加到所有 session 的 skill 列表
-        let plugin_skill_dirs = app
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_skill_dirs.clone())
-            .unwrap_or_default();
-        let plugin_skills = peri_middlewares::skills::list_skills(&plugin_skill_dirs);
-        app.session_mgr
-            .current_mut()
-            .commands
-            .command_registry
-            .register_plugin_commands(plugin_commands.clone());
-        let session = app.session_mgr.current_mut();
-        let existing_names: std::collections::HashSet<String> = session
-            .commands
-            .skills
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-        for skill in &plugin_skills {
-            if !existing_names.contains(&skill.name) {
-                session.commands.skills.push(skill.clone());
-            }
-        }
-    }
-
-    // ── Step 6-a: Setup ACP Server + Client ──────────────────────────────
-    {
-        let provider = app
-            .services
-            .peri_config
-            .as_ref()
-            .and_then(peri_tui::app::LlmProvider::from_config)
-            .or_else(peri_tui::app::LlmProvider::from_env);
-
-        if let Some(provider) = provider {
-            // Gather plugin configs
-            let plugin_skill_dirs = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_skill_dirs.clone())
-                .unwrap_or_default();
-            let plugin_agent_dirs = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_agent_dirs.clone())
-                .unwrap_or_default();
-            let plugin_lsp_servers = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_lsp_servers.clone())
-                .unwrap_or_default();
-            let plugin_hooks = app
-                .services
-                .plugin_data
-                .as_ref()
-                .map(|pd| pd.all_hooks.clone())
-                .unwrap_or_default();
-
-            // Build hook groups from plugin hooks + global hooks + local hooks
-            let mut hook_groups: Vec<Vec<peri_middlewares::hooks::RegisteredHook>> = Vec::new();
-            if !plugin_hooks.is_empty() {
-                hook_groups.push(plugin_hooks);
-            }
-            let global_hooks = peri_middlewares::hooks::loader::load_global_settings_hooks();
-            if !global_hooks.is_empty() {
-                hook_groups.push(global_hooks);
-            }
-            let local_hooks =
-                peri_middlewares::hooks::loader::load_settings_local_hooks(&app.services.cwd);
-            if !local_hooks.is_empty() {
-                hook_groups.push(local_hooks);
-            }
-
-            let flat_hooks: Vec<peri_middlewares::hooks::RegisteredHook> =
-                hook_groups.iter().flatten().cloned().collect();
-            tracing::info!(
-                groups = hook_groups.len(),
-                total_hooks = flat_hooks.len(),
-                "Hook groups assembled for ACP server"
-            );
-
-            // Create session-level tool_search_index and shared_tools
-            let tool_search_index = Arc::new(peri_middlewares::tool_search::ToolSearchIndex::new());
-            let shared_tools = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
-
-            let server_config = AcpServerConfig {
-                provider: Arc::new(parking_lot::RwLock::new(provider.clone())),
-                peri_config: Arc::new(parking_lot::RwLock::new(
-                    app.services.peri_config.clone().unwrap_or_default(),
-                )),
-                permission_mode: app.services.permission_mode.clone(),
-                cron_scheduler: Some(app.services.cron.scheduler.clone()),
-                mcp_pool: app.services.mcp_pool.clone(),
-                channel_state: app.services.channel_state.clone(),
-                plugin_skill_dirs,
-                plugin_agent_dirs,
-                plugin_hooks: flat_hooks,
-                hook_groups,
-                plugin_lsp_servers,
-                tool_search_index: tool_search_index.clone(),
-                shared_tools: shared_tools.clone(),
-                thread_store: app.services.thread_store.clone(),
-                langfuse_session: {
-                    if let Some(config) = peri_acp::langfuse::LangfuseConfig::from_env() {
-                        tracing::info!("Langfuse tracing enabled (TUI mode)");
-                        peri_acp::langfuse::LangfuseSession::new(config)
-                            .await
-                            .map(Arc::new)
-                    } else {
-                        None
-                    }
-                },
-                config_path: peri_tui::config::config_path(),
-            };
-
-            let (client_transport, server_transport) = mpsc_transport_pair();
-            tokio::spawn(async move {
-                run_acp_server(Arc::new(server_transport), server_config).await;
-            });
-
-            let (acp_client, notification_rx) = AcpTuiClient::new(client_transport);
-            // Spawn notification pump
-            acp_client.spawn_pump();
-            // Wire notification receiver to active session's AgentComm
-            app.session_mgr.current_mut().agent.acp_notification_rx = Some(notification_rx);
-            app.acp_client = Some(acp_client);
-        }
-    }
-
-    // Spinner tick 驱动：每次渲染前推进一帧
-    app.session_mgr.current_mut().spinner_state.advance_tick();
-
-    // 初始全量绘制一次
-    terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
-    let mut last_render = Instant::now();
-
-    /// loading 动画帧率限制间隔（约 30 FPS）。
-    /// 仅在 loading=true 且无用户事件的 poll 超时路径生效，
-    /// 用户交互（键盘/鼠标/resize）始终立即渲染。
-    const TARGET_FRAME_INTERVAL: Duration = Duration::from_millis(33);
-
-    'event_loop: loop {
-        // 推进 Spinner 动画帧
-        app.session_mgr.current_mut().spinner_state.advance_tick();
-        // 轮询 agent 结果
-        let mut agent_updated = false;
-        agent_updated |= app.poll_agent();
-        agent_updated |= app.poll_at_mention();
-        // 轮询后台事件（MCP OAuth 等）
-        let bg_updated = app.poll_background_events();
-        // 轮询 panic hook 通知
-        let panic_updated = app.poll_panic_notifications();
-        // 检查 cron 定时触发
-        app.poll_cron_triggers();
-
-        match event::next_event(&mut app).await? {
-            Some(action) => match action {
-                event::Action::Quit => break 'event_loop,
-                event::Action::Submit(input) => {
-                    app.submit_message(input);
-                    terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
-                    last_render = Instant::now();
-                }
-                event::Action::Redraw => {
-                    // 有用户交互（键盘/鼠标/resize）→ 始终重绘
-                    terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
-                    last_render = Instant::now();
-                }
-            },
-            None => {
-                // 无用户事件（poll 超时）：在阻塞结束后重新读取缓存版本
-                // 这样能捕获渲染线程在等待期间发出的更新
-                let cache_version = app
-                    .session_mgr
-                    .current_mut()
-                    .messages
-                    .render_cache
-                    .read()
-                    .version;
-                let cache_updated =
-                    cache_version != app.session_mgr.current_mut().messages.last_render_version;
-                let loading = app.session_mgr.current_mut().ui.loading;
-                let should_render =
-                    cache_updated || agent_updated || bg_updated || panic_updated || loading;
-                if should_render {
-                    let now = Instant::now();
-                    // loading 路径：限制帧率到 TARGET_FRAME_INTERVAL，降低 CPU 开销
-                    // 非 loading 路径（cache_updated/agent_updated/bg_updated）始终立即渲染
-                    if !loading || now.duration_since(last_render) >= TARGET_FRAME_INTERVAL {
-                        terminal.draw(|f| ui::main_ui::render(f, &mut app))?;
-                        last_render = now;
-                    }
-                }
-            }
-        }
-        // /exit 或 /quit 命令设置的退出标志
-        if app.global_ui.quit_requested {
-            break 'event_loop;
-        }
-    }
-
-    // Fire SessionEnd hooks before shutdown
-    {
-        let mut hooks = app
-            .services
-            .plugin_data
-            .as_ref()
-            .map(|pd| pd.all_hooks.clone())
-            .unwrap_or_default();
-        hooks.extend(peri_middlewares::hooks::loader::load_global_settings_hooks());
-        hooks.extend(peri_middlewares::hooks::loader::load_settings_local_hooks(
-            &app.services.cwd,
-        ));
-        if !hooks.is_empty() {
-            let cwd = app.services.cwd.clone();
-            let provider_name = app.services.provider_name.clone();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    peri_middlewares::hooks::middleware::fire_standalone_lifecycle_hooks(
-                        &hooks,
-                        peri_middlewares::hooks::types::HookEvent::SessionEnd,
-                        &cwd,
-                        "",
-                        "",
-                        &provider_name,
-                        None,
-                    )
-                    .await;
-                })
-            });
-        }
-    }
-
-    // 关闭 MCP 连接池（断开所有 MCP 服务器连接，清理子进程）
-    if let Some(pool) = app.services.mcp_pool.take() {
-        tracing::info!("正在关闭 MCP 连接池...");
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(pool.shutdown()));
-        tracing::info!("MCP 连接池已关闭");
-    }
-
-    // 等待最后一次 Langfuse flush 完成，防止 runtime drop 前 batcher 数据丢失
-    if let Some(handle) = app
-        .session_mgr
-        .current_mut()
-        .langfuse
-        .langfuse_flush_handle
-        .take()
-    {
-        let _ = handle.await;
-    }
-
-    Ok(())
+    propagate_tui_result(result)
 }
 
 #[cfg(test)]
 mod cli_integration_test;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_temp_file(content: &str) -> tempfile::TempPath {
-        use std::io::Write;
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(content.as_bytes()).unwrap();
-        file.into_temp_path()
-    }
-
-    #[test]
-    fn test_inject_from_config_env() {
-        // 测试 config.env 标准格式
-        let path = make_temp_file(r#"{"config": {"env": {"TEST_C1": "v1"}}}"#);
-        inject_env_from_file(&path, &[&["config", "env"]]);
-        assert_eq!(std::env::var("TEST_C1").unwrap(), "v1");
-        std::env::remove_var("TEST_C1");
-    }
-
-    #[test]
-    fn test_inject_from_top_level_env() {
-        // 测试顶层 env 格式（兼容旧格式/Claude Code 格式）
-        let path = make_temp_file(r#"{"env": {"TEST_T1": "v2"}}"#);
-        inject_env_from_file(&path, &[&["env"]]);
-        assert_eq!(std::env::var("TEST_T1").unwrap(), "v2");
-        std::env::remove_var("TEST_T1");
-    }
-
-    #[test]
-    fn test_inject_fallback_order() {
-        // 测试优先 config.env 再回退顶层 env
-        // 只存在顶层 env 时应该回退成功
-        let path = make_temp_file(r#"{"env": {"TEST_FB1": "from_fallback"}}"#);
-        inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
-        assert_eq!(std::env::var("TEST_FB1").unwrap(), "from_fallback");
-        std::env::remove_var("TEST_FB1");
-    }
-
-    #[test]
-    fn test_inject_config_env_priority_over_top_level() {
-        // config.env 存在时优先使用，不回退到顶层 env
-        let path = make_temp_file(
-            r#"{"config": {"env": {"TEST_PRI": "from_config"}}, "env": {"TEST_PRI": "from_top"}}"#,
-        );
-        inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
-        assert_eq!(std::env::var("TEST_PRI").unwrap(), "from_config");
-        std::env::remove_var("TEST_PRI");
-    }
-
-    #[test]
-    fn test_process_env_priority() {
-        // 进程环境变量存在时不被 settings.json 覆盖
-        std::env::set_var("TEST_PROC_PRI", "from_process");
-        let path = make_temp_file(r#"{"env": {"TEST_PROC_PRI": "from_file"}}"#);
-        inject_env_from_file(&path, &[&["env"]]);
-        assert_eq!(std::env::var("TEST_PROC_PRI").unwrap(), "from_process");
-        std::env::remove_var("TEST_PROC_PRI");
-    }
-
-    #[test]
-    fn test_skip_non_string_values() {
-        // 非字符串值应跳过不 panic
-        let path = make_temp_file(r#"{"env": {"TEST_NUM": 123, "TEST_STR": "ok"}}"#);
-        inject_env_from_file(&path, &[&["env"]]);
-        // 数字值不应被注入
-        assert!(std::env::var("TEST_NUM").is_err());
-        assert_eq!(std::env::var("TEST_STR").unwrap(), "ok");
-        std::env::remove_var("TEST_STR");
-    }
-
-    #[test]
-    fn test_no_file_no_panic() {
-        // 文件不存在时不应 panic
-        let path = std::path::PathBuf::from("/nonexistent/path/settings.json");
-        inject_env_from_file(&path, &[&["env"]]);
-    }
-
-    #[test]
-    fn test_no_env_field_no_panic() {
-        // JSON 中没有 env 字段时不应 panic
-        let path = make_temp_file(r#"{"other": "data"}"#);
-        inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
-    }
-
-    /// 端到端测试：模拟顶层 env 格式 → 注入进程环境 → LlmProvider::from_env() 可用
-    #[test]
-    fn test_e2e_top_level_env_to_provider() {
-        // 保存可能被覆盖的环境变量
-        let save_keys = [
-            "TEST_E2E_API_KEY",
-            "TEST_E2E_BASE_URL",
-            "MODEL_PROVIDER",
-        ];
-        let saved: Vec<(&str, Option<String>)> = save_keys
-            .iter()
-            .map(|k| (*k, std::env::var(k).ok()))
-            .collect();
-
-        // 创建一个顶层 env 格式的配置文件（模拟当前 ~/.peri/settings.json 的格式）
-        let path = make_temp_file(
-            r#"{"env": {"TEST_E2E_API_KEY": "sk-e2e-test-key", "TEST_E2E_BASE_URL": "https://e2e-test.example.com/v1"}}"#,
-        );
-
-        // 调用注入函数（使用 inject_env_from_settings 相同的查找策略）
-        inject_env_from_file(&path, &[&["config", "env"], &["env"]]);
-
-        // 验证环境变量已注入
-        assert_eq!(
-            std::env::var("TEST_E2E_API_KEY").unwrap(),
-            "sk-e2e-test-key"
-        );
-        assert_eq!(
-            std::env::var("TEST_E2E_BASE_URL").unwrap(),
-            "https://e2e-test.example.com/v1"
-        );
-
-        // 清理测试环境变量
-        std::env::remove_var("TEST_E2E_API_KEY");
-        std::env::remove_var("TEST_E2E_BASE_URL");
-
-        // 恢复之前保存的环境变量
-        for (key, value) in saved {
-            match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-}
-// test
+#[path = "main_test.rs"]
+mod tests;

@@ -1,98 +1,240 @@
 use super::*;
+use peri_acp_types::system_reminder::{
+    ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
+};
+use peri_agent::agent::react::AgentOutput;
 use peri_agent::agent::state::AgentState;
-use peri_agent::goal::{GoalStateView, GoalStatus, GoalViewSnapshot};
-use std::sync::{Arc, Mutex};
+use peri_agent::goal::{GoalController, GoalStatus, GoalViewSnapshot};
+use peri_agent::middleware::r#trait::Middleware;
 
-/// Mock GoalStateView — 测试用，避免 peri-middlewares → peri-acp 依赖
-struct MockGoalStateView {
-    snapshot_data: Mutex<GoalViewSnapshot>,
-    objective_just_updated: Mutex<bool>,
+struct MockController {
+    snapshot: parking_lot::Mutex<GoalViewSnapshot>,
+    continuation_count: std::sync::atomic::AtomicU64,
 }
 
-impl MockGoalStateView {
-    fn new() -> Self {
-        Self {
-            snapshot_data: Mutex::new(GoalViewSnapshot::default()),
-            objective_just_updated: Mutex::new(false),
-        }
+#[async_trait]
+impl GoalController for MockController {
+    async fn create_goal(&self, _objective: String) -> Result<(), String> {
+        Ok(())
     }
-
-    fn set_goal(&self, objective: &str, budget: Option<u64>) {
-        let mut snap = self.snapshot_data.lock().unwrap();
-        snap.objective = Some(objective.to_string());
-        snap.status = Some(GoalStatus::Active);
-        snap.token_budget = budget;
-        *self.objective_just_updated.lock().unwrap() = true;
+    async fn complete_goal(&self) -> Result<(), String> {
+        Ok(())
     }
-}
-
-impl GoalStateView for MockGoalStateView {
+    async fn block_goal(&self, _reason: String) -> Result<(), String> {
+        Ok(())
+    }
+    async fn clear_goal(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn increment_continuation(&self) -> Result<(), String> {
+        self.continuation_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
     fn snapshot(&self) -> GoalViewSnapshot {
-        self.snapshot_data.lock().unwrap().clone()
-    }
-
-    fn consume_objective_updated(&self) -> bool {
-        let mut guard = self.objective_just_updated.lock().unwrap();
-        let was_set = *guard;
-        *guard = false;
-        was_set
+        self.snapshot.lock().clone()
     }
 }
 
-fn make_middleware() -> (GoalMiddleware, Arc<MockGoalStateView>) {
-    let view: Arc<MockGoalStateView> = Arc::new(MockGoalStateView::new());
-    let middleware = GoalMiddleware::new(view.clone());
-    (middleware, view)
+fn make_active_snapshot() -> GoalViewSnapshot {
+    GoalViewSnapshot {
+        objective: Some("测试目标".to_string()),
+        status: Some(GoalStatus::Active),
+        token_budget: None,
+        tokens_used: 0,
+        ..Default::default()
+    }
+}
+
+fn make_complete_snapshot() -> GoalViewSnapshot {
+    GoalViewSnapshot {
+        status: Some(GoalStatus::Complete),
+        ..make_active_snapshot()
+    }
+}
+
+#[test]
+fn test_render_steering_escalates() {
+    let r1 = GoalMiddleware::render_steering("目标", 1);
+    assert!(r1.contains("Decide"));
+
+    let r2 = GoalMiddleware::render_steering("目标", 2);
+    assert!(r2.contains("must call"));
+
+    let r3 = GoalMiddleware::render_steering("目标", 3);
+    assert!(r3.contains("Attention"));
+}
+
+#[test]
+fn test_render_steering_contains_objective() {
+    let r = GoalMiddleware::render_steering("完成重构", 1);
+    assert!(r.contains("完成重构"));
+}
+
+#[test]
+fn test_collect_tools_returns_goal_tool() {
+    let controller = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    }) as Arc<dyn GoalController>;
+    let mw = GoalMiddleware::new(controller, None);
+
+    let tools = Middleware::collect_tools(&mw, "/tmp");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name(), "goal");
 }
 
 #[tokio::test]
-async fn test_before_model_无_goal_不注入() {
-    let (middleware, _view) = make_middleware();
-    let mut state = AgentState::with_messages("/tmp".to_string(), vec![]);
-    let initial_len = state.messages().len();
+async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
+    let controller = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    });
+    let mw = GoalMiddleware::new(controller.clone(), None);
+    let mut state = AgentState::new("/tmp");
+    let output = AgentOutput::new("我完成了", 1);
 
-    middleware.before_model(&mut state).await.unwrap();
+    let result = Middleware::after_agent(&mw, &mut state, &output)
+        .await
+        .unwrap();
 
-    assert_eq!(state.messages().len(), initial_len);
+    // 设 block_continue 触发 executor 续跑
+    assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
+    assert_eq!(
+        controller
+            .continuation_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    // 注入路径：v2 MessageQueue 应收到 1 条 Defer（GoalSteering）
+    let drained = state.v2_queue().drain_all();
+    assert_eq!(drained.len(), 1, "应 push 1 条 goal steering Defer 消息");
+    assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
+    assert_eq!(
+        drained[0].source,
+        peri_agent::session::MessageSource::GoalSteering
+    );
+    let reminder = match &drained[0].payload {
+        peri_agent::session::QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
+        other => panic!("expected canonical reminder, got {other:?}"),
+    };
+    assert_eq!(reminder.category, ReminderCategory::Guidance);
+    assert_eq!(reminder.source.0, "goal");
+    assert_eq!(reminder.kind, "steering");
+    assert_eq!(reminder.severity, ReminderSeverity::Warning);
+    assert_eq!(reminder.delivery, ReminderDelivery::Required);
+    assert!(reminder.audiences.contains(ReminderAudience::Model));
+    assert!(reminder.audiences.contains(ReminderAudience::Automation));
 }
 
 #[tokio::test]
-async fn test_before_model_set_goal_后注入_steering() {
-    let (middleware, view) = make_middleware();
-    view.set_goal("完成模块重构", Some(200_000));
+async fn test_after_agent_no_goal_放行_不注入() {
+    let controller = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(GoalViewSnapshot::default()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    }) as Arc<dyn GoalController>;
+    let mw = GoalMiddleware::new(controller, None);
+    let mut state = AgentState::new("/tmp");
+    let output = AgentOutput::new("普通回答", 1);
 
-    let mut state = AgentState::with_messages("/tmp".to_string(), vec![]);
-    middleware.before_model(&mut state).await.unwrap();
+    let result = Middleware::after_agent(&mw, &mut state, &output)
+        .await
+        .unwrap();
 
-    // 注入了一条 Human 消息
-    assert_eq!(state.messages().len(), 1);
-    let msg = &state.messages()[0];
-    assert!(matches!(msg, BaseMessage::Human { .. }));
-    let text = msg.content();
-    assert!(text.contains("完成模块重构"));
-    assert!(text.contains("200000"));
+    assert!(
+        result.block_continue.is_none(),
+        "无 goal 时不应设 block_continue"
+    );
+    // 无 goal 时 queue 应为空
+    let drained = state.v2_queue().drain_all();
+    assert!(drained.is_empty(), "无 goal 时不应 push 任何消息");
 }
 
 #[tokio::test]
-async fn test_before_model_注入后_consume_objective_updated() {
-    let (middleware, view) = make_middleware();
-    view.set_goal("测试", None);
+async fn test_after_agent_existing_block_continue_不干预() {
+    // HookMiddleware 等前置中间件已设 block_continue 时，
+    // GoalMiddleware 必须尊重优先级，不覆盖也不重复注入 steering
+    let controller = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    }) as Arc<dyn GoalController>;
+    let mw = GoalMiddleware::new(controller, None);
+    let mut state = AgentState::new("/tmp");
+    let mut output = AgentOutput::new("hook 拦截", 1);
+    output.block_continue = Some("hook_stop".to_string());
 
-    let mut state = AgentState::with_messages("/tmp".to_string(), vec![]);
-    middleware.before_model(&mut state).await.unwrap();
-    // objective_just_updated 应被消费
-    assert!(!view.consume_objective_updated());
+    let result = Middleware::after_agent(&mw, &mut state, &output)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.block_continue.as_deref(),
+        Some("hook_stop"),
+        "已有 block_continue 应保留原值，不被 goal_active 覆盖"
+    );
+    // 不干预时 queue 应为空
+    let drained = state.v2_queue().drain_all();
+    assert!(
+        drained.is_empty(),
+        "已有 block_continue 时不应 push steering"
+    );
 }
 
 #[tokio::test]
-async fn test_before_model_连续调用_不重复注入() {
-    let (middleware, view) = make_middleware();
-    view.set_goal("测试", None);
+async fn test_after_agent_terminal_重置_pending_rounds() {
+    let mock = Arc::new(MockController {
+        snapshot: parking_lot::Mutex::new(make_active_snapshot()),
+        continuation_count: std::sync::atomic::AtomicU64::new(0),
+    });
+    let controller: Arc<dyn GoalController> = mock.clone();
+    let mw = GoalMiddleware::new(controller, None);
+    let mut state = AgentState::new("/tmp");
 
-    let mut state = AgentState::with_messages("/tmp".to_string(), vec![]);
-    middleware.before_model(&mut state).await.unwrap();
-    middleware.before_model(&mut state).await.unwrap();
+    // 第一次：goal active，递增到 round 1
+    let r1 = Middleware::after_agent(&mw, &mut state, &AgentOutput::new("回答1", 1))
+        .await
+        .unwrap();
+    assert_eq!(r1.block_continue.as_deref(), Some("goal_active"));
+    // v1 MessageQueue 已删除；round1 紧迫感直接由 render_steering(1) 校验
+    let round1_urgency: String = GoalMiddleware::render_steering("测试目标", 1)
+        .lines()
+        .filter(|l| l.contains("Decide") || l.contains("must call") || l.contains("Attention"))
+        .collect();
 
-    // 第二次调用不应注入（objective_just_updated 已清零）
-    assert_eq!(state.messages().len(), 1);
+    // 转入终态（Complete）
+    {
+        *mock.snapshot.lock() = make_complete_snapshot();
+    }
+    let r2 = Middleware::after_agent(&mw, &mut state, &AgentOutput::new("完成", 2))
+        .await
+        .unwrap();
+    assert!(r2.block_continue.is_none(), "终态时不应 block_continue");
+
+    // 重新 active：pending_rounds 应已重置，从 round 1 重新开始
+    {
+        *mock.snapshot.lock() = make_active_snapshot();
+    }
+    let r3 = Middleware::after_agent(&mw, &mut state, &AgentOutput::new("新目标", 3))
+        .await
+        .unwrap();
+    assert_eq!(r3.block_continue.as_deref(), Some("goal_active"));
+    // v1 MessageQueue 已删除；round3 紧迫感直接由 render_steering(1) 校验
+    let round3_urgency: String = GoalMiddleware::render_steering("测试目标", 1)
+        .lines()
+        .filter(|l| l.contains("Decide") || l.contains("must call") || l.contains("Attention"))
+        .collect();
+
+    assert_eq!(
+        round1_urgency, round3_urgency,
+        "终态后重新 active 应从 round 1 开始（递增紧迫感计数器已重置）"
+    );
+
+    // 验证 queue 累积：两次 active（r1 / r3）各 push 1 条 Defer，r2 终态不 push
+    let drained_msg = state.v2_queue().drain_all();
+    assert_eq!(
+        drained_msg.len(),
+        2,
+        "应累积 2 条 goal steering Defer（两次 active），终态 r2 不 push"
+    );
 }

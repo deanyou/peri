@@ -1,81 +1,102 @@
-use std::sync::Arc;
+//! SubAgent v2 装配：从 agent_def 构造 v2-ready 数据（LLM + tools + system_prompt +
+//! skill_names + max_iterations），调用方组装 [`SubagentSpawnConfig`](peri_agent::session::subagent::SubagentSpawnConfig) 后经
+//! [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)（Agent 层统一入口）创建与运行。
+//!
+//! **P5.1 重构**：旧版本通过 `SubAgentBuilder.build()` 构造 v1 Agent，
+//! 现在直接产出 v2 字段。L3：建 thread / cancel token / 事件 / 运行收尾
+//! 全部移入 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)，本模块只保留 agent_def 解析、工具过滤与
+//! SandboxWrite 注入等 middlewares 能力。
 
 use peri_agent::{
-    agent::{
-        events::AgentEvent, react::ReactLLM, state::AgentState, AgentCancellationToken, ReActAgent,
-    },
-    thread::ThreadMeta,
+    agent::react::ReactLLM, session::subagent::SubagentCancelPolicy, tools::BaseTool,
 };
 
-use super::{build_subagent_middlewares, SourceAgentIdHandler};
-use crate::{
-    claude_agent_parser::ClaudeAgent, hooks::types::HookEvent, subagent::SubAgentMiddlewareConfig,
-};
+use super::super::fork::allows_injected_tools;
+use crate::claude_agent_parser::ClaudeAgent;
 
-/// Controls how parent cancellation affects child agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CancelPolicy {
-    /// Parent cancel → child cancel (normal sync, fork)
-    Cascade,
-    /// Only session-level cancel_all_agents can stop this (background)
-    Independent,
-}
+/// Agent 工具 `model` 参数可用档位（契约层单一事实源 `peri_acp_types::agents::MODEL_TIERS`；
+/// `inherit` 单独处理，不在档位集合内）
+pub(crate) const MODEL_TIERS: [&str; 4] = peri_acp_types::agents::MODEL_TIERS;
 
-/// Concrete builder type for subagents.
-type SubReActAgent = ReActAgent<Box<dyn ReactLLM + Send + Sync>, AgentState>;
-
-/// Result of building a subagent from an agent definition.
-/// The caller handles execute, result handling, and cleanup.
+/// v2-ready SubAgent 装配产物（L3 简化：创建/运行/收尾移入 Agent 层统一入口）
 pub(crate) struct AgentBuildResult {
-    pub builder: SubReActAgent,
-    pub state: AgentState,
-    pub child_thread_id: String,
-    pub cancel_token: Option<AgentCancellationToken>,
+    /// SubAgent LLM（ReactLLM 实现/装饰器）
+    pub llm: Box<dyn ReactLLM + Send + Sync>,
+    /// 过滤后的工具集（按 agent_def.tools/disallowed_tools）
+    pub tools: Vec<Box<dyn BaseTool>>,
+    /// Canonical allow/disallow policy retained for every generation refresh.
+    pub tool_filter: std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    /// SubAgent system prompt
+    pub system_prompt: Option<String>,
+    /// agent 定义声明的 skills（SkillPreload 装配输入）
+    pub skill_names: Vec<String>,
+    /// ReAct 循环最大迭代次数（来自 agent_def.max_turns，默认 200）
+    pub max_iterations: usize,
 }
 
 impl super::SubAgentTool {
-    /// Build a ReActAgent + AgentState from an agent definition.
+    /// 从 agent 定义构造 v2-ready SubAgent 数据（L3：不含 thread 创建 / 事件 /
+    /// cancel token——统一入口 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent) 负责）。
     ///
-    /// `skip_events`: if true, SubagentStarted/SubagentStart events are NOT emitted here
-    /// (used by background path which emits them later in tokio::spawn).
-    /// `setup_event_handler`: if true, sets up child_handler_factory or event_handler
-    /// with the generated child_thread_id as instance_id (normal path). If false (background
-    /// path), no event handler is configured here.
+    /// `model_override`（Agent 工具 `model` 参数，仅新建定义型 subagent 生效）：
+    /// - `None`（省略）→ 保持 agent 定义 frontmatter model（含空 / "inherit" → 父模型）
+    /// - `Some("inherit")` → 显式继承父模型（覆盖 frontmatter）
+    /// - `Some(档位)` → 校验通过后覆盖 frontmatter；未知档位直接报错，不静默回退
+    ///   （resume 路径恒传 `None`：恢复保持原定义，不允许调用参数覆盖）
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn build_agent_from_def(
         &self,
         agent_def: &ClaudeAgent,
         agent_name: &str,
         cwd: &str,
-        cancel_policy: CancelPolicy,
-        skip_events: bool,
-        setup_event_handler: bool,
+        _cancel_policy: SubagentCancelPolicy,
+        _skip_events: bool,
+        _setup_event_handler: bool,
+        model_override: Option<&str>,
     ) -> Result<AgentBuildResult, Box<dyn std::error::Error + Send + Sync>> {
-        // 1. Generate child_thread_id
-        let child_thread_id = uuid::Uuid::now_v7().to_string();
-
-        // 2. Thread store setup
-        if let Some(ref store) = self.thread_store {
-            let cancel_policy_str = match cancel_policy {
-                CancelPolicy::Cascade => "cascade".to_string(),
-                CancelPolicy::Independent => "independent".to_string(),
-            };
-            let mut child_meta = ThreadMeta::new(cwd);
-            child_meta.id = child_thread_id.clone();
-            child_meta.parent_thread_id = self.parent_thread_id.clone();
-            child_meta.hidden = true;
-            child_meta.cancel_policy = cancel_policy_str;
-            child_meta.title = Some(agent_name.to_string());
-            store
-                .create_thread(child_meta)
-                .await
-                .map_err(|e| format!("Failed to create child thread: {}", e))?;
-        }
-
-        // 3. Filter tools
-        let filtered_tools = self.filter_tools(
+        // 1. Filter tools
+        let mut filtered_tools = self.filter_tools(
             &agent_def.frontmatter.tools,
             &agent_def.frontmatter.disallowed_tools,
         );
+
+        // 显式 `tools: []` 是严格的零工具边界，禁止 WriteSandbox 等后注入工具。
+        let allowed_write_dirs = &agent_def.frontmatter.allowed_write_dirs;
+        if allows_injected_tools(&agent_def.frontmatter.tools) && !allowed_write_dirs.is_empty() {
+            let disallowed_list = agent_def.frontmatter.disallowed_tools.to_vec();
+            let is_disallowed = disallowed_list.iter().any(|n| {
+                let n = n.to_lowercase();
+                n == "sandboxwrite" || n == "writesandbox"
+            });
+            if is_disallowed {
+                tracing::debug!(
+                    agent_id = %agent_name,
+                    "SandboxWrite 被 disallowedTools 否决，跳过注入"
+                );
+            } else {
+                match crate::tools::filesystem::WriteSandboxTool::new(
+                    cwd.to_string(),
+                    allowed_write_dirs.clone(),
+                ) {
+                    Ok(tool) => {
+                        filtered_tools.push(Box::new(tool));
+                        tracing::debug!(
+                            agent_id = %agent_name,
+                            sandbox_dirs = ?allowed_write_dirs,
+                            "SandboxWrite 工具已注入"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %agent_name,
+                            error = %e,
+                            sandbox_dirs = ?allowed_write_dirs,
+                            "SandboxWrite 构造失败，跳过注入"
+                        );
+                    }
+                }
+            }
+        }
 
         tracing::debug!(
             agent_id = %agent_name,
@@ -87,15 +108,33 @@ impl super::SubAgentTool {
             "build_agent_from_def: tool filter results"
         );
 
-        // 4. Model alias → LLM factory
-        let model_alias: Option<&str> = agent_def
-            .frontmatter
-            .model
-            .as_deref()
-            .filter(|m| !m.is_empty() && *m != "inherit");
-        let llm = (self.llm_factory)(model_alias);
+        // 2. Model alias → LLM factory
+        // 工具参数覆盖（model_override）优先于 frontmatter；档位大小写不敏感
+        //（档位均为 ASCII，`to_ascii_lowercase` 与 `Profiles::get` 的
+        // `to_lowercase` 对合法档位等价），未知档位拒绝——避免
+        // `from_config_for_alias` 解析失败后静默回退父模型。
+        let model_alias: Option<String> = match model_override {
+            Some(raw) if raw.eq_ignore_ascii_case("inherit") => None,
+            Some(raw) => {
+                let tier = raw.to_ascii_lowercase();
+                if !MODEL_TIERS.contains(&tier.as_str()) {
+                    return Err(format!(
+                        "Error: invalid model tier '{}' for subagent. Available: inherit, haiku, sonnet, opus, fable",
+                        raw
+                    )
+                    .into());
+                }
+                Some(tier)
+            }
+            None => agent_def
+                .frontmatter
+                .model
+                .clone()
+                .filter(|m| !m.is_empty() && *m != "inherit"),
+        };
+        let llm = (self.llm_factory)(model_alias.as_deref());
 
-        // 5. Max iterations
+        // 3. Max iterations
         let raw_turns = agent_def.frontmatter.max_turns.unwrap_or(200);
         let max_iterations = if raw_turns == 0 {
             200
@@ -103,78 +142,32 @@ impl super::SubAgentTool {
             raw_turns as usize
         };
 
-        // 6. Build agent
-        let mut agent_builder = ReActAgent::new(llm).max_iterations(max_iterations);
+        // 4. Skill names（SkillPreload 装配输入）
+        let skill_names = agent_def.frontmatter.skills.clone();
 
-        // 7. Middlewares
-        for mw in build_subagent_middlewares(SubAgentMiddlewareConfig::for_agent_def(
-            agent_def.frontmatter.skills.clone(),
-            cwd,
-        )) {
-            agent_builder = agent_builder.add_middleware(mw);
-        }
-
-        // 8. System prompt
-        if let Some(ref builder) = self.system_builder {
+        // 5. System prompt
+        let system_prompt = if let Some(ref builder) = self.system_builder {
             let overrides = Self::overrides_from_agent_def(
                 &agent_def.system_prompt,
                 &agent_def.frontmatter.tone,
                 &agent_def.frontmatter.proactiveness,
+                &agent_def.frontmatter.prompt_mode,
             );
-            let system_content = builder(overrides.as_ref(), cwd);
-            agent_builder = agent_builder.with_system_prompt(system_content);
-        }
-
-        // 9. Register tools
-        for tool in filtered_tools {
-            agent_builder = agent_builder.register_tool(tool);
-        }
-
-        // 10. Event handler
-        if setup_event_handler {
-            if let Some(ref factory) = self.child_handler_factory {
-                agent_builder = agent_builder.with_event_handler(factory(child_thread_id.clone()));
-            } else if let Some(handler) = &self.event_handler {
-                let tagged = Arc::new(SourceAgentIdHandler::new(
-                    Arc::clone(handler),
-                    child_thread_id.clone(),
-                ));
-                agent_builder = agent_builder.with_event_handler(tagged);
-            }
-        }
-
-        // 11. Agent state
-        let state = if let Some(ref store) = self.thread_store {
-            AgentState::new(cwd.to_string())
-                .with_persistence(Arc::clone(store), child_thread_id.clone())
+            Some(builder(overrides.as_ref(), cwd))
         } else {
-            AgentState::new(cwd.to_string())
+            None
         };
-
-        // 12-13. Cancel token (cascade → child_token, independent → new)
-        let cancel_token = match cancel_policy {
-            CancelPolicy::Cascade => self.cancel.as_ref().map(|t| t.child_token()),
-            CancelPolicy::Independent => Some(AgentCancellationToken::new()),
-        };
-
-        // 14. Events (skip if background path)
-        if !skip_events {
-            if let Some(ref handler) = self.event_handler {
-                handler.on_event(AgentEvent::SubagentStarted {
-                    agent_name: agent_name.to_string(),
-                    instance_id: child_thread_id.clone(),
-                    is_background: false,
-                });
-            }
-            self.fire_subagent_lifecycle_hook(HookEvent::SubagentStart, cwd, agent_name, None)
-                .await;
-        }
 
         Ok(AgentBuildResult {
-            builder: agent_builder,
-            state,
-            child_thread_id,
-            cancel_token,
+            llm,
+            tools: filtered_tools,
+            tool_filter: crate::subagent::fork::canonical_tool_filter(
+                &agent_def.frontmatter.tools,
+                &agent_def.frontmatter.disallowed_tools,
+            ),
+            system_prompt,
+            skill_names,
+            max_iterations,
         })
     }
 }

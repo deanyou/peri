@@ -1,29 +1,30 @@
-    #[test]
-    fn test_core_tool_not_deferred() {
-        assert!(!is_deferred_tool("Read"));
-    }
+//! Tests for core_tools
 
-    #[test]
-    fn test_meta_tool_not_deferred() {
-        assert!(!is_deferred_tool("SearchExtraTools"));
-        assert!(!is_deferred_tool("ExecuteExtraTool"));
-    }
+use super::*;
 
-    #[test]
-    fn test_deferred_tool() {
-        assert!(is_deferred_tool("CronRegister"));
-        assert!(is_deferred_tool("CronList"));
-        assert!(is_deferred_tool("CronRemove"));
-    }
+#[test]
+fn test_parse_extra_tool_call_requires_nonempty_name_and_object_params() {
+    assert_eq!(
+        parse_extra_tool_call(&serde_json::json!({"tool_name": "CronRegister", "params": {}}))
+            .unwrap(),
+        ("CronRegister".to_string(), serde_json::json!({}))
+    );
+    assert!(parse_extra_tool_call(&serde_json::json!({"tool_name": "", "params": {}})).is_err());
+    assert!(
+        parse_extra_tool_call(&serde_json::json!({"tool_name": "CronRegister", "params": []}))
+            .is_err()
+    );
+}
+#[test]
+fn test_direct_tools_sorted_csv_is_stable_and_sorted() {
+    let csv = direct_tools_sorted_csv([TOOL_WRITE, TOOL_READ, TOOL_WRITE]);
+    assert_eq!(csv, "Read, Write");
+}
 
-    #[test]
-    fn test_mcp_tool_deferred() {
-        assert!(is_deferred_tool("mcp__slack__send_message"));
-        assert!(is_deferred_tool("mcp__read_resource"));
-    }
-
-    #[test]
-    fn test_unknown_tool_deferred() {
-        assert!(is_deferred_tool("UnknownTool"));
-        assert!(is_deferred_tool(""));
-    }
+#[test]
+fn test_direct_tools_description_handles_empty_set() {
+    assert_eq!(
+        direct_tools_description(std::iter::empty()),
+        "No other tools are directly available in this session."
+    );
+}

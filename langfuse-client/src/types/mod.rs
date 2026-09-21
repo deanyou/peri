@@ -1,5 +1,6 @@
 mod conversion;
 mod otlp;
+pub mod session;
 
 use std::collections::HashMap;
 
@@ -22,6 +23,8 @@ impl IngestionEvent {
             IngestionEvent::ObservationCreate { timestamp, .. } => timestamp,
             IngestionEvent::ObservationUpdate { timestamp, .. } => timestamp,
             IngestionEvent::SdkLog { timestamp, .. } => timestamp,
+            IngestionEvent::SessionCreate { timestamp, .. } => timestamp,
+            IngestionEvent::SessionUpdate { timestamp, .. } => timestamp,
         }
     }
 }
@@ -148,6 +151,8 @@ pub struct ObservationBody {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_parameters: Option<HashMap<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<IngestionUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<ObservationLevel>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -393,8 +398,27 @@ pub enum IngestionEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
     },
+    SessionCreate {
+        id: String,
+        timestamp: String,
+        body: session::SessionBody,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
+    SessionUpdate {
+        id: String,
+        timestamp: String,
+        body: session::SessionBody,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
 }
 
 #[cfg(test)]
 #[path = "../types_test.rs"]
 mod tests;
+
+// session 测试单独 include
+#[cfg(test)]
+#[path = "session_test.rs"]
+mod session_tests;

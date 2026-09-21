@@ -1,151 +1,162 @@
 //! ACP Slash Commands — 命令基础设施。
 //!
-//! 定义命令 trait、注册表、执行上下文和结果类型。
-//! 命令在 executor 入口拦截，`Immediate` 类型不构建 agent 直接执行。
-
-pub mod bg;
-pub mod clear;
-pub mod compact;
-pub mod rewind;
+//! 命令契约已迁入 `peri-acp-types::command`，compact 执行体迁入 Agent 层；本模块保留组合根：注册表本体在契约层
+//! （[`CommandRegistry`]，扁平 HashMap + alias 索引，设计 §63），本模块只做
+//! 内置命令装配（[`register_builtins`]）——旧契约（[`AgentCommand`]）已随
+//! Phase 5 Step 6 整体删除，命令全部以 [`CommandHandler`] 直接注册。
+//!
+//! 执行方式由 [`CommandOutcome`] 承载：内置命令走 `Done`；`Inject` /
+//! `Delegate` 为 Phase 5/6 保留。命令在 executor 入口拦截
+//! （`peri-agent::session::exec::executor_helpers::intercept_immediate_command`），
+//! 命中即执行，未命中 fall-through 进 agent 管线。
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_agent::agent::AgentCancellationToken;
-use peri_agent::{llm::BaseModel, messages::BaseMessage};
+use peri_acp_types::command::command_route::{
+    CommandEntryKind, CommandLifecycle, CommandProvenance, CommandSource,
+};
+use peri_acp_types::command::{ArgsSchema, CommandHandler, CommandOutcome};
 
-use crate::{
-    provider::PeriConfig,
-    session::{event_sink::EventSink, executor::PromptStopReason},
+pub mod clear;
+pub mod compact;
+pub mod rewind;
+
+/// Rewind 文件复原相关符号——供 dispatch 层（`session/rewind-preview` 预算）
+/// 复用 `extract_file_changes` / `FileChange`；`execute_rewind` 为 slash 与
+/// RPC 双入口共享执行体（Phase 5 Step 5）。
+pub(crate) use rewind::{execute_rewind, extract_file_changes, FileChange};
+
+/// 路由条目契约 re-export（execute_command RPC 域/等级检查消费）。
+pub use peri_acp_types::command::command_route::RouteEntry;
+/// 词法等级 re-export（Immediate 语义 = 第一等级检查）。
+pub use peri_acp_types::command::CommandLevel;
+/// 命令契约（L5：事实源 peri-acp-types::command；`AgentCommand` /
+/// `CommandKind` 已随 Phase 5 Step 6 删除）。
+pub use peri_acp_types::command::{
+    CommandContext, CommandFeedback, CommandResult, FeedbackChannel, FeedbackLevel,
+    PromptStopReason,
 };
 
-/// 命令执行方式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandKind {
-    /// 直接执行，不构建 agent（如 compact、clear）。
-    Immediate,
-    /// 透传到正常 agent 管线（如 skills）。
-    Passthrough,
-    /// [预留] 变换 prompt 内容后传给 agent。
-    Transform,
+/// 注册表契约（Phase 2 Step 4 换型：本模块不再持有 Vec 实现，注册表本体在
+/// 契约层 `peri-acp-types::command_registry`；Phase 3/5 消费方经本路径引用）。
+pub use peri_acp_types::command_registry::{CommandRegistry, RegisterError, ResolvedCommand};
+
+/// 内置命令条目辅助构造（组合根，Phase 5 Step 6：旧 AgentCommand 转发 /
+/// LegacyAdapter 已删除）：`fullname = "core:{name}"`，aliases / description
+/// 取命令实现的关联常量（命令声明，单一事实源）；args_schema 由调用点传入
+/// （Phase 5 逐命令补——命令迁移时声明自己的参数形态，未迁移命令传 None）。
+pub fn handler_entry<C: CommandHandler + Default + 'static>(
+    fullname: &str,
+    aliases: &'static [&'static str],
+    description: &'static str,
+    args_schema: Option<ArgsSchema>,
+) -> RouteEntry {
+    RouteEntry {
+        fullname: fullname.to_string(),
+        aliases: aliases.iter().map(|s| s.to_string()).collect(),
+        description: description.to_string(),
+        kind: CommandEntryKind::Command,
+        category: None,
+        args_schema,
+        handler: Arc::new(C::default()),
+        provenance: CommandProvenance {
+            source: CommandSource::Core,
+            lifecycle: CommandLifecycle::Connected,
+        },
+    }
 }
 
-/// 命令执行上下文。
-pub struct CommandContext {
-    pub session_id: String,
-    pub history: Vec<BaseMessage>,
-    pub cwd: String,
-    pub peri_config: Arc<PeriConfig>,
-    /// 用于 compact 等需要 LLM 调用的命令。由 executor 从 provider 构造后传入。
-    pub compact_model: Option<Arc<dyn BaseModel>>,
-    pub event_sink: Arc<dyn EventSink>,
-    /// 命令参数（命令名之后的文本）。
-    pub args: String,
-    /// 取消令牌，用于 Ctrl+C 打断长时间运行的命令（如 compact 的 LLM 调用）。
-    pub cancel_token: AgentCancellationToken,
-    /// 持久化存储，用于 rewind 等需要删除消息的命令。
-    pub thread_store: Option<Arc<dyn peri_agent::thread::ThreadStore>>,
-    /// 当前会话的 thread ID，配合 thread_store 使用。
-    pub thread_id: Option<String>,
-    /// 后台任务事件的发送通道（BgCommand 等 Immediate 命令依赖）。
-    /// Option 因为非 bg 命令路径不需要。BgCommand 总是 expect 它是 Some。
-    pub bg_event_sender:
-        Option<tokio::sync::mpsc::UnboundedSender<peri_agent::agent::events::AgentEvent>>,
-    /// 后台任务注册中心（BgCommand 等 Immediate 命令依赖）。
-    /// Option 因为非 bg 命令路径不需要。BgCommand 总是 expect 它是 Some。
-    pub bg_registry: Option<Arc<peri_middlewares::subagent::BackgroundTaskRegistry>>,
+/// `core:loop` 将参数注入当前 agent 管线，由统一 turn/continuation 执行机制处理，
+/// 不再以 `Done` 吞掉命令。
+#[derive(Default)]
+struct LoopCommand;
+
+impl LoopCommand {
+    const DESCRIPTION: &'static str = "Control agent iteration loop";
 }
 
-/// 命令执行结果。
-pub struct CommandResult {
-    /// 执行后的消息历史。
-    pub messages: Vec<BaseMessage>,
-    /// 停止原因。
-    pub stop_reason: PromptStopReason,
-}
-
-/// Agent 侧命令 trait。
 #[async_trait]
-pub trait AgentCommand: Send + Sync {
-    /// 命令名（不含 `/` 前缀）。
-    fn name(&self) -> &str;
-    /// 别名列表。
-    fn aliases(&self) -> Vec<&str> {
-        vec![]
-    }
-    /// 命令描述。
-    fn description(&self) -> &str;
-    /// 命令类型。
-    fn kind(&self) -> CommandKind;
-    /// 执行命令。
-    async fn execute(&self, ctx: CommandContext) -> CommandResult;
-}
-
-/// 命令注册表。
-pub struct CommandRegistry {
-    commands: Vec<Box<dyn AgentCommand>>,
-}
-
-impl CommandRegistry {
-    pub fn new() -> Self {
-        Self {
-            commands: Vec::new(),
+impl CommandHandler for LoopCommand {
+    async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+        let prompt = ctx.args.trim();
+        if prompt.is_empty() {
+            return CommandOutcome::Done(CommandResult {
+                messages: ctx.history,
+                stop_reason: PromptStopReason::EndTurn,
+                feedback: Some(CommandFeedback {
+                    level: FeedbackLevel::Error,
+                    message: "用法: /loop <prompt>".to_string(),
+                    channel: FeedbackChannel::UiOnly,
+                }),
+            });
         }
-    }
-
-    pub fn register(&mut self, cmd: Box<dyn AgentCommand>) {
-        self.commands.push(cmd);
-    }
-
-    /// 按名称或别名查找命令。返回 `(命令引用, 剩余参数)`。
-    pub fn find<'a>(&'a self, text: &'a str) -> Option<(&'a dyn AgentCommand, &'a str)> {
-        let text = text.trim_start_matches('/');
-        let (name, args) = match text.split_once(' ') {
-            Some((n, a)) => (n.trim(), a.trim()),
-            None => (text.trim(), ""),
-        };
-        if name.is_empty() {
-            return None;
-        }
-
-        // 精确匹配 name
-        for cmd in &self.commands {
-            if cmd.name() == name {
-                return Some((cmd.as_ref(), args));
-            }
-        }
-        // 精确匹配 alias
-        for cmd in &self.commands {
-            if cmd.aliases().contains(&name) {
-                return Some((cmd.as_ref(), args));
-            }
-        }
-        None
-    }
-
-    /// 返回所有注册命令的 `(name, description, aliases)` 元组。
-    pub fn list(&self) -> Vec<(&str, &str, Vec<&str>)> {
-        self.commands
-            .iter()
-            .map(|c| (c.name(), c.description(), c.aliases()))
-            .collect()
+        CommandOutcome::Inject(format!("<goal-message>Loop: {prompt}</goal-message>"))
     }
 }
 
-impl Default for CommandRegistry {
-    fn default() -> Self {
-        default_command_registry()
+/// `core:{skill}` 本地 skill 注入占位 handler（Phase 6 C1；设计 §71
+/// Inject 三态：透传指令进正常 agent 管线）。
+///
+/// skill 注入语义 = 把 skill 调用指令文本注入 agent 管线；当前为最小占位
+/// ——返回 [`CommandOutcome::Inject`] **用户消息原文**（整段透传，含
+/// `/skill-name` token）：原文进 agent 管线，Skills 中间件旧路径
+/// （SkillPreloadMiddleware 自动检测）继续处理，命令不被吞。
+/// 完整语义（按 skill 名加载 SKILL.md 注入系统提示）留待后续版本。
+#[derive(Clone, Copy)]
+pub struct AgentPassthrough;
+
+#[async_trait]
+impl CommandHandler for AgentPassthrough {
+    async fn execute(&self, ctx: CommandContext) -> CommandOutcome {
+        // 原文整段交还 agent 管线（含 `/skill-name` token）：SkillPreload
+        // 中间件自动检测分支依赖原文，命令不被吞。RPC 路径（execute-command）
+        // 无 agent 管线，Inject 由调用方显式报错（execute_command.rs 语义）。
+        CommandOutcome::Inject(ctx.raw_text)
     }
 }
 
-/// 创建包含所有内置命令的默认注册表。
-pub fn default_command_registry() -> CommandRegistry {
-    let mut reg = CommandRegistry::new();
-    reg.register(Box::new(bg::BgCommand));
-    reg.register(Box::new(compact::CompactCommand));
-    reg.register(Box::new(clear::ClearCommand));
-    reg.register(Box::new(rewind::RewindCommand));
-    reg
+/// 内置命令注册（core 域；会话创建时调用一次；注册顺序即优先级——先注册者
+/// 占键，后注册同键一律 Conflict 拒绝，设计 §64 纯拒绝 + 装配顺序裁决）。
+///
+/// 内置 fullname 与 alias 均为词法合法且互不冲突的常量，注册失败即编程错误。
+pub fn register_builtins(reg: &CommandRegistry) {
+    // Phase 5 Step 4：compact 已迁移新契约（CommandHandler 主实现），无参命令，
+    // args_schema 挂 ArgsSchema::default()（投影可渲染）。
+    reg.register(handler_entry::<compact::CompactCommand>(
+        "core:compact",
+        compact::CompactCommand::ALIASES,
+        compact::CompactCommand::DESCRIPTION,
+        Some(ArgsSchema::default()),
+    ))
+    .expect("core:compact 注册失败：词法合法且无冲突，失败即编程错误");
+    // Phase 5 Step 3：clear 已迁移新契约（CommandHandler 主实现），无参命令，
+    // args_schema 挂 ArgsSchema::default()（投影可渲染）。
+    reg.register(handler_entry::<clear::ClearCommand>(
+        "core:clear",
+        clear::ClearCommand::ALIASES,
+        clear::ClearCommand::DESCRIPTION,
+        Some(ArgsSchema::default()),
+    ))
+    .expect("core:clear 注册失败：词法合法且无冲突，失败即编程错误");
+    // Phase 5 Step 5：rewind 已迁移新契约（CommandHandler 主实现），参数形态
+    // 由 RewindCommand::args_schema() 声明（positionals: [target_message_id]，
+    // flags: [--no-revert-files]；slash 形态 /rewind <target_message_id>
+    // [--no-revert-files]；RPC 路径 wire 保持 JSON 不变）。
+    reg.register(handler_entry::<rewind::RewindCommand>(
+        "core:rewind",
+        rewind::RewindCommand::ALIASES,
+        rewind::RewindCommand::DESCRIPTION,
+        Some(rewind::RewindCommand::args_schema()),
+    ))
+    .expect("core:rewind 注册失败：词法合法且无冲突，失败即编程错误");
+    reg.register(handler_entry::<LoopCommand>(
+        "core:loop",
+        &[],
+        LoopCommand::DESCRIPTION,
+        Some(ArgsSchema::default()),
+    ))
+    .expect("core:loop 注册失败：词法合法且无冲突，失败即编程错误");
 }
 
 #[cfg(test)]

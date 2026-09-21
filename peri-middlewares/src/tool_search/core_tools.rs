@@ -1,7 +1,5 @@
 //! Core Tools 白名单定义与延迟加载判定逻辑
 
-use std::{collections::HashSet, sync::LazyLock};
-
 // ─── 共享常量 ────────────────────────────────────────────────────────────────
 
 /// ExecuteExtraTool 元工具名称
@@ -27,44 +25,24 @@ pub const TOOL_WEBFETCH: &str = "WebFetch";
 pub const TOOL_WEBSEARCH: &str = "WebSearch";
 pub const TOOL_ASK_USER: &str = "AskUserQuestion";
 pub const TOOL_TODO: &str = "TodoWrite";
+pub const TOOL_SKILL: &str = "SkillTool";
+pub const TOOL_DISCOVER_SKILLS: &str = "DiscoverSkillsTool";
 
-/// 核心工具白名单（始终发送给 LLM，共 12 个）
-///
-/// - 文件操作 (6): Read, Write, Edit, Glob, Grep, folder_operations
-/// - 执行 (1): Bash
-/// - Web (2): WebFetch, WebSearch
-/// - 交互 (2): Agent, AskUserQuestion
-/// - 管理 (1): TodoWrite
-pub static CORE_TOOLS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [
-        // 文件操作
-        TOOL_READ,
-        TOOL_WRITE,
-        TOOL_EDIT,
-        TOOL_GLOB,
-        TOOL_GREP,
-        TOOL_FOLDER_OPS,
-        // 执行
-        TOOL_BASH,
-        // Web
-        TOOL_WEBFETCH,
-        TOOL_WEBSEARCH,
-        // 交互
-        TOOL_AGENT,
-        TOOL_ASK_USER,
-        // 管理
-        TOOL_TODO,
-    ]
-    .into_iter()
-    .collect()
-});
-
-/// 元工具集合（Tool Search 延迟加载机制的工具，始终发送给 LLM）
-pub static META_TOOLS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [SEARCH_EXTRA_TOOLS_NAME, EXECUTE_EXTRA_TOOL_NAME]
-        .into_iter()
-        .collect()
-});
+pub fn parse_extra_tool_call(
+    input: &serde_json::Value,
+) -> Result<(String, serde_json::Value), String> {
+    let tool_name = input
+        .get(EXTRA_TOOL_NAME_FIELD)
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "malformed ExecuteExtraTool invocation".to_string())?;
+    let params = input
+        .get(EXTRA_TOOL_PARAMS_FIELD)
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "malformed ExecuteExtraTool invocation".to_string())?;
+    Ok((tool_name.to_string(), params))
+}
 
 /// 解析有效的工具名称
 ///
@@ -82,25 +60,26 @@ pub fn resolve_effective_tool_name(tool_name: &str, input: &serde_json::Value) -
     }
 }
 
-/// 判定工具是否为延迟加载工具（Deferred Tool）
+/// 返回工具名按字典序排序后的逗号分隔字符串（含空格）。
 ///
-/// 返回 `true` 表示该工具应从 LLM 可见工具列表中移除，
-/// 通过 SearchExtraTools 按需发现，ExecuteExtraTool 代理执行。
-///
-/// # Examples
-///
-/// ```ignore
-/// assert_eq!(is_deferred_tool("Read"), false);           // Core Tool
-/// assert_eq!(is_deferred_tool("SearchExtraTools"), false); // Meta Tool
-/// assert_eq!(is_deferred_tool("CronRegister"), true);     // Deferred Tool
-/// assert_eq!(is_deferred_tool("mcp__slack__send_message"), true); // MCP Tool
-/// ```
-pub fn is_deferred_tool(tool_name: &str) -> bool {
-    !CORE_TOOLS.contains(tool_name) && !META_TOOLS.contains(tool_name)
+/// 输入必须来自当前 session 的实际 direct tool 集合。
+pub fn direct_tools_sorted_csv<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let mut names: Vec<&str> = names.into_iter().collect();
+    names.sort_unstable();
+    names.dedup();
+    names.join(", ")
+}
+
+/// 将当前 session 的 direct tool 集合格式化为稳定的能力说明。
+pub fn direct_tools_description<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let names = direct_tools_sorted_csv(names);
+    if names.is_empty() {
+        "No other tools are directly available in this session.".to_string()
+    } else {
+        format!("Tools directly available in this session: {names}.")
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("core_tools_test.rs");
-}
+#[path = "core_tools_test.rs"]
+mod tests;

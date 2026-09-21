@@ -11,15 +11,21 @@ pub enum LangfuseError {
     #[error("Ingestion API returned errors: {0}")]
     IngestionApi(String),
 
+    #[error("batch queue is full")]
+    QueueFull,
+
     #[error("Batch sender dropped, batcher is shut down")]
     ChannelClosed,
+
+    /// The worker was joined, but exited by cancellation or panic rather than
+    /// completing its drain. The panic payload is deliberately not exposed.
+    #[error("Batch worker join failed (cancelled: {cancelled})")]
+    WorkerJoinFailed { cancelled: bool },
 
     #[error("Invalid configuration: {0}")]
     Config(String),
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    include!("error_test.rs");
-}
+#[path = "error_test.rs"]
+mod tests;

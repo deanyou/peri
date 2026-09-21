@@ -1,5 +1,5 @@
 use super::*;
-use peri_agent::goal::InMemoryGoalStore;
+use peri_acp_types::goal::InMemoryGoalStore;
 use std::sync::Arc;
 
 fn make_state() -> GoalState {
@@ -51,7 +51,7 @@ async fn test_set_goal_覆盖旧_goal_生成新_goal_id() {
 #[tokio::test]
 async fn test_store_写入失败_内存镜像仍可读() {
     use async_trait::async_trait;
-    use peri_agent::goal::{GoalStore, GoalStoreError, ThreadGoal};
+    use peri_acp_types::goal::{GoalStore, GoalStoreError, ThreadGoal};
 
     struct FailingStore;
     #[async_trait]
@@ -76,13 +76,16 @@ async fn test_store_写入失败_内存镜像仍可读() {
 }
 
 #[tokio::test]
-async fn test_set_status_合法转换_active_to_paused() {
+async fn test_set_status_合法转换_active_to_blocked() {
     let state = make_state();
     state.set_goal("测试".to_string(), None).await.unwrap();
     assert_eq!(state.snapshot().status, Some(GoalStatus::Active));
 
-    state.set_status(GoalStatus::Paused).await.unwrap();
-    assert_eq!(state.snapshot().status, Some(GoalStatus::Paused));
+    state
+        .set_status_with_reason(GoalStatus::Blocked, "缺少依赖".to_string())
+        .await
+        .unwrap();
+    assert_eq!(state.snapshot().status, Some(GoalStatus::Blocked));
 }
 
 #[tokio::test]
@@ -115,8 +118,8 @@ async fn test_set_status_blocked_必须附带_reason() {
 #[tokio::test]
 async fn test_set_status_无_goal_返回错误() {
     let state = make_state();
-    let result = state.set_status(GoalStatus::Paused).await;
-    assert!(result.is_err());
+    let result = state.set_status(GoalStatus::Complete).await;
+    assert!(result.is_err(), "无 goal 时 set_status 应失败");
 }
 
 #[tokio::test]
@@ -165,13 +168,16 @@ async fn test_set_status_complete_清零_pending_user_message() {
 }
 
 #[tokio::test]
-async fn test_set_status_paused_保留_pending_user_message() {
+async fn test_set_status_blocked_清零_pending_user_message() {
     let state = make_state();
     state.set_goal("测试".to_string(), None).await.unwrap();
-    state.put_pending_user_message("保留".to_string());
+    state.put_pending_user_message("待清空".to_string());
 
-    state.set_status(GoalStatus::Paused).await.unwrap();
-    assert_eq!(state.take_pending_user_message().as_deref(), Some("保留"));
+    state
+        .set_status_with_reason(GoalStatus::Blocked, "阻塞原因".to_string())
+        .await
+        .unwrap();
+    assert!(state.take_pending_user_message().is_none());
 }
 
 #[tokio::test]
@@ -245,4 +251,75 @@ async fn test_usage_pct_基于_flushed_值() {
 
     let snap = state.snapshot();
     assert!((snap.usage_pct().unwrap() - 0.8).abs() < 0.01);
+}
+
+#[tokio::test]
+async fn test_increment_continuation_updates_snapshot() {
+    let state = make_state();
+    state.set_goal("测试".to_string(), None).await.unwrap();
+
+    GoalController::increment_continuation(&state)
+        .await
+        .unwrap();
+    GoalController::increment_continuation(&state)
+        .await
+        .unwrap();
+
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.continuation_count, 2);
+}
+
+// ---- GoalController trait 实现测试 ----
+
+use peri_acp_types::goal::{GoalController, GoalStore};
+
+#[tokio::test]
+async fn test_goal_controller_create_duplicate_errors() {
+    let store = Arc::new(InMemoryGoalStore::new()) as Arc<dyn GoalStore>;
+    let state = GoalState::new(store, "thread-1".to_string());
+
+    // 第一次 create 成功
+    state.create_goal("测试目标".to_string()).await.unwrap();
+
+    // 第二次 create 报错
+    let result = state.create_goal("另一个目标".to_string()).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("已存在"));
+}
+
+#[tokio::test]
+async fn test_goal_controller_complete() {
+    let store = Arc::new(InMemoryGoalStore::new()) as Arc<dyn GoalStore>;
+    let state = GoalState::new(store, "thread-1".to_string());
+
+    state.create_goal("测试目标".to_string()).await.unwrap();
+    state.complete_goal().await.unwrap();
+
+    let snap = state.snapshot();
+    assert_eq!(snap.status, Some(GoalStatus::Complete));
+}
+
+#[tokio::test]
+async fn test_goal_controller_block_requires_reason() {
+    let store = Arc::new(InMemoryGoalStore::new()) as Arc<dyn GoalStore>;
+    let state = GoalState::new(store, "thread-1".to_string());
+
+    state.create_goal("测试目标".to_string()).await.unwrap();
+    state.block_goal("缺权限".to_string()).await.unwrap();
+
+    let snap = state.snapshot();
+    assert_eq!(snap.status, Some(GoalStatus::Blocked));
+}
+
+#[tokio::test]
+async fn test_goal_controller_terminal_cannot_transition() {
+    let store = Arc::new(InMemoryGoalStore::new()) as Arc<dyn GoalStore>;
+    let state = GoalState::new(store, "thread-1".to_string());
+
+    state.create_goal("测试目标".to_string()).await.unwrap();
+    state.complete_goal().await.unwrap();
+
+    // 终态不能再转
+    let result = state.complete_goal().await;
+    assert!(result.is_err());
 }
